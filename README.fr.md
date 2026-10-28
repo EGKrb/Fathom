@@ -2,7 +2,7 @@
 
 # Fathom
 
-<img width="100" src="src/bug_black.png" alt="Fathom"/>
+<img width="100" src="src/fathom-logo.png" alt="Fathom"/>
 
 **Fathom** — une boîte à outils Windows de rétro-ingénierie et de forensic mémoire, de l'instruction isolée à la machine entière. Elle est **construite sur [x64dbg](https://github.com/x64dbg/x64dbg)** (GPL-3.0), le débogueur open source pour Windows (analyse de malwares, rétro-ingénierie d'exécutables sans code source), dont elle reprend la branche `development` officielle, et ajoute :
 

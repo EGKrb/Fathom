@@ -1,6 +1,6 @@
 # Fathom
 
-<img width="100" src="src/bug_black.png" alt="Fathom"/>
+<img width="100" src="src/fathom-logo.png" alt="Fathom"/>
 
 **Fathom** — a Windows reverse-engineering and memory-forensics toolkit, from a single instruction to the whole machine. It is **built on [x64dbg](https://github.com/x64dbg/x64dbg)** (GPL-3.0), the open-source Windows debugger (malware analysis, reverse-engineering of executables without source code), tracks its official `development` branch, and adds, for **malware triage, reverse-engineering and CTF**:
 
