@@ -1149,9 +1149,9 @@ endif()
 if(CMAKE_SIZEOF_VOID_P EQUAL 4) # x86
 	set(launcher_SOURCES
 		cmake.toml
-		"src/exe/icon.rc"
 		"src/exe/resource.rc"
 		"src/exe/strings_utf8.rc"
+		"src/launcher/fathom.rc"
 		"src/launcher/x64dbg_launcher.cpp"
 	)
 

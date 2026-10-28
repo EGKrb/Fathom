@@ -276,7 +276,7 @@ condition = "x86"
 msvc-runtime = "static"
 sources = [
     "src/launcher/*.cpp",
-    "src/exe/icon.rc",
+    "src/launcher/fathom.rc",
     "src/exe/resource.rc",
     "src/exe/strings_utf8.rc",
 ]

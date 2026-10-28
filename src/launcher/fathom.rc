@@ -1,0 +1,4 @@
+// Fathom launcher icon — applies to Fathom.exe only.
+// The debugger engine (x64dbg.exe / x32dbg.exe) keeps src/bug.ico via src/exe/icon.rc.
+// ID 100 matches IDI_ICON1 (see src/exe/icon.h) so the launcher's LoadIcon still resolves.
+100 ICON "fathom.ico"
