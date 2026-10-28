@@ -1,0 +1,222 @@
+<html>
+<body>
+<pre>
+<h1>Build Log</h1>
+<h3>
+--------------------Configuration: dm - Win32 Debug--------------------
+</h3>
+<h3>Command Lines</h3>
+Creating temporary file "C:\DOCUME~1\ADMINI~1.F44\LOCALS~1\Temp\RSP54B.tmp" with contents
+[
+/nologo /MTd /W3 /Gm /GX /ZI /Od /I "p_i386" /I "..\..\langapi\include" /I "..\..\langapi\debugger" /I "..\..\debugger\od\include" /I "..\..\debugger\include" /I "..\..\include" /I "..\..\sapi\inc" /I "debugger\em" /D "WIN32" /D "_DEBUG" /D "_WINDOWS" /D "_MBCS" /D "_USRDLL" /D "DM_EXPORTS" /Fo"Debug/" /Fd"Debug/" /FD /GZ /c 
+"F:\Project\debuger\windbg64\debugger\dm\dmole.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\dmsql.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\i386troj.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\process.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\sqlinfo.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\userapi.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\wow.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\bp.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\cache.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\com.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\dmdisasm.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\dmx32.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\event.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\funccall.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\i386d3dm.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\i386mach.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\i386thnk.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\kdwow.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\packet.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\procem.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\splay.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\step.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\support.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\util.cpp"
+"F:\Project\debuger\windbg64\debugger\dm\walk.cpp"
+]
+Creating command line "cl.exe @C:\DOCUME~1\ADMINI~1.F44\LOCALS~1\Temp\RSP54B.tmp" 
+Creating temporary file "C:\DOCUME~1\ADMINI~1.F44\LOCALS~1\Temp\RSP54C.tmp" with contents
+[
+kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib odbc32.lib odbccp32.lib /nologo /dll /incremental:yes /pdb:"Debug/dm.pdb" /debug /machine:I386 /def:".\p_i386\dmkdx86.def" /out:"Debug/dm.dll" /implib:"Debug/dm.lib" /pdbtype:sept 
+.\Debug\dmole.obj
+.\Debug\dmsql.obj
+.\Debug\i386troj.obj
+.\Debug\process.obj
+.\Debug\sqlinfo.obj
+.\Debug\userapi.obj
+.\Debug\wow.obj
+.\Debug\bp.obj
+.\Debug\cache.obj
+.\Debug\com.obj
+.\Debug\dmdisasm.obj
+.\Debug\dmx32.obj
+.\Debug\event.obj
+.\Debug\funccall.obj
+.\Debug\i386d3dm.obj
+.\Debug\i386mach.obj
+.\Debug\i386thnk.obj
+.\Debug\kdwow.obj
+.\Debug\packet.obj
+.\Debug\procem.obj
+.\Debug\splay.obj
+.\Debug\step.obj
+.\Debug\support.obj
+.\Debug\util.obj
+.\Debug\walk.obj
+]
+Creating command line "link.exe @C:\DOCUME~1\ADMINI~1.F44\LOCALS~1\Temp\RSP54C.tmp"
+<h3>Output Window</h3>
+Compiling...
+dmole.cpp
+Compiling for target = x86
+typedef struct _DBB
+f:\project\debuger\windbg64\debugger\dm\dmole.cpp(113) : warning C4305: 'initializing' : truncation from 'const int' to 'unsigned char'
+f:\project\debuger\windbg64\debugger\dm\dmole.cpp(113) : warning C4309: 'initializing' : truncation of constant value
+f:\project\debuger\windbg64\debugger\dm\dmole.cpp(119) : warning C4305: 'initializing' : truncation from 'const int' to 'unsigned char'
+f:\project\debuger\windbg64\debugger\dm\dmole.cpp(119) : warning C4309: 'initializing' : truncation of constant value
+NYI: dbceFrameWithSrc
+f:\project\debuger\windbg64\debugger\dm\dmole.cpp(398) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\dmole.cpp(413) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\dmole.cpp(772) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\dmole.cpp(1024) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\dmole.cpp(1035) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\dmole.cpp(1057) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\dmole.cpp(1124) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\dmole.cpp(1245) : warning C4390: ';' : empty controlled statement found; is this the intent?
+f:\project\debuger\windbg64\debugger\dm\dmole.cpp(1720) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+dmsql.cpp
+i386troj.cpp
+Compiling for target = x86
+typedef struct _DBB
+Compiling for target = x86
+typedef struct _DBB
+f:\project\debuger\windbg64\debugger\dm\i386troj.cpp(227) : warning C4390: ';' : empty controlled statement found; is this the intent?
+f:\project\debuger\windbg64\debugger\dm\i386troj.cpp(237) : warning C4390: ';' : empty controlled statement found; is this the intent?
+f:\project\debuger\windbg64\debugger\dm\i386troj.cpp(258) : warning C4390: ';' : empty controlled statement found; is this the intent?
+f:\project\debuger\windbg64\debugger\dm\i386troj.cpp(284) : warning C4390: ';' : empty controlled statement found; is this the intent?
+f:\project\debuger\windbg64\debugger\dm\i386troj.cpp(290) : warning C4390: ';' : empty controlled statement found; is this the intent?
+f:\project\debuger\windbg64\debugger\dm\i386troj.cpp(330) : warning C4101: 'pexevsave' : unreferenced local variable
+process.cpp
+sqlinfo.cpp
+Compiling for target = x86
+typedef struct _DBB
+userapi.cpp
+Compiling for target = x86
+typedef struct _DBB
+Compiling for target = x86
+typedef struct _DBB
+f:\project\debuger\windbg64\debugger\dm\userapi.cpp(909) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\userapi.cpp(942) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\userapi.cpp(953) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\userapi.cpp(1447) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\userapi.cpp(1823) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\userapi.cpp(1838) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\userapi.cpp(1854) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\userapi.cpp(1974) : warning C4101: 'pbp' : unreferenced local variable
+f:\project\debuger\windbg64\debugger\dm\userapi.cpp(1973) : warning C4101: 'pbpT' : unreferenced local variable
+f:\project\debuger\windbg64\debugger\dm\userapi.cpp(2564) : warning C4101: 'CanStep' : unreferenced local variable
+f:\project\debuger\windbg64\debugger\dm\userapi.cpp(2676) : warning C4101: 'bp' : unreferenced local variable
+f:\project\debuger\windbg64\debugger\dm\userapi.cpp(3409) : warning C4390: ';' : empty controlled statement found; is this the intent?
+f:\project\debuger\windbg64\debugger\dm\userapi.cpp(3629) : warning C4390: ';' : empty controlled statement found; is this the intent?
+f:\project\debuger\windbg64\debugger\dm\userapi.cpp(4038) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\userapi.cpp(4045) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\userapi.cpp(4432) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\userapi.cpp(3861) : warning C4101: 'addr' : unreferenced local variable
+wow.cpp
+bp.cpp
+Compiling for target = x86
+typedef struct _DBB
+cache.cpp
+Compiling for target = x86
+typedef struct _DBB
+com.cpp
+Compiling for target = x86
+typedef struct _DBB
+dmdisasm.cpp
+Compiling for target = x86
+typedef struct _DBB
+dmx32.cpp
+Compiling for target = x86
+typedef struct _DBB
+Compiling for target = x86
+typedef struct _DBB
+f:\project\debuger\windbg64\debugger\dm\dmx32.cpp(660) : warning C4101: 'i' : unreferenced local variable
+f:\project\debuger\windbg64\debugger\dm\dmx32.cpp(659) : warning C4101: 'CrashModule' : unreferenced local variable
+f:\project\debuger\windbg64\debugger\dm\dmx32.cpp(1716) : warning C4101: 'StartAddr' : unreferenced local variable
+f:\project\debuger\windbg64\debugger\dm\dmx32.cpp(2076) : warning C4200: nonstandard extension used : zero-sized array in struct/union
+f:\project\debuger\windbg64\debugger\dm\dmx32.cpp(2107) : warning C4244: '=' : conversion from 'unsigned long' to 'unsigned short', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\dmx32.cpp(4708) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\dmx32.cpp(8481) : warning C4390: ';' : empty controlled statement found; is this the intent?
+event.cpp
+funccall.cpp
+Compiling for target = x86
+typedef struct _DBB
+i386d3dm.cpp
+Compiling for target = x86
+typedef struct _DBB
+i386mach.cpp
+Compiling for target = x86
+typedef struct _DBB
+Compiling for target = x86
+typedef struct _DBB
+f:\project\debuger\windbg64\debugger\dm\i386mach.cpp(1476) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+i386thnk.cpp
+Compiling for target = x86
+typedef struct _DBB
+f:\project\debuger\windbg64\debugger\dm\i386thnk.cpp(380) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\i386thnk.cpp(442) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\i386thnk.cpp(458) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+kdwow.cpp
+packet.cpp
+Compiling for target = x86
+typedef struct _DBB
+procem.cpp
+Compiling for target = x86
+typedef struct _DBB
+Generating Code...
+Compiling for target = x86
+typedef struct _DBB
+Compiling...
+splay.cpp
+step.cpp
+Compiling for target = x86
+typedef struct _DBB
+Compiling for target = x86
+typedef struct _DBB
+f:\project\debuger\windbg64\debugger\dm\step.cpp(214) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+support.cpp
+util.cpp
+Compiling for target = x86
+typedef struct _DBB
+Compiling for target = x86
+typedef struct _DBB
+f:\project\debuger\windbg64\debugger\dm\util.cpp(188) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\util.cpp(451) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\util.cpp(738) : warning C4390: ';' : empty controlled statement found; is this the intent?
+f:\project\debuger\windbg64\debugger\dm\util.cpp(747) : warning C4390: ';' : empty controlled statement found; is this the intent?
+f:\project\debuger\windbg64\debugger\dm\util.cpp(759) : warning C4390: ';' : empty controlled statement found; is this the intent?
+f:\project\debuger\windbg64\debugger\dm\util.cpp(777) : warning C4390: ';' : empty controlled statement found; is this the intent?
+f:\project\debuger\windbg64\debugger\dm\util.cpp(781) : warning C4390: ';' : empty controlled statement found; is this the intent?
+f:\project\debuger\windbg64\debugger\dm\util.cpp(799) : warning C4390: ';' : empty controlled statement found; is this the intent?
+f:\project\debuger\windbg64\debugger\dm\util.cpp(805) : warning C4390: ';' : empty controlled statement found; is this the intent?
+f:\project\debuger\windbg64\debugger\dm\util.cpp(879) : warning C4390: ';' : empty controlled statement found; is this the intent?
+f:\project\debuger\windbg64\debugger\dm\util.cpp(913) : warning C4390: ';' : empty controlled statement found; is this the intent?
+f:\project\debuger\windbg64\debugger\dm\util.cpp(972) : warning C4244: '=' : conversion from 'unsigned long' to 'unsigned short', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\util.cpp(1042) : warning C4244: '=' : conversion from 'unsigned long' to 'unsigned short', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\util.cpp(1252) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+walk.cpp
+Compiling for target = x86
+typedef struct _DBB
+f:\project\debuger\windbg64\debugger\dm\walk.cpp(860) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+f:\project\debuger\windbg64\debugger\dm\walk.cpp(1160) : warning C4244: 'argument' : conversion from 'unsigned __int64' to 'unsigned long', possible loss of data
+Generating Code...
+Linking...
+
+
+
+<h3>Results</h3>
+dm.dll - 0 error(s), 64 warning(s)
+</pre>
+</body>
+</html>

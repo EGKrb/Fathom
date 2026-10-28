@@ -1,0 +1,539 @@
+<html>
+<body>
+<pre>
+<h1>Build Log</h1>
+<h3>
+--------------------Configuration: windbg - Win32 Debug--------------------
+</h3>
+<h3>Command Lines</h3>
+Creating temporary file "C:\DOCUME~1\ADMINI~1.F44\LOCALS~1\Temp\RSP312.tmp" with contents
+[
+/nologo /MLd /W3 /Gm /GX /ZI /Od /I "\." /I "langapi\include" /I "langapi\debugger" /I ".\windbg\include" /I ".\debugger\include" /I "include" /I "windbg\include" /I "debugger\wrkspc" /I "langapi\undname" /I "debugger\od" /I "debugger\od\include" /I "lib" /I "debugger\em" /D "WIN32" /D "_DEBUG" /D "_CONSOLE" /D "_MBCS" /FR"Debug/" /Fp"Debug/windbg.pch" /YX /Fo"Debug/" /Fd"Debug/" /FD /GZ /GZ /c 
+"F:\Project\debuger\windbg64\windbg\apisupp.cpp"
+"F:\Project\debuger\windbg64\windbg\arrange.cpp"
+"F:\Project\debuger\windbg64\windbg\breakpts.cpp"
+"F:\Project\debuger\windbg64\windbg\brkpt0.cpp"
+"F:\Project\debuger\windbg64\windbg\callswin.cpp"
+"F:\Project\debuger\windbg64\windbg\cl.cpp"
+"F:\Project\debuger\windbg64\windbg\cmdexec0.cpp"
+"F:\Project\debuger\windbg64\windbg\cmdexec1.cpp"
+"F:\Project\debuger\windbg64\windbg\cmdexec2.cpp"
+"F:\Project\debuger\windbg64\windbg\cmdwin.cpp"
+"F:\Project\debuger\windbg64\windbg\codemgr.cpp"
+"F:\Project\debuger\windbg64\windbg\colors.cpp"
+"F:\Project\debuger\windbg64\windbg\confirm.cpp"
+"F:\Project\debuger\windbg64\windbg\cp.cpp"
+"F:\Project\debuger\windbg64\windbg\cpuwin.cpp"
+"F:\Project\debuger\windbg64\windbg\cvextras.cpp"
+"F:\Project\debuger\windbg64\windbg\data.cpp"
+"F:\Project\debuger\windbg64\windbg\dbgext.cpp"
+"F:\Project\debuger\windbg64\windbg\dbugdll.cpp"
+"F:\Project\debuger\windbg64\windbg\dbugexcp.cpp"
+"F:\Project\debuger\windbg64\windbg\disasm.cpp"
+"F:\Project\debuger\windbg64\windbg\docfile.cpp"
+"F:\Project\debuger\windbg64\windbg\document.cpp"
+"F:\Project\debuger\windbg64\windbg\edit.cpp"
+"F:\Project\debuger\windbg64\windbg\editutil.cpp"
+"F:\Project\debuger\windbg64\windbg\environ.cpp"
+"F:\Project\debuger\windbg64\windbg\find.cpp"
+"F:\Project\debuger\windbg64\windbg\findnext.cpp"
+"F:\Project\debuger\windbg64\windbg\findrep.cpp"
+"F:\Project\debuger\windbg64\windbg\fonts.cpp"
+"F:\Project\debuger\windbg64\windbg\function.cpp"
+"F:\Project\debuger\windbg64\windbg\init.cpp"
+"F:\Project\debuger\windbg64\windbg\kdopt.cpp"
+"F:\Project\debuger\windbg64\windbg\line.cpp"
+"F:\Project\debuger\windbg64\windbg\linklist.cpp"
+"F:\Project\debuger\windbg64\windbg\localwin.cpp"
+"F:\Project\debuger\windbg64\windbg\makeeng.cpp"
+"F:\Project\debuger\windbg64\windbg\memory.cpp"
+"F:\Project\debuger\windbg64\windbg\memwin.cpp"
+"F:\Project\debuger\windbg64\windbg\menu.cpp"
+"F:\Project\debuger\windbg64\windbg\ncmdwin.cpp"
+"F:\Project\debuger\windbg64\windbg\newrem.cpp"
+"F:\Project\debuger\windbg64\windbg\ntexpr.cpp"
+"F:\Project\debuger\windbg64\windbg\ntsdsup.cpp"
+"F:\Project\debuger\windbg64\windbg\old_wksp.cpp"
+"F:\Project\debuger\windbg64\windbg\optsheet.cpp"
+"F:\Project\debuger\windbg64\windbg\panemgr.cpp"
+"F:\Project\debuger\windbg64\windbg\paneopt.cpp"
+"F:\Project\debuger\windbg64\windbg\paneuser.cpp"
+"F:\Project\debuger\windbg64\windbg\pidtid.cpp"
+"F:\Project\debuger\windbg64\windbg\pipeex.cpp"
+"F:\Project\debuger\windbg64\windbg\process.cpp"
+"F:\Project\debuger\windbg64\windbg\program.cpp"
+"F:\Project\debuger\windbg64\windbg\quickw.cpp"
+"F:\Project\debuger\windbg64\windbg\re_mi.cpp"
+"F:\Project\debuger\windbg64\windbg\remote.cpp"
+"F:\Project\debuger\windbg64\windbg\reparse.cpp"
+"F:\Project\debuger\windbg64\windbg\replace.cpp"
+"F:\Project\debuger\windbg64\windbg\setbreak.cpp"
+"F:\Project\debuger\windbg64\windbg\status.cpp"
+"F:\Project\debuger\windbg64\windbg\tasklist.cpp"
+"F:\Project\debuger\windbg64\windbg\thread.cpp"
+"F:\Project\debuger\windbg64\windbg\toolbar.cpp"
+"F:\Project\debuger\windbg64\windbg\undoredo.cpp"
+"F:\Project\debuger\windbg64\windbg\userctrl.cpp"
+"F:\Project\debuger\windbg64\windbg\userdll.cpp"
+"F:\Project\debuger\windbg64\windbg\util.cpp"
+"F:\Project\debuger\windbg64\windbg\util2.cpp"
+"F:\Project\debuger\windbg64\windbg\vib.cpp"
+"F:\Project\debuger\windbg64\windbg\watch.cpp"
+"F:\Project\debuger\windbg64\windbg\watchwin.cpp"
+"F:\Project\debuger\windbg64\windbg\wcrash.cpp"
+"F:\Project\debuger\windbg64\windbg\windbg.cpp"
+"F:\Project\debuger\windbg64\windbg\wrkspace.cpp"
+"F:\Project\debuger\windbg64\langapi\debugger\orpc_dbg.cpp"
+"F:\Project\debuger\windbg64\debugger\wrkspc\windbgrm.cpp"
+"F:\Project\debuger\windbg64\debugger\wrkspc\wrk_windbg.cpp"
+"F:\Project\debuger\windbg64\debugger\wrkspc\ws_defs.cpp"
+"F:\Project\debuger\windbg64\debugger\wrkspc\ws_impl.cpp"
+"F:\Project\debuger\windbg64\debugger\wrkspc\ws_items.cpp"
+"F:\Project\debuger\windbg64\debugger\wrkspc\ws_misc.cpp"
+"F:\Project\debuger\windbg64\debugger\ee\debapi.cpp"
+"F:\Project\debuger\windbg64\debugger\ee\debbind.cpp"
+"F:\Project\debuger\windbg64\debugger\ee\deberr.cpp"
+"F:\Project\debuger\windbg64\debugger\ee\debeval.cpp"
+"F:\Project\debuger\windbg64\debugger\ee\debfmt.cpp"
+"F:\Project\debuger\windbg64\debugger\ee\deblex.cpp"
+"F:\Project\debuger\windbg64\debugger\ee\deblexr.cpp"
+"F:\Project\debuger\windbg64\debugger\ee\debparse.cpp"
+"F:\Project\debuger\windbg64\debugger\ee\debsrch.cpp"
+"F:\Project\debuger\windbg64\debugger\ee\debsup.cpp"
+"F:\Project\debuger\windbg64\debugger\ee\debsym.cpp"
+"F:\Project\debuger\windbg64\debugger\ee\debtree.cpp"
+"F:\Project\debuger\windbg64\debugger\ee\debtyper.cpp"
+"F:\Project\debuger\windbg64\debugger\ee\debutil.cpp"
+"F:\Project\debuger\windbg64\debugger\ee\debwalk.cpp"
+"F:\Project\debuger\windbg64\debugger\ee\dllmain.cpp"
+"F:\Project\debuger\windbg64\debugger\ee\ldouble.cpp"
+"F:\Project\debuger\windbg64\debugger\od\od.cpp"
+"F:\Project\debuger\windbg64\lib\assrt.c"
+"F:\Project\debuger\windbg64\lib\atold.c"
+"F:\Project\debuger\windbg64\lib\cfin.c"
+"F:\Project\debuger\windbg64\lib\cfout.c"
+"F:\Project\debuger\windbg64\lib\constpow.c"
+"F:\Project\debuger\windbg64\lib\cvt.c"
+"F:\Project\debuger\windbg64\lib\heap.c"
+"F:\Project\debuger\windbg64\lib\intrncvt.c"
+"F:\Project\debuger\windbg64\lib\mantold.c"
+"F:\Project\debuger\windbg64\lib\strgtold.c"
+"F:\Project\debuger\windbg64\lib\strtoli.c"
+"F:\Project\debuger\windbg64\lib\tenpow.c"
+"F:\Project\debuger\windbg64\lib\x10fout.c"
+]
+Creating command line "cl.exe @C:\DOCUME~1\ADMINI~1.F44\LOCALS~1\Temp\RSP312.tmp" 
+Creating temporary file "C:\DOCUME~1\ADMINI~1.F44\LOCALS~1\Temp\RSP313.tmp" with contents
+[
+kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib odbc32.lib odbccp32.lib /nologo /subsystem:windows /incremental:yes /pdb:"Debug/windbg.pdb" /debug /machine:I386 /out:"Debug/windbg.exe" /pdbtype:sept 
+.\Debug\apisupp.obj
+.\Debug\arrange.obj
+.\Debug\breakpts.obj
+.\Debug\brkpt0.obj
+.\Debug\callswin.obj
+.\Debug\cl.obj
+.\Debug\cmdexec0.obj
+.\Debug\cmdexec1.obj
+.\Debug\cmdexec2.obj
+.\Debug\cmdwin.obj
+.\Debug\codemgr.obj
+.\Debug\colors.obj
+.\Debug\confirm.obj
+.\Debug\cp.obj
+.\Debug\cpuwin.obj
+.\Debug\cvextras.obj
+.\Debug\data.obj
+.\Debug\dbgext.obj
+.\Debug\dbugdll.obj
+.\Debug\dbugexcp.obj
+.\Debug\disasm.obj
+.\Debug\docfile.obj
+.\Debug\document.obj
+.\Debug\edit.obj
+.\Debug\editutil.obj
+.\Debug\environ.obj
+.\Debug\find.obj
+.\Debug\findnext.obj
+.\Debug\findrep.obj
+.\Debug\fonts.obj
+.\Debug\function.obj
+.\Debug\init.obj
+.\Debug\kdopt.obj
+.\Debug\line.obj
+.\Debug\linklist.obj
+.\Debug\localwin.obj
+.\Debug\makeeng.obj
+.\Debug\memory.obj
+.\Debug\memwin.obj
+.\Debug\menu.obj
+.\Debug\ncmdwin.obj
+.\Debug\newrem.obj
+.\Debug\ntexpr.obj
+.\Debug\ntsdsup.obj
+.\Debug\old_wksp.obj
+.\Debug\optsheet.obj
+.\Debug\panemgr.obj
+.\Debug\paneopt.obj
+.\Debug\paneuser.obj
+.\Debug\pidtid.obj
+.\Debug\pipeex.obj
+.\Debug\process.obj
+.\Debug\program.obj
+.\Debug\quickw.obj
+.\Debug\re_mi.obj
+.\Debug\remote.obj
+.\Debug\reparse.obj
+.\Debug\replace.obj
+.\Debug\setbreak.obj
+.\Debug\status.obj
+.\Debug\tasklist.obj
+.\Debug\thread.obj
+.\Debug\toolbar.obj
+.\Debug\undoredo.obj
+.\Debug\userctrl.obj
+.\Debug\userdll.obj
+.\Debug\util.obj
+.\Debug\util2.obj
+.\Debug\vib.obj
+.\Debug\watch.obj
+.\Debug\watchwin.obj
+.\Debug\wcrash.obj
+.\Debug\windbg.obj
+.\Debug\wrkspace.obj
+.\Debug\orpc_dbg.obj
+.\Debug\windbgrm.obj
+.\Debug\wrk_windbg.obj
+.\Debug\ws_defs.obj
+.\Debug\ws_impl.obj
+.\Debug\ws_items.obj
+.\Debug\ws_misc.obj
+.\Debug\debapi.obj
+.\Debug\debbind.obj
+.\Debug\deberr.obj
+.\Debug\debeval.obj
+.\Debug\debfmt.obj
+.\Debug\deblex.obj
+.\Debug\deblexr.obj
+.\Debug\debparse.obj
+.\Debug\debsrch.obj
+.\Debug\debsup.obj
+.\Debug\debsym.obj
+.\Debug\debtree.obj
+.\Debug\debtyper.obj
+.\Debug\debutil.obj
+.\Debug\debwalk.obj
+.\Debug\dllmain.obj
+.\Debug\ldouble.obj
+.\Debug\od.obj
+.\Debug\assrt.obj
+.\Debug\atold.obj
+.\Debug\cfin.obj
+.\Debug\cfout.obj
+.\Debug\constpow.obj
+.\Debug\cvt.obj
+.\Debug\heap.obj
+.\Debug\intrncvt.obj
+.\Debug\mantold.obj
+.\Debug\strgtold.obj
+.\Debug\strtoli.obj
+.\Debug\tenpow.obj
+.\Debug\x10fout.obj
+.\Debug\windbg.res
+]
+Creating command line "link.exe @C:\DOCUME~1\ADMINI~1.F44\LOCALS~1\Temp\RSP313.tmp"
+<h3>Output Window</h3>
+Compiling...
+apisupp.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+arrange.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+breakpts.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+brkpt0.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+callswin.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+cl.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+cmdexec0.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+cmdexec1.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+cmdexec2.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+cmdwin.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+codemgr.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+colors.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+confirm.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+cp.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+f:\project\debuger\windbg64\windbg\include\ntsdtok.h(6) : warning C4005: 'ARRAYSIZE' : macro redefinition
+        d:\program files\microsoft visual studio\vc98\include\winnt.h(950) : see previous definition of 'ARRAYSIZE'
+cpuwin.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+cvextras.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+data.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+dbgext.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+dbugdll.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+dbugexcp.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+disasm.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+docfile.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+document.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+edit.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+editutil.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+environ.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+find.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+findnext.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+findrep.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+fonts.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+function.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+init.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+kdopt.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+line.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+linklist.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+localwin.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+makeeng.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+memory.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+memwin.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+menu.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+ncmdwin.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+newrem.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+ntexpr.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+f:\project\debuger\windbg64\windbg\include\ntsdtok.h(6) : warning C4005: 'ARRAYSIZE' : macro redefinition
+        d:\program files\microsoft visual studio\vc98\include\winnt.h(950) : see previous definition of 'ARRAYSIZE'
+ntsdsup.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+old_wksp.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+optsheet.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+panemgr.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+paneopt.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+paneuser.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+pidtid.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+pipeex.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+process.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+program.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+quickw.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+re_mi.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+remote.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+reparse.cpp
+f:\project\debuger\windbg64\debugger\include\sundown.h(36) : error C2011: '_EXCEPTION_RECORD32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(53) : error C2011: 'LIST_ENTRY32' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(84) : error C2011: '_EXCEPTION_RECORD64' : 'struct' type redefinition
+f:\project\debuger\windbg64\debugger\include\sundown.h(1666) : error C2011: 'LIST_ENTRY64' : 'struct' type redefinition
+cl.exe terminated at user request.
+
+</pre>
+</body>
+</html>
