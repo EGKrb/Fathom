@@ -14,7 +14,7 @@ Steps:
   2. runs cmake\release.cmake (official layout: release\, pluginsdk\, pdb\)
   3. adds ScyllaHide and xAnalyzer (official downloads, SHA-256 checked) and pybridge
   4. adds the Python client, examples, headless templates, HvKdFusion, licenses and LISEZMOI.md
-  5. writes dist\x64dbg-egkrb_<Version>.zip and dist\x64dbg-egkrb_<Version>_symbols.zip
+  5. writes dist\<Name>_<Version>.zip and dist\<Name>_<Version>_symbols.zip (Name defaults to Fathom)
 
 OllyDumpEx is not redistributable: the archive contains install-plugins.ps1 to download it.
 
@@ -23,7 +23,8 @@ OllyDumpEx is not redistributable: the archive contains install-plugins.ps1 to d
 #>
 param(
     [string] $Version = (Get-Date -Format 'yyyy.MM.dd'),
-    [string] $OutDir
+    [string] $OutDir,
+    [string] $Name = 'Fathom'   # archive base name: Fathom_<Version>.zip
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,7 +38,7 @@ function Invoke-Download([string] $Url, [string] $File) {
 
 # 0. Checks
 $required = @(
-    'bin\x64\x64dbg.exe', 'bin\x64\headless.exe', 'bin\x32\x32dbg.exe', 'bin\x32\headless.exe', 'bin\x96dbg.exe',
+    'bin\x64\x64dbg.exe', 'bin\x64\headless.exe', 'bin\x32\x32dbg.exe', 'bin\x32\headless.exe', 'bin\Fathom.exe',
     'pybridge\build-x64\pybridge.dp64', 'pybridge\build-x32\pybridge.dp32',
     'extracmds\build-x64\ExtraCmds.dp64', 'extracmds\build-x32\ExtraCmds.dp32',
     'build-cross-x64\minidump.exe'
@@ -112,8 +113,8 @@ $readme = $readme.Replace('%VERSION%', $Version).Replace('%COMMIT%', $commit)
 
 # 5. Archives
 New-Item -ItemType Directory -Force $OutDir | Out-Null
-$zip = Join-Path $OutDir "x64dbg-egkrb_$Version.zip"
-$symbols = Join-Path $OutDir "x64dbg-egkrb_${Version}_symbols.zip"
+$zip = Join-Path $OutDir "${Name}_$Version.zip"
+$symbols = Join-Path $OutDir "${Name}_${Version}_symbols.zip"
 Remove-Item -Force $zip, $symbols, (Join-Path $OutDir 'SHA256SUMS.txt') -ErrorAction SilentlyContinue
 Compress-Archive -CompressionLevel Optimal -Path (Join-Path $package 'release'), (Join-Path $package 'pluginsdk'), (Join-Path $package 'commithash.txt') -DestinationPath $zip
 Compress-Archive -CompressionLevel Optimal -Path (Join-Path $package 'pdb'), (Join-Path $package 'commithash.txt') -DestinationPath $symbols

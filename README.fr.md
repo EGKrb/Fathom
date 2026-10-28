@@ -40,7 +40,7 @@
 
 1. Téléchargez `x64dbg-egkrb_<version>.zip` depuis la [page des releases](https://github.com/EGKrb/x64dbg/releases/latest).
 2. Extrayez-le dans un dossier **où vous avez le droit d'écrire** (par exemple `C:\Outils\x64dbg`, pas `C:\Program Files`) : x64dbg enregistre sa configuration (`x64dbg.ini`) et ses bases de données (`db\`) à côté des exécutables.
-3. Lancez `release\x96dbg.exe` (lanceur qui choisit la bonne architecture), ou directement `release\x64\x64dbg.exe` pour un programme 64 bits et `release\x32\x32dbg.exe` pour un programme 32 bits.
+3. Lancez `release\Fathom.exe` (lanceur qui choisit la bonne architecture), ou directement `release\x64\x64dbg.exe` pour un programme 64 bits et `release\x32\x32dbg.exe` pour un programme 32 bits.
 4. Facultatif : installez OllyDumpEx (non redistribuable, voir [Plugins inclus](#plugins-inclus)) :
    ```powershell
    cd release
@@ -51,7 +51,7 @@ Contenu de l'archive :
 
 ```
 release\
-  x96dbg.exe                 lanceur
+  Fathom.exe                 lanceur
   x64\  x32\                 débogueur 64 / 32 bits, headless.exe, plugins\
   x64\minidump.exe           visualiseur de dumps mémoire (.dmp)
   translations\              interface traduite (dont le français : Options > Langue)

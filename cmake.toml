@@ -291,6 +291,6 @@ link-libraries = [
 ]
 
 [target.launcher.properties]
-OUTPUT_NAME = "x96dbg"
+OUTPUT_NAME = "Fathom"
 WIN32_EXECUTABLE = "ON"
 X64DBG_BUILD_IN_TREE.RUNTIME_OUTPUT_DIRECTORY = "${PROJECT_SOURCE_DIR}/bin"

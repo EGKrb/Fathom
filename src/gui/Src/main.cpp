@@ -169,6 +169,10 @@ int main(int argc, char* argv[])
 {
     handleHighDpiScaling();
     MyApplication application(argc, argv);
+    // Fathom branding: the main window title is QCoreApplication::applicationName(), which otherwise
+    // defaults to the executable base name ("x64dbg"/"x32dbg"). The engine executables keep their
+    // names (plugins and the SDK depend on them); only the displayed product name changes here.
+    application.setApplicationName("Fathom");
 
 #if QT_VERSION < QT_VERSION_CHECK(5,0,0)
     QAbstractEventDispatcher::instance(application.thread())->setEventFilter(MyApplication::globalEventFilter);

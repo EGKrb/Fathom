@@ -82,7 +82,7 @@ handle_deps_copied("x32")
 file(COPY "${ROOT_DIR}/bin/themes/" DESTINATION "${RELEASE_MAIN_DIR}/themes")
 
 # Copy main files
-file(COPY "${ROOT_DIR}/bin/x96dbg.exe" DESTINATION "${RELEASE_MAIN_DIR}")
+file(COPY "${ROOT_DIR}/bin/Fathom.exe" DESTINATION "${RELEASE_MAIN_DIR}")
 file(COPY "${ROOT_DIR}/bin/mnemdb.json" DESTINATION "${RELEASE_MAIN_DIR}")
 file(COPY "${ROOT_DIR}/bin/errordb.txt" DESTINATION "${RELEASE_MAIN_DIR}")
 file(COPY "${ROOT_DIR}/bin/exceptiondb.txt" DESTINATION "${RELEASE_MAIN_DIR}")

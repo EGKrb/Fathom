@@ -74,7 +74,7 @@ TraceExport C:\traces\sample.trace64, C:\traces\sample.json
 
 1. Download `x64dbg-egkrb_<version>.zip` from the [releases page](https://github.com/EGKrb/x64dbg/releases/latest).
 2. Extract it into a folder **you can write to** (e.g. `C:\Tools\x64dbg`, not `C:\Program Files`): x64dbg stores its configuration (`x64dbg.ini`) and databases (`db\`) next to the executables.
-3. Run `release\x96dbg.exe` (launcher that picks the right architecture), or `release\x64\x64dbg.exe` directly for a 64-bit program and `release\x32\x32dbg.exe` for a 32-bit program.
+3. Run `release\Fathom.exe` (launcher that picks the right architecture), or `release\x64\x64dbg.exe` directly for a 64-bit program and `release\x32\x32dbg.exe` for a 32-bit program.
 4. Optional — install OllyDumpEx (not redistributable, see [Bundled plugins](#bundled-plugins)):
    ```powershell
    cd release
@@ -85,7 +85,7 @@ Archive contents:
 
 ```
 release\
-  x96dbg.exe                 launcher
+  Fathom.exe                 launcher
   x64\  x32\                 64 / 32-bit debugger, headless.exe, plugins\
   x64\minidump.exe           memory dump viewer (.dmp)
   translations\              translated UI (French included: Options > Language)
