@@ -53,6 +53,9 @@ $build = Join-Path $root 'build-cross-x64'
 $d = $deps.Replace('\', '/')
 $configure = @(
     '-S', (Join-Path $root 'src\cross'), '-B', $build, '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release',
+    # cpp-httplib rejects the build when CMAKE_SYSTEM_VERSION is reported as 6.2.9200
+    # (the version Windows hands a non-manifested process); pin it to the real host version.
+    "-DCMAKE_SYSTEM_VERSION=$([Environment]::OSVersion.Version)",
     "-DCMAKE_PREFIX_PATH=$($QtDir.Replace('\', '/'))",
     '-DFETCHCONTENT_FULLY_DISCONNECTED=ON',
     "-DFETCHCONTENT_SOURCE_DIR_JSON=$d/json",
