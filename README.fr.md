@@ -1,10 +1,10 @@
 > 🇬🇧 **This README is also available in [English](README.md).**
 
-# x64dbg — fork EGKrb
+# Fathom
 
-<img width="100" src="src/bug_black.png" alt="x64dbg"/>
+<img width="100" src="src/bug_black.png" alt="Fathom"/>
 
-**Fork non officiel de [x64dbg](https://github.com/x64dbg/x64dbg)**, le débogueur open source pour Windows (analyse de malwares, rétro-ingénierie d'exécutables sans code source). Il reprend la branche `development` officielle et ajoute :
+**Fathom** — une boîte à outils Windows de rétro-ingénierie et de forensic mémoire, de l'instruction isolée à la machine entière. Elle est **construite sur [x64dbg](https://github.com/x64dbg/x64dbg)** (GPL-3.0), le débogueur open source pour Windows (analyse de malwares, rétro-ingénierie d'exécutables sans code source), dont elle reprend la branche `development` officielle, et ajoute :
 
 - **`TraceExport`** : conversion des traces d'exécution en **JSON** ou **CSV** lisibles par n'importe quel outil ;
 - **pybridge** : pilotage complet d'x64dbg **depuis Python** (breakpoints, pas à pas, registres, mémoire, traces) ;
