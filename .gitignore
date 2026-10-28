@@ -11,6 +11,8 @@
 /src/**/Win32/
 /src/gui_build/
 /release/
+/hvkdfusion/config.json
+/hvkdfusion/*.raw
 
 # Folders
 .vs/

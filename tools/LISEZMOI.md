@@ -18,7 +18,7 @@ Le dossier doit être dans un emplacement où vous avez le droit d'écrire (pas 
 | ScyllaHide | masque le débogueur aux protections anti-debug (menu Plugins > ScyllaHide > Options). Le profil actif par défaut est « VMProtect x86/x64 » ; choisissez « Basic » pour un programme non protégé si celui-ci se comporte mal |
 | xAnalyzer | analyse automatique : arguments des appels d'API commentés dans le désassemblage (définitions dans `plugins\apis_def`) |
 | pybridge | pilotage depuis Python (`pybridge\README.md`) |
-| ExtraCmds | commandes `.init`, `.save`, `scylla_hide.enable` / `.disable` / `.status` |
+| ExtraCmds | commandes `.init`, `.save`, `scylla_hide.enable` / `.disable` / `.status`, `hvkd`, `hvkd.log`, `hvkd.check`, `wineye` |
 
 **OllyDumpEx** (dump de processus en PE) n'a pas de licence de redistribution : installez-le avec
 
@@ -48,5 +48,14 @@ powershell -ExecutionPolicy Bypass -File .\install-plugins.ps1 -Plugins OllyDump
   ```
   Un dump n'est pas un processus : il s'ouvre dans le visualiseur (mémoire, désassemblage, hexadécimal, threads, registres), pas dans le débogueur.
 
+- HvKdFusion (dossier `hvkdfusion\`) : débogage noyau et forensics mémoire des VM Hyper-V (LiveCloudKd, WinDbg/kd, MemProcFS, ntoseye) et wineye, un REPL façon WinDbg sur les dumps noyau et images mémoire. Les composants tiers ne sont pas inclus : voir `hvkdfusion\README.md`, puis `python hvkdfusion\hvkdfusion.py setup`. Python 3.11+ requis.
+  ```
+  hvkd                            menu interactif (choix de la VM puis de l'action)
+  hvkd.check                      état de chaque composant, dans le journal
+  hvkd dump --vm 0 --out C:\dumps\vm0.raw
+  .init "C:\dumps\vm0.raw"         dump noyau / image brute : ouvert dans wineye
+  wineye --live --vm 0            VM live (gel, reprise, registres)
+  ```
+
 Documentation complète : <https://github.com/EGKrb/x64dbg#readme>
-Licences : dossier `licenses\` (x64dbg et ScyllaHide : GPL-3.0, xAnalyzer : MIT).
+Licences : dossier `licenses\` (x64dbg, ScyllaHide et HvKdFusion : GPL-3.0, xAnalyzer : MIT).

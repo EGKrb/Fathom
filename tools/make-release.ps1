@@ -13,7 +13,7 @@ Steps:
   1. downloads the x64dbg translations (like the official CI)
   2. runs cmake\release.cmake (official layout: release\, pluginsdk\, pdb\)
   3. adds ScyllaHide and xAnalyzer (official downloads, SHA-256 checked) and pybridge
-  4. adds the Python client, examples, headless templates, licenses and LISEZMOI.md
+  4. adds the Python client, examples, headless templates, HvKdFusion, licenses and LISEZMOI.md
   5. writes dist\x64dbg-egkrb_<Version>.zip and dist\x64dbg-egkrb_<Version>_symbols.zip
 
 OllyDumpEx is not redistributable: the archive contains install-plugins.ps1 to download it.
@@ -84,6 +84,13 @@ foreach ($item in 'python', 'examples', 'headless', 'README.md') {
     Copy-Item -Recurse (Join-Path $root "pybridge\$item") $pybridge
 }
 Get-ChildItem -Recurse -Directory $pybridge -Filter '__pycache__' | Remove-Item -Recurse -Force
+
+# HvKdFusion (used by the hvkd/wineye commands of ExtraCmds). config.json holds local paths: not shipped
+$hvkd = Join-Path $main 'hvkdfusion'
+New-Item -ItemType Directory -Force $hvkd | Out-Null
+foreach ($item in 'hvkdfusion.py', 'wineye.py', 'hvkd.ps1', 'config.example.json', 'README.md') {
+    Copy-Item (Join-Path $root "hvkdfusion\$item") $hvkd
+}
 
 # Licenses
 $licenses = Join-Path $main 'licenses'

@@ -12,6 +12,19 @@ Ces plugins ne sont pas développés dans ce dépôt. `install-plugins.ps1` les 
 
 Les textes des licences sont dans le dossier `licenses/` de la release.
 
+## Composants pilotés par HvKdFusion (`hvkdfusion/`)
+
+HvKdFusion (GPL-3.0-or-later, <https://github.com/EGKrb/HvKdFusion>) est livré dans la release, mais **aucun** des composants qu'il pilote : l'utilisateur les installe ou les compile, puis `hvkdfusion.py setup` les localise.
+
+| Composant | Licence | Source | Dans la release |
+|---|---|---|---|
+| LiveCloudKd (`hvlib.dll`, `hvmm.sys`, `LiveCloudKd.exe`) | GPL-3.0 | <https://github.com/gerhart01/LiveCloudKd> | **non** : contient un pilote noyau |
+| MemProcFS (`vmm.dll`, `MemProcFS.exe`) | AGPL-3.0 | <https://github.com/ufrisk/MemProcFS> | **non** |
+| LeechCore (`leechcore.dll`, plugin `hvmm`) | AGPL-3.0 | <https://github.com/ufrisk/LeechCore> | **non** |
+| Dokany (`dokan2.sys`) | LGPL-3.0 / MIT | <https://github.com/dokan-dev/dokany> | **non** : pilote noyau signé, à installer avec `DokanSetup.exe` |
+| ntoseye | sa propre licence | <https://github.com/dmaivel/ntoseye> | **non** : tourne sous WSL |
+| WinDbg / kd | licence Microsoft | <https://learn.microsoft.com/windows-hardware/drivers/debugger/> | **non** : non redistribuable |
+
 ## Bibliothèques du visualiseur de dumps (`x64\minidump.exe`)
 
 Compilées dans le visualiseur par `tools/build-minidump-viewer.ps1` (versions de `src/cross/vendor/cmake.toml`) :

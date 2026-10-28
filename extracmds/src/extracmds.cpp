@@ -1,10 +1,15 @@
 // ExtraCmds: convenience commands for x64dbg.
 //
-//   .init file[, arguments[, folder]]   init for an executable, opens the minidump viewer for a .dmp
+//   .init file[, arguments[, folder]]   init for an executable, opens the minidump viewer for a .dmp,
+//                                       wineye for a kernel crash dump or a raw memory image
 //   .save [file[, address[, size]]]     dbsave / minidump / savedata depending on the arguments
 //   scylla_hide.enable [profile]        activate a ScyllaHide profile (default: the last active one)
 //   scylla_hide.disable                 switch ScyllaHide to its "Disabled" profile
 //   scylla_hide.status                  show the active ScyllaHide profile and the available ones
+//   hvkd [action [options]]             run HvKdFusion (Hyper-V kernel debugging / memory forensics) in a console
+//   hvkd.log action [options]           run an HvKdFusion action without a window, output in the log
+//   hvkd.check [--deep]                 HvKdFusion readiness table in the log
+//   wineye file | wineye --options      open a kernel dump / memory image (or a live Hyper-V VM) in wineye
 
 #include "_plugins.h"
 
@@ -12,7 +17,7 @@
 #include <vector>
 
 #define PLUGIN_NAME "ExtraCmds"
-#define PLUGIN_VERSION 1
+#define PLUGIN_VERSION 2
 #define LOG_PREFIX "[" PLUGIN_NAME "] "
 
 namespace
@@ -123,6 +128,196 @@ namespace
         return result;
     }
 
+    // Kernel crash dump (MEMORY.DMP: "PAGEDUMP" for 32-bit, "PAGEDU64" for 64-bit) or raw physical memory
+    // image: the memory of a whole machine, not of a process, that only a memory-forensics tool can read
+    bool IsMemoryImage(const std::string & file)
+    {
+        if(HasExtension(file, { ".raw", ".mem", ".vmem" }))
+            return true;
+        if(!IsDumpFile(file))
+            return false;
+        HANDLE hFile = CreateFileW(Utf8ToUtf16(file).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if(hFile == INVALID_HANDLE_VALUE)
+            return false;
+        char signature[8] = {};
+        DWORD read = 0;
+        bool ok = ReadFile(hFile, signature, sizeof(signature), &read, nullptr) && read == sizeof(signature);
+        CloseHandle(hFile);
+        return ok && (memcmp(signature, "PAGEDUMP", 8) == 0 || memcmp(signature, "PAGEDU64", 8) == 0);
+    }
+
+    // Quote an argument for a Windows command line (CommandLineToArgvW rules)
+    std::wstring QuoteArgument(const std::wstring & argument)
+    {
+        if(!argument.empty() && argument.find_first_of(L" \t\"") == std::wstring::npos)
+            return argument;
+        std::wstring result = L"\"";
+        size_t backslashes = 0;
+        for(auto ch : argument)
+        {
+            if(ch == L'\\')
+            {
+                backslashes++;
+                continue;
+            }
+            result.append(ch == L'"' ? backslashes * 2 + 1 : backslashes, L'\\');
+            backslashes = 0;
+            result.push_back(ch);
+        }
+        result.append(backslashes * 2, L'\\');
+        return result + L"\"";
+    }
+
+    std::wstring FullPath(const std::string & file)
+    {
+        auto path = Utf8ToUtf16(file);
+        wchar_t full[MAX_PATH] = L"";
+        if(GetFullPathNameW(path.c_str(), _countof(full), full, nullptr))
+            return full;
+        return path;
+    }
+
+    // Everything after the command name, as typed (argv[0] is the whole command line)
+    std::string RawArguments(const char* commandLine)
+    {
+        std::string text = commandLine;
+        auto space = text.find_first_of(" \t");
+        if(space == std::string::npos)
+            return {};
+        auto start = text.find_first_not_of(" \t", space);
+        return start == std::string::npos ? std::string() : text.substr(start);
+    }
+
+    // HvKdFusion (Python tools): release\hvkdfusion in an archive, hvkdfusion\ at the root of the
+    // repository for a development build (bin\x64\x64dbg.exe)
+    std::wstring HvKdFusionDir()
+    {
+        auto root = X64dbgRoot();
+        for(auto & candidate : { root + L"\\hvkdfusion", root + L"\\..\\hvkdfusion" })
+        {
+            auto folder = FullPath(Utf16ToUtf8(candidate));
+            if(GetFileAttributesW((folder + L"\\hvkdfusion.py").c_str()) != INVALID_FILE_ATTRIBUTES)
+                return folder;
+        }
+        _plugin_logprintf(LOG_PREFIX "HvKdFusion not found (%s\\hvkdfusion\\hvkdfusion.py)\n", Utf16ToUtf8(root).c_str());
+        return {};
+    }
+
+    // hvkd.ps1 in a new console window: it asks for elevation (UAC) when the action needs it and keeps
+    // the window open at the end (HVKD_KEEP_OPEN)
+    bool LaunchHvKd(const std::wstring & arguments)
+    {
+        auto folder = HvKdFusionDir();
+        if(folder.empty())
+            return false;
+        std::wstring commandLine = L"powershell.exe -NoProfile -ExecutionPolicy Bypass -File " + QuoteArgument(folder + L"\\hvkd.ps1");
+        if(!arguments.empty())
+            commandLine += L" " + arguments;
+        STARTUPINFOW si = { sizeof(si) };
+        PROCESS_INFORMATION pi = {};
+        SetEnvironmentVariableW(L"HVKD_KEEP_OPEN", L"1");
+        BOOL started = CreateProcessW(nullptr, &commandLine[0], nullptr, nullptr, FALSE, CREATE_NEW_CONSOLE, nullptr, folder.c_str(), &si, &pi);
+        DWORD error = GetLastError();
+        SetEnvironmentVariableW(L"HVKD_KEEP_OPEN", nullptr);
+        if(!started)
+        {
+            _plugin_logprintf(LOG_PREFIX "cannot start PowerShell (error %u)\n", error);
+            return false;
+        }
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        _plugin_logprintf(LOG_PREFIX "HvKdFusion started in a new window: hvkd.ps1 %s\n", Utf16ToUtf8(arguments).c_str());
+        return true;
+    }
+
+    std::wstring FindPython()
+    {
+        wchar_t path[MAX_PATH] = L"";
+        for(auto name : { L"python.exe", L"py.exe" })
+            if(SearchPathW(nullptr, name, nullptr, _countof(path), path, nullptr))
+                return path;
+        return {};
+    }
+
+    // hvkdfusion.py without a window, its output written to the log. Standard input is NUL, so an
+    // interactive action (menu, wineye REPL) stops at its first prompt instead of blocking x64dbg
+    bool RunHvKdToLog(const std::wstring & arguments)
+    {
+        auto folder = HvKdFusionDir();
+        if(folder.empty())
+            return false;
+        auto python = FindPython();
+        if(python.empty())
+        {
+            _plugin_logputs(LOG_PREFIX "Python not found on the PATH (python.exe or py.exe)");
+            return false;
+        }
+        std::wstring commandLine = QuoteArgument(python) + L" -X utf8 " + QuoteArgument(folder + L"\\hvkdfusion.py") + L" " + arguments;
+        SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
+        HANDLE readPipe = nullptr, writePipe = nullptr;
+        if(!CreatePipe(&readPipe, &writePipe, &sa, 0))
+            return false;
+        SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
+        HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
+        STARTUPINFOW si = { sizeof(si) };
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdInput = nul;
+        si.hStdOutput = writePipe;
+        si.hStdError = writePipe;
+        PROCESS_INFORMATION pi = {};
+        BOOL started = CreateProcessW(nullptr, &commandLine[0], nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, folder.c_str(), &si, &pi);
+        DWORD error = GetLastError();
+        CloseHandle(writePipe);
+        if(nul != INVALID_HANDLE_VALUE)
+            CloseHandle(nul);
+        if(!started)
+        {
+            CloseHandle(readPipe);
+            _plugin_logprintf(LOG_PREFIX "cannot start Python (error %u)\n", error);
+            return false;
+        }
+        std::string output;
+        char buffer[4096];
+        DWORD read = 0;
+        while(ReadFile(readPipe, buffer, sizeof(buffer), &read, nullptr) && read)
+            output.append(buffer, read);
+        CloseHandle(readPipe);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        DWORD exitCode = 1;
+        GetExitCodeProcess(pi.hProcess, &exitCode);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        for(size_t start = 0; start < output.size();)
+        {
+            auto end = output.find('\n', start);
+            if(end == std::string::npos)
+                end = output.size();
+            auto line = output.substr(start, end - start);
+            while(!line.empty() && line.back() == '\r')
+                line.pop_back();
+            auto progress = line.find_last_of('\r'); // progress counters rewrite the line with \r: keep the last state
+            if(progress != std::string::npos)
+                line = line.substr(progress + 1);
+            _plugin_logprintf("%s\n", line.c_str());
+            start = end + 1;
+        }
+        if(exitCode != 0)
+            _plugin_logprintf(LOG_PREFIX "hvkdfusion.py exited with code %u\n", exitCode);
+        return exitCode == 0;
+    }
+
+    bool OpenInWineye(const std::string & imageFile)
+    {
+        if(GetFileAttributesW(Utf8ToUtf16(imageFile).c_str()) == INVALID_FILE_ATTRIBUTES)
+        {
+            _plugin_logprintf(LOG_PREFIX "file not found: %s\n", imageFile.c_str());
+            return false;
+        }
+        _plugin_logprintf(LOG_PREFIX "%s holds the memory of a whole machine, not of a process: x64dbg cannot debug it. "
+                                     "Opening it in wineye (HvKdFusion, needs MemProcFS: hvkd setup --memprocfs-exe ...).\n", imageFile.c_str());
+        return LaunchHvKd(L"wineye --dump " + QuoteArgument(FullPath(imageFile)));
+    }
+
     bool OpenInMinidumpViewer(const std::string & dumpFile)
     {
         auto dumpPath = Utf8ToUtf16(dumpFile);
@@ -159,9 +354,12 @@ namespace
     {
         if(argc < 2)
         {
-            _plugin_logputs(LOG_PREFIX "usage: .init file[, arguments[, folder]]   (a .dmp file opens the minidump viewer)");
+            _plugin_logputs(LOG_PREFIX "usage: .init file[, arguments[, folder]]   (a minidump opens the minidump viewer, "
+                                       "a kernel crash dump or a .raw/.mem memory image opens wineye)");
             return false;
         }
+        if(IsMemoryImage(argv[1]))
+            return OpenInWineye(argv[1]);
         if(IsDumpFile(argv[1]))
             return OpenInMinidumpViewer(argv[1]);
         std::string command = "init " + Quote(argv[1]);
@@ -331,6 +529,50 @@ namespace
         LogProfiles();
         return true;
     }
+
+    // hvkd [action [options]]: the options are passed as typed, e.g. hvkd dump --vm 0 --out C:\dumps\vm0.raw
+    bool CbHvKd(int, char* argv[])
+    {
+        auto arguments = RawArguments(argv[0]);
+        return LaunchHvKd(Utf8ToUtf16(arguments.empty() ? "menu" : arguments));
+    }
+
+    // hvkd.log action [options]
+    bool CbHvKdLog(int, char* argv[])
+    {
+        auto arguments = RawArguments(argv[0]);
+        if(arguments.empty())
+        {
+            _plugin_logputs(LOG_PREFIX "usage: hvkd.log action [options]   e.g. hvkd.log check, hvkd.log list, "
+                                       "hvkd.log read --vm 0 --addr 0x1000 --size 0x100");
+            return false;
+        }
+        return RunHvKdToLog(Utf8ToUtf16(arguments));
+    }
+
+    // hvkd.check [--deep]
+    bool CbHvKdCheck(int, char* argv[])
+    {
+        auto arguments = RawArguments(argv[0]);
+        return RunHvKdToLog(L"check" + (arguments.empty() ? std::wstring() : L" " + Utf8ToUtf16(arguments)));
+    }
+
+    // wineye file | wineye --live --vm 0 | wineye --from-vm 0 | ...
+    bool CbWineye(int argc, char* argv[])
+    {
+        if(argc < 2)
+        {
+            _plugin_logputs(LOG_PREFIX "usage:\n"
+                                       "  wineye file                     kernel crash dump (MEMORY.DMP) or raw memory image\n"
+                                       "  wineye --from-vm 0              dump Hyper-V VM 0, then analyze the dump\n"
+                                       "  wineye --live --vm 0            live Hyper-V VM 0 (+ freeze/resume/registers)\n"
+                                       "  wineye --dump file -c \"ps;lm\"   any wineye option");
+            return false;
+        }
+        if(argv[1][0] == '-')
+            return LaunchHvKd(L"wineye " + Utf8ToUtf16(RawArguments(argv[0])));
+        return OpenInWineye(argv[1]);
+    }
 }
 
 extern "C" __declspec(dllexport) bool pluginit(PLUG_INITSTRUCT* initStruct)
@@ -345,6 +587,10 @@ extern "C" __declspec(dllexport) bool pluginit(PLUG_INITSTRUCT* initStruct)
     _plugin_registercommand(gPluginHandle, "scylla_hide.enable", CbScyllaHideEnable, false);
     _plugin_registercommand(gPluginHandle, "scylla_hide.disable", CbScyllaHideDisable, false);
     _plugin_registercommand(gPluginHandle, "scylla_hide.status", CbScyllaHideStatus, false);
+    _plugin_registercommand(gPluginHandle, "hvkd", CbHvKd, false);
+    _plugin_registercommand(gPluginHandle, "hvkd.log", CbHvKdLog, false);
+    _plugin_registercommand(gPluginHandle, "hvkd.check", CbHvKdCheck, false);
+    _plugin_registercommand(gPluginHandle, "wineye", CbWineye, false);
     return true;
 }
 

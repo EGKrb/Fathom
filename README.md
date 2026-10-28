@@ -8,6 +8,7 @@
 - **pybridge** — drive x64dbg **from Python** (breakpoints, single-stepping, registers, memory, traces);
 - ready-to-use **script templates** for **`headless.exe`** (x64dbg with no GUI);
 - a **memory dump viewer** (`.dmp`) and handy commands: **`.init`** (executable or dump), **`.save`**, **`scylla_hide.enable` / `.disable` / `.status`**;
+- **HvKdFusion** — **Hyper-V kernel debugging and memory forensics** from the command bar: `hvkd` (LiveCloudKd + WinDbg/kd + MemProcFS + ntoseye) and **wineye**, a WinDbg-style REPL on kernel dumps, raw memory images and live VMs;
 - the **ScyllaHide** and **xAnalyzer** plugins bundled in the release, **OllyDumpEx** installable with one command.
 
 **[⬇ Download the latest release](https://github.com/EGKrb/x64dbg/releases/latest)** · [Official x64dbg README](README.x64dbg.md) · [Official docs](https://help.x64dbg.com) · 🇫🇷 [Lire en français](README.fr.md)
@@ -61,10 +62,11 @@ TraceExport C:\traces\sample.trace64, C:\traces\sample.json
 5. [pybridge: driving x64dbg from Python](#pybridge-driving-x64dbg-from-python)
 6. [Templates for headless.exe](#templates-for-headlessexe)
 7. [Added commands and memory dumps](#added-commands-and-memory-dumps)
-8. [Bundled plugins](#bundled-plugins)
-9. [Building it yourself](#building-it-yourself)
-10. [Repository layout](#repository-layout)
-11. [Licenses and credits](#licenses-and-credits)
+8. [HvKdFusion: Hyper-V kernel debugging and memory forensics](#hvkdfusion-hyper-v-kernel-debugging-and-memory-forensics)
+9. [Bundled plugins](#bundled-plugins)
+10. [Building it yourself](#building-it-yourself)
+11. [Repository layout](#repository-layout)
+12. [Licenses and credits](#licenses-and-credits)
 
 ---
 
@@ -107,8 +109,9 @@ A second file, `x64dbg-egkrb_<version>_symbols.zip`, contains the debug symbols 
 | Code base | published releases (e.g. 2026.05.27) | recent `development` branch (features and fixes not yet in an official release) |
 | Trace export | binary `.trace64`, readable only by x64dbg; CSV export only from the GUI | `TraceExport` command → JSON or CSV, also in scripts and `headless.exe` |
 | Automation | x64dbg script language, C/C++ SDK | + Python client (pybridge) + headless templates with a launcher |
-| Memory dumps (`.dmp`) | creation only (`minidump`) | + dump viewer (`minidump.exe`), opened with `.init file.dmp` |
-| Commands | — | `.init`, `.save`, `scylla_hide.enable` / `.disable` / `.status` (ExtraCmds plugin) |
+| Memory dumps (`.dmp`) | creation only (`minidump`) | + dump viewer (`minidump.exe`), opened with `.init file.dmp`; kernel dumps and raw memory images open in wineye |
+| Kernel / whole machine | — (user-mode only) | HvKdFusion: Hyper-V VM memory read/write/dump, WinDbg/kd on a VM, MemProcFS mount, wineye REPL (`hvkd`, `wineye`) |
+| Commands | — | `.init`, `.save`, `scylla_hide.enable` / `.disable` / `.status`, `hvkd`, `hvkd.log`, `hvkd.check`, `wineye` (ExtraCmds plugin) |
 | Plugins | none | ScyllaHide and xAnalyzer bundled, pybridge and ExtraCmds bundled, OllyDumpEx via `install-plugins.ps1` |
 | Build | — | fixes a `using namespace std` that broke the *unity build* (`patternfind.cpp`) |
 
@@ -366,7 +369,7 @@ The **ExtraCmds** plugin ([`extracmds/`](extracmds/src/extracmds.cpp)) adds thes
 | Command | Effect |
 |---|---|
 | `.init file.exe[, arguments[, dir]]` | launches and debugs the program (same as `init`) |
-| `.init file.dmp` | opens the dump in the **dump viewer** (see below) |
+| `.init file.dmp` | opens the dump in the **dump viewer** (see below); a **kernel** crash dump (`MEMORY.DMP`) or a `.raw`/`.mem`/`.vmem` image opens in **wineye** ([HvKdFusion](#hvkdfusion-hyper-v-kernel-debugging-and-memory-forensics)) |
 | `.save` | saves the program database (comments, labels, breakpoints) — like `dbsave` |
 | `.save file.dmp` | writes a full process minidump — like `minidump` |
 | `.save file.dd64` | saves the database to that file — like `dbsave file` |
@@ -375,6 +378,7 @@ The **ExtraCmds** plugin ([`extracmds/`](extracmds/src/extracmds.cpp)) adds thes
 | `scylla_hide.status` | shows whether ScyllaHide is active, its profile and the available profiles |
 | `scylla_hide.enable [profile]` | enables ScyllaHide: given profile (exact name or prefix, e.g. `vmprotect`, `basic`), else the last active profile, else "Basic" |
 | `scylla_hide.disable` | disables ScyllaHide ("Disabled" profile) |
+| `hvkd [action [options]]`, `hvkd.log`, `hvkd.check`, `wineye` | HvKdFusion, see [below](#hvkdfusion-hyper-v-kernel-debugging-and-memory-forensics) |
 
 ```
 scylla_hide.enable basic
@@ -388,6 +392,29 @@ How it works:
 
 - **ScyllaHide** only reads its config at load time. `scylla_hide.enable/disable` edits `plugins\scylla_hide.ini` (`CurrentProfile`) then reloads the plugin (`plugunload` + `plugload`): the profile applies immediately, without restarting x64dbg. Protections are injected **at program start or attach**: if a program is already being debugged, restart it to pick up the new profile.
 - **A dump is not a process**: x64dbg debugs running programs and cannot "load" a `.dmp` (no execution, stepping or breakpoints on a dump). `.init file.dmp` therefore opens the **dump viewer** `x64\minidump.exe`, built from x64dbg's official code (`src/cross/minidump`): memory map, disassembly, hex view, threads and registers. It reads 32 and 64-bit process dumps and can also run standalone (`minidump.exe file.dmp`). To analyze a dump with commands and scripts, use WinDbg (`cdb -z file.dmp`).
+
+---
+
+## HvKdFusion: Hyper-V kernel debugging and memory forensics
+
+x64dbg stops at user mode. **HvKdFusion** ([`hvkdfusion/`](hvkdfusion/README.md), merged from [EGKrb/HvKdFusion](https://github.com/EGKrb/HvKdFusion)) covers the kernel and the whole memory of a machine — a **live Hyper-V VM** or a **memory image** — by tying together LiveCloudKd (`hvlib.dll`/`hvmm.sys`, Hyper-V guest memory), WinDbg/kd, MemProcFS + LeechCore (+ Dokany to mount memory as a drive) and ntoseye, under one Python CLI. It adds **wineye**, a native WinDbg-style REPL (`ps`, `lm`, `!process`, `x nt!...`, `db/dq`, `dt`, `!vad`, `!handle`, `s`) on `vmm.dll`, without WSL or Dokany, with freeze/resume/registers on a live VM.
+
+| Command (ExtraCmds) | Effect |
+|---|---|
+| `hvkd` | interactive menu in a console: pick a VM, then debug (WinDbg/kd/EXDI), dump, read, write, resume, ntoseye, mount |
+| `hvkd action [options]` | any HvKdFusion action in a console, e.g. `hvkd dump --vm 0 --out C:\dumps\vm0.raw`, `hvkd debug --vm 0 --engine windbg` |
+| `hvkd.log action [options]` | same, without a window, output in the x64dbg log: `hvkd.log list`, `hvkd.log read --vm 0 --addr 0x1000 --size 0x100` |
+| `hvkd.check [--deep]` | readiness table of every component, in the log |
+| `wineye file` / `wineye --live --vm 0` | wineye on a kernel dump / raw image, or on a live VM |
+
+```
+hvkd.check
+hvkd dump --vm 0 --type linear --out C:\dumps\vm0.raw
+.init C:\dumps\vm0.raw
+wineye --live --vm 0
+```
+
+Memory operations on a VM need administrator rights: `hvkd` asks for elevation (UAC) when needed. The third-party components are **not bundled** (licenses, kernel drivers): install or build them, then run `python hvkdfusion.py setup` once — see [hvkdfusion/README.md](hvkdfusion/README.md). Requires Python 3.11+ on the `PATH`.
 
 ---
 
@@ -482,7 +509,9 @@ pybridge/
   python/x64dbg_bridge.py            Python client
   examples/                          Python examples
   headless/                          headless launcher and templates
-extracmds/src/extracmds.cpp          ExtraCmds plugin (.init, .save, scylla_hide.*)
+extracmds/src/extracmds.cpp          ExtraCmds plugin (.init, .save, scylla_hide.*, hvkd*, wineye)
+hvkdfusion/                          HvKdFusion (Hyper-V kernel debugging / memory forensics, Python)
+  hvkdfusion.py, wineye.py, hvkd.ps1 CLI, WinDbg-style REPL, elevated launcher
 plugins/
   install-plugins.ps1                third-party plugin installer
   THIRD-PARTY.md                     versions, licenses, hashes
@@ -502,6 +531,7 @@ README.fr.md                         this README in French
 - **ScyllaHide**: GPL-3.0 — <https://github.com/x64dbg/ScyllaHide> (v1.4 source: tag `v1.4`).
 - **xAnalyzer**: MIT — <https://github.com/ThunderCls/xAnalyzer>, by ThunderCls.
 - **OllyDumpEx**: freeware by Low Priority — <https://low-priority.appspot.com/ollydumpex/>, not redistributed.
+- **HvKdFusion**: GPL-3.0-or-later — <https://github.com/EGKrb/HvKdFusion>. The components it drives are not redistributed: LiveCloudKd (GPL-3.0), MemProcFS and LeechCore (AGPL-3.0), Dokany (LGPL/MIT), ntoseye, WinDbg (Microsoft license).
 - **Dump viewer**: x64dbg code (GPL-3.0); libraries [udmp-parser](https://github.com/0vercl0k/udmp-parser) (MIT), [cpp-httplib](https://github.com/yhirose/cpp-httplib) (MIT), [linux-pe](https://github.com/can1357/linux-pe) (BSD), [nlohmann/json](https://github.com/nlohmann/json) (MIT), Qt 5.12 (LGPL-3.0, DLLs shared with x64dbg).
 
 x64dbg is developed by mrexodia and contributors ([list](https://github.com/x64dbg/x64dbg/graphs/contributors)); see the [official README](README.x64dbg.md) for full credits. This fork is neither affiliated with nor endorsed by the x64dbg team; for official builds, go to <https://x64dbg.com>.
