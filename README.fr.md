@@ -14,6 +14,8 @@
 
 **[⬇ Télécharger la dernière release](https://github.com/EGKrb/x64dbg/releases/latest)** · [README officiel d'x64dbg](README.x64dbg.md) · [Documentation officielle](https://help.x64dbg.com)
 
+> **Plateforme : Windows (x86/x64).** x64dbg débogue des processus Windows via l'API de débogage Windows ; le débogueur, `headless.exe` et les plugins sont donc Windows uniquement. Le **client** Python de pybridge est agnostique (bibliothèque standard seule), mais il pilote un x64dbg — qui tourne sous Windows.
+
 ---
 
 ## Sommaire

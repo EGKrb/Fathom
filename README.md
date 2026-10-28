@@ -12,6 +12,8 @@
 
 **[⬇ Download the latest release](https://github.com/EGKrb/x64dbg/releases/latest)** · [Official x64dbg README](README.x64dbg.md) · [Official docs](https://help.x64dbg.com) · 🇫🇷 [Lire en français](README.fr.md)
 
+> **Platform: Windows (x86/x64).** x64dbg debugs Windows processes through the Windows debugging API, so the debugger, `headless.exe` and the plugins are Windows-only. The pybridge Python **client** is OS-agnostic (standard library only), but it drives an x64dbg instance — which runs on Windows.
+
 ---
 
 ## 60-second demo — drive the debugger from Python
