@@ -398,6 +398,23 @@ class HvControl:
 # --------------------------------------------------------------------------- #
 #  REPL
 # --------------------------------------------------------------------------- #
+def _jdump(obj) -> str:
+    """json.dumps with every integer rendered as a hex string. 64-bit kernel
+    addresses then survive a double-based JSON reader (e.g. Qt's QJsonValue, used
+    by the x64dbg HvKdFusion panel) with no precision loss. Booleans stay true/false."""
+    def conv(o):
+        if isinstance(o, bool):
+            return o
+        if isinstance(o, int):
+            return hex(o)
+        if isinstance(o, dict):
+            return {k: conv(v) for k, v in o.items()}
+        if isinstance(o, (list, tuple)):
+            return [conv(v) for v in o]
+        return o
+    return json.dumps(conv(obj))
+
+
 class Repl:
     def __init__(self, vmm: Vmm, json_out: bool = False, ctl: "HvControl | None" = None):
         self.vmm = vmm
@@ -407,7 +424,7 @@ class Repl:
 
     def _emit(self, text: str, data=None):
         if self.json and data is not None:
-            print(json.dumps(data, default=lambda o: hex(o) if isinstance(o, int) else str(o)))
+            print(_jdump(data))
         else:
             print(text)
 
@@ -487,7 +504,7 @@ class Repl:
             if p:
                 rows.append(p)
         if self.json:
-            print(json.dumps(rows, default=lambda o: hex(o) if isinstance(o, int) else o))
+            print(_jdump(rows))
             return
         print(f"{'PID':>6} {'PPID':>6}  {'EPROCESS':>18}  {'PEB':>18}  Name")
         print("-" * 70)
@@ -502,7 +519,7 @@ class Repl:
             print(f"[!] pid {pid} introuvable")
             return
         if self.json:
-            print(json.dumps(p, default=lambda o: hex(o) if isinstance(o, int) else o))
+            print(_jdump(p))
             return
         print(f"  PID {p['pid']}  PPID {p['ppid']}  '{p['name_long'] or p['name']}'")
         print(f"  EPROCESS {p['eprocess']:#x}   PEB {p['peb']:#x}   DTB {p['dtb']:#x}")
@@ -513,7 +530,7 @@ class Repl:
         pid = self._pid_arg(args)
         mods = self.vmm.modules(pid)
         if self.json:
-            print(json.dumps(mods, default=lambda o: hex(o) if isinstance(o, int) else o))
+            print(_jdump(mods))
             return
         print(f"{'base':>18}  {'size':>9}  module   (pid {pid})")
         print("-" * 60)
@@ -610,7 +627,7 @@ class Repl:
         pid = self._pid_arg(args)
         hs = self.vmm.handles(pid)
         if self.json:
-            print(json.dumps(hs, default=lambda o: hex(o) if isinstance(o, int) else o))
+            print(_jdump(hs))
             return
         print(f"{'handle':>8}  {'object':>18}  {'type':<16} detail   (pid {pid})")
         print("-" * 70)
@@ -621,7 +638,7 @@ class Repl:
         pid = self._pid_arg(args)
         vs = self.vmm.vads(pid)
         if self.json:
-            print(json.dumps(vs, default=lambda o: hex(o) if isinstance(o, int) else o))
+            print(_jdump(vs))
             return
         print(f"{'start':>18} {'end':>18}  flags  detail   (pid {pid})")
         print("-" * 72)

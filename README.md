@@ -416,6 +416,17 @@ wineye --live --vm 0
 
 Memory operations on a VM need administrator rights: `hvkd` asks for elevation (UAC) when needed. The third-party components are **not bundled** (licenses, kernel drivers): install or build them, then run `python hvkdfusion.py setup` once — see [hvkdfusion/README.md](hvkdfusion/README.md). Requires Python 3.11+ on the `PATH`.
 
+### HvKdFusion tab (GUI)
+
+When ExtraCmds is built with Qt (the default for the 64-bit plugin, see [Building](#building-it-yourself)), it adds a dockable **HvKdFusion** tab (View menu / tab bar) — no command typing needed:
+
+- **VM selector** + **Refresh**, and **Open a dump…** to target a crash dump / raw image instead of a live VM;
+- a **component-readiness panel** (green/amber/red dots, the `check` table) with the usable features and a **Setup** button;
+- a sortable **process table** (`ps`); selecting a process fills **Modules / VADs / Handles** tabs (`lm` / `!vad` / `!handle`) for it;
+- **Dump / Debug / Mount** buttons acting on the selected VM (elevation prompt when needed).
+
+The tab drives the same Python tools through their JSON output; it never blocks x64dbg (every call is asynchronous). Still 64-bit only and commands-only when built without Qt.
+
 ---
 
 ## Bundled plugins
@@ -467,11 +478,11 @@ cd pybridge
 cmake -B build-x64 -G Ninja -DCMAKE_BUILD_TYPE=Release -DX64DBG_SDK=<pluginsdk folder>
 cmake --build build-x64
 cd ..\extracmds
-cmake -B build-x64 -G Ninja -DCMAKE_BUILD_TYPE=Release -DX64DBG_SDK=<pluginsdk folder>
+cmake -B build-x64 -G Ninja -DCMAKE_BUILD_TYPE=Release -DX64DBG_SDK=<pluginsdk folder> -DCMAKE_PREFIX_PATH=%CD%\..\build64\_deps\qt5-src
 cmake --build build-x64
 ```
 
-By default the plugins use the `pluginsdk` of an x64dbg installed via winget; otherwise, point to one from a release (`-DX64DBG_SDK=...\pluginsdk`).
+By default the plugins use the `pluginsdk` of an x64dbg installed via winget; otherwise, point to one from a release (`-DX64DBG_SDK=...\pluginsdk`). For ExtraCmds, `-DCMAKE_PREFIX_PATH=<repo>\build64\_deps\qt5-src` (x64dbg's own Qt 5.12.12, present after the 64-bit build) enables the dockable **HvKdFusion tab**; without it, or for the 32-bit plugin, ExtraCmds builds commands-only.
 
 ```powershell
 # Dump viewer ("x64 Native Tools" terminal, after the 64-bit build whose Qt it reuses)
@@ -510,6 +521,7 @@ pybridge/
   examples/                          Python examples
   headless/                          headless launcher and templates
 extracmds/src/extracmds.cpp          ExtraCmds plugin (.init, .save, scylla_hide.*, hvkd*, wineye)
+extracmds/src/hvkdpanel.h, .cpp      HvKdFusion dockable GUI tab (Qt, x64 only)
 hvkdfusion/                          HvKdFusion (Hyper-V kernel debugging / memory forensics, Python)
   hvkdfusion.py, wineye.py, hvkd.ps1 CLI, WinDbg-style REPL, elevated launcher
   plugin_build/                      LiveCloudKd hvlib headers + hvlib.lib (to build the hvmm plugin)

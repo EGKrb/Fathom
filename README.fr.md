@@ -382,6 +382,17 @@ wineye --live --vm 0
 
 Les opérations mémoire sur une VM exigent les droits administrateur : `hvkd` demande l'élévation (UAC) quand il le faut. Les composants tiers ne sont **pas inclus** (licences, pilotes noyau) : installez-les ou compilez-les, puis lancez une fois `python hvkdfusion.py setup` — voir [hvkdfusion/README.md](hvkdfusion/README.md) (en anglais). Nécessite Python 3.11+ sur le `PATH`.
 
+### Onglet HvKdFusion (GUI)
+
+Quand ExtraCmds est compilé avec Qt (par défaut pour le plugin 64 bits, voir [Compilation](#compiler-soi-même)), il ajoute un onglet dockable **HvKdFusion** (menu Affichage / barre d'onglets), sans rien à taper :
+
+- un **sélecteur de VM** + **Rafraîchir**, et **Ouvrir un dump…** pour cibler un crash dump / une image brute plutôt qu'une VM live ;
+- un **panneau d'état** des composants (pastilles vert/orange/rouge, le tableau `check`) avec les fonctionnalités disponibles et un bouton **Setup** ;
+- un **tableau de processus** triable (`ps`) ; sélectionner un processus remplit les onglets **Modules / VAD / Handles** (`lm` / `!vad` / `!handle`) ;
+- des boutons **Dump / Debug / Monter** qui agissent sur la VM sélectionnée (élévation demandée au besoin).
+
+L'onglet pilote les mêmes outils Python via leur sortie JSON et ne bloque jamais x64dbg (tous les appels sont asynchrones). 64 bits uniquement ; sans Qt, le plugin reste en lignes de commande seules.
+
 ---
 
 ## Plugins inclus
@@ -433,11 +444,11 @@ cd pybridge
 cmake -B build-x64 -G Ninja -DCMAKE_BUILD_TYPE=Release -DX64DBG_SDK=<dossier pluginsdk>
 cmake --build build-x64
 cd ..\extracmds
-cmake -B build-x64 -G Ninja -DCMAKE_BUILD_TYPE=Release -DX64DBG_SDK=<dossier pluginsdk>
+cmake -B build-x64 -G Ninja -DCMAKE_BUILD_TYPE=Release -DX64DBG_SDK=<dossier pluginsdk> -DCMAKE_PREFIX_PATH=%CD%\..\build64\_deps\qt5-src
 cmake --build build-x64
 ```
 
-Par défaut, les plugins utilisent le `pluginsdk` d'un x64dbg installé avec winget ; sinon, indiquez celui d'une release (`-DX64DBG_SDK=...\pluginsdk`).
+Par défaut, les plugins utilisent le `pluginsdk` d'un x64dbg installé avec winget ; sinon, indiquez celui d'une release (`-DX64DBG_SDK=...\pluginsdk`). Pour ExtraCmds, `-DCMAKE_PREFIX_PATH=<dépôt>\build64\_deps\qt5-src` (le Qt 5.12.12 d'x64dbg, présent après le build 64 bits) active l'**onglet HvKdFusion** ; sans lui, ou en 32 bits, ExtraCmds se compile en lignes de commande seules.
 
 ```powershell
 # Visualiseur de dumps (terminal « x64 Native Tools », après la compilation 64 bits dont il réutilise Qt)
@@ -476,6 +487,7 @@ pybridge/
   examples/                          exemples Python
   headless/                          lanceur et modèles headless
 extracmds/src/extracmds.cpp          plugin ExtraCmds (.init, .save, scylla_hide.*, hvkd*, wineye)
+extracmds/src/hvkdpanel.h, .cpp      onglet GUI HvKdFusion (Qt, 64 bits)
 hvkdfusion/                          HvKdFusion (débogage noyau / forensics mémoire Hyper-V, Python)
   hvkdfusion.py, wineye.py, hvkd.ps1 CLI, REPL façon WinDbg, lanceur avec élévation
   plugin_build/                      en-têtes hvlib + hvlib.lib de LiveCloudKd (compilation du plugin hvmm)

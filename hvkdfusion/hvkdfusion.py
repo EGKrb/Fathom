@@ -104,11 +104,13 @@ def default_config() -> dict:
     }
 
 
-def load_config() -> dict:
-    if not CONFIG_PATH.exists():
-        die(f"No config at {CONFIG_PATH}. Run:  python hvkdfusion.py setup")
+def load_config(required: bool = True) -> dict:
     cfg = default_config()
-    cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
+    if CONFIG_PATH.exists():
+        cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
+    elif required:
+        die(f"No config at {CONFIG_PATH}. Run:  python hvkdfusion.py setup")
+    # required=False: fall back to defaults so `check` (readiness) runs before setup
     return cfg
 
 
@@ -453,7 +455,22 @@ def cmd_config(args):
 
 
 def cmd_list(args):
-    cfg = load_config()
+    as_json = getattr(args, "json", False)
+    cfg = load_config(required=not as_json)
+    if as_json:
+        # Never raise/exit in JSON mode: the GUI reads one JSON object on stdout.
+        try:
+            _, engine, vms = engine_enum(cfg)
+        except SystemExit:
+            # die() already printed the reason to stderr; SystemExit only carries the exit code.
+            print(json.dumps({"error": "énumération impossible (droits admin + VM Hyper-V démarrée requis)", "vms": []}))
+            return
+        except Exception as e:
+            print(json.dumps({"error": str(e), "vms": []}))
+            return
+        print(json.dumps({"vms": [{"id": vid, "name": name} for vid, name in vms]}))
+        engine.cleanup()
+        return
     _, engine, vms = engine_enum(cfg)
     if not vms:
         print("No Hyper-V partitions found.")
@@ -785,7 +802,8 @@ def _siblings_present(exe: str | None, names: list[str]) -> list[str]:
 
 def cmd_check(args):
     """End-to-end readiness report (static; no DLL load, no admin needed)."""
-    cfg = load_config()
+    as_json = getattr(args, "json", False)
+    cfg = load_config(required=False)
     sysroot = os.environ.get("SystemRoot", r"C:\Windows")
     s32 = Path(sysroot) / "System32"
 
@@ -844,10 +862,11 @@ def cmd_check(args):
         "installé" if dokan else "ABSENT - installer DokanSetup.exe signé")
 
     # --- rendu du tableau ---
-    print("\n=== HvKdFusion : préparation ===")
-    w = max(len(n) for _, n, _ in rows)
-    for mark, name, detail in rows:
-        print(f"  {mark}  {name.ljust(w)}  {detail}")
+    if not as_json:
+        print("\n=== HvKdFusion : préparation ===")
+        w = max(len(n) for _, n, _ in rows)
+        for mark, name, detail in rows:
+            print(f"  {mark}  {name.ljust(w)}  {detail}")
 
     # --- fonctionnalités prêtes ---
     eng = _exists(cfg.get("hvlib_dll")) and _exists(cfg.get("hvlib_py"))
@@ -860,6 +879,20 @@ def cmd_check(args):
         ("wineye REPL (dump, sans Dokany)", _exists(mp) and not mp_miss, "vmm.dll"),
         ("wineye REPL (live hvmm)", live_ok, "vmm.dll + plugin hvmm + admin"),
     ]
+    if as_json:
+        status = {"[OK]": "ok", "[~~]": "soft", "[!!]": "bad"}
+        print(json.dumps({
+            "components": [
+                {"status": status.get(mark, "bad"), "name": name, "detail": detail}
+                for mark, name, detail in rows
+            ],
+            "features": [
+                {"name": name, "ok": bool(ok), "need": need}
+                for name, ok, need in feat
+            ],
+        }))
+        return
+
     print("\n=== Fonctionnalités ===")
     wf = max(len(n) for n, _, _ in feat)
     for name, ok, need in feat:
@@ -1022,8 +1055,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("config", help="print resolved config").set_defaults(func=cmd_config)
     s = sub.add_parser("check", help="tableau de préparation de bout en bout")
     s.add_argument("--deep", action="store_true", help="exécute réellement MemProcFS.exe -h")
+    s.add_argument("--json", action="store_true", help="sortie JSON (pour la GUI)")
     s.set_defaults(func=cmd_check)
-    sub.add_parser("list", help="enumerate Hyper-V VMs").set_defaults(func=cmd_list)
+    s = sub.add_parser("list", help="enumerate Hyper-V VMs")
+    s.add_argument("--json", action="store_true", help="sortie JSON (pour la GUI)")
+    s.set_defaults(func=cmd_list)
     sub.add_parser("menu", help="interactive menu (VM + action)").set_defaults(func=cmd_menu)
 
     s = sub.add_parser("debug", help="attach WinDbg/kd to a VM")

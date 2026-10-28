@@ -29,6 +29,17 @@ The **ExtraCmds** plugin adds these commands (command bar, scripts, `headless.ex
 | `wineye --live --vm 0` | wineye on the live VM 0, with the freeze/resume/registers control channel; any wineye option is accepted |
 | `.init MEMORY.DMP` / `.init file.raw` | a **kernel** crash dump (signature `PAGEDUMP`/`PAGEDU64`) or a `.raw`/`.mem`/`.vmem` image opens in wineye; a process minidump still opens in the minidump viewer |
 
+### The HvKdFusion tab (GUI)
+
+Built with Qt (the default for the 64-bit ExtraCmds plugin), ExtraCmds also adds a dockable **HvKdFusion** tab, so the common flow needs no typed command:
+
+- a **VM selector** + **Refresh**, and **Open a dump…** to target a crash dump / raw image;
+- a **readiness panel** (the `check` table, green/amber/red) with the usable features and a **Setup** button;
+- a sortable **process table** (`ps`); clicking a process fills **Modules / VADs / Handles** tabs (`lm` / `!vad` / `!handle`);
+- **Dump / Debug / Mount** buttons on the selected VM.
+
+The tab calls these same tools with `--json` and runs every call asynchronously (it never freezes x64dbg). It is 64-bit only; without Qt the plugin is commands-only. The commands below work everywhere (command bar, scripts, `headless.exe`, pybridge).
+
 - Memory operations on a VM need **administrator** rights: `hvkd` goes through `hvkd.ps1`, which asks for elevation (UAC) when the action needs it. `setup`, `config`, `check` and the analysis of an existing file (`wineye --dump`, `ntoseye --dump`) run without elevation. `hvkd.log` cannot show a UAC prompt: it only works for those actions, or when x64dbg itself runs as administrator.
 - `hvkd.log` runs with standard input closed: an interactive action (`menu`, the wineye REPL) stops at its first prompt instead of blocking x64dbg. Use `hvkd` for those.
 - Python 3.11+ must be on the `PATH` (`python.exe` or `py.exe`). The plugin looks for this folder at `release\hvkdfusion\` (release archive), then at `hvkdfusion\` at the root of the repository (development build in `bin\`).

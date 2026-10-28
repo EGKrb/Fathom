@@ -13,6 +13,8 @@
 
 #include "_plugins.h"
 
+#include "hvkdpanel.h"
+
 #include <string>
 #include <vector>
 
@@ -600,4 +602,16 @@ extern "C" __declspec(dllexport) void plugstop()
 
 extern "C" __declspec(dllexport) void plugsetup(PLUG_SETUPSTRUCT*)
 {
+#ifdef EXTRACMDS_GUI
+    // Dockable "HvKdFusion" tab (built only when Qt5 was available at configure time). plugsetup runs
+    // on the GUI thread, so the widget can be created here and handed to x64dbg.
+    HvKdContext context;
+    context.python = FindPython();
+    context.folder = HvKdFusionDir();
+    context.launch = [](const std::wstring & arguments) { LaunchHvKd(arguments); };
+    if(QWidget* panel = CreateHvKdPanel(context))
+        GuiAddQWidgetTab(panel);
+    else
+        _plugin_logputs(LOG_PREFIX "HvKdFusion GUI tab not added (hvkdfusion folder not found)");
+#endif
 }
