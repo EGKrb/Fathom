@@ -355,14 +355,9 @@ bool ResolveShortcut(HWND hwnd, const wchar_t* szShortcutPath, std::wstring & ex
 
                     //Expand the environment variables.
                     wchar_t expandedTarget[MAX_PATH];
-                    if(SUCCEEDED(hres))
-                    {
-                        auto expandedSize = ExpandEnvironmentStringsW(linkTarget, expandedTarget, _countof(expandedTarget));
-                        if(!expandedSize || expandedSize > _countof(expandedTarget))
-                            hres = E_FAIL;
-                    }
+                    auto expandSuccess = !!ExpandEnvironmentStringsW(linkTarget, expandedTarget, _countof(expandedTarget));
 
-                    if(SUCCEEDED(hres))
+                    if(SUCCEEDED(hres) && expandSuccess)
                     {
                         executable = expandedTarget;
 

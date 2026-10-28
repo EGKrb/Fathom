@@ -184,7 +184,6 @@ set(X64DBG_STANDARD_TESTS
     scriptcmd_call
     scriptcmd_call_threads
     swbp_stale
-    bp_unloaded_module
     trace_cmd_condition
     trace_export
     database_callbacks

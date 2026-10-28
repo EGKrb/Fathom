@@ -2253,7 +2253,7 @@ static bool getCmdLine(QString & cmdLine)
     if(DbgFunctions()->GetCmdline(0, &cbsize))
     {
         auto buffer = new char[cbsize];
-        if(DbgFunctions()->GetCmdline(buffer, &cbsize))
+        if(DbgFunctions()->GetCmdline(buffer, 0))
         {
             cmdLine = buffer;
             result = true;

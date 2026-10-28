@@ -28,12 +28,14 @@ static bool cbEnableAllBreakpoints(const BREAKPOINT* bp)
     if(bp->type != BPNORMAL || bp->enabled)
         return true;
 
-    if(!SetBPX(bp->addr, bp->titantype, cbUserBreakpoint) && MemIsValidReadPtr(bp->addr))
+    if(!SetBPX(bp->addr, bp->titantype, cbUserBreakpoint))
     {
+        if(!MemIsValidReadPtr(bp->addr))
+            return true;
         dprintf(QT_TRANSLATE_NOOP("DBG", "Could not enable breakpoint %p (SetBPX)\n"), bp->addr);
         return false;
     }
-    if(!BpEnable(*bp, true))
+    if(!BpEnable(bp->addr, BPNORMAL, true))
     {
         dprintf(QT_TRANSLATE_NOOP("DBG", "Could not enable breakpoint %p (BpEnable)\n"), bp->addr);
         return false;
@@ -46,12 +48,12 @@ static bool cbDisableAllBreakpoints(const BREAKPOINT* bp)
     if(bp->type != BPNORMAL || !bp->enabled)
         return true;
 
-    if(!BpEnable(*bp, false))
+    if(!BpEnable(bp->addr, BPNORMAL, false))
     {
         dprintf(QT_TRANSLATE_NOOP("DBG", "Could not disable breakpoint %p (BpEnable)\n"), bp->addr);
         return false;
     }
-    if(bp->active && !DeleteBPX(bp->addr))
+    if(!DeleteBPX(bp->addr))
     {
         dprintf(QT_TRANSLATE_NOOP("DBG", "Could not disable breakpoint %p (DeleteBPX)\n"), bp->addr);
         return false;
@@ -221,7 +223,7 @@ bool cbDebugEnableBPX(int argc, char* argv[])
     BREAKPOINT found;
     if(BpGet(0, BPNORMAL, argv[1], &found)) //found a breakpoint with name
     {
-        if(!SetBPX(found.addr, found.titantype, cbUserBreakpoint) && MemIsValidReadPtr(found.addr))
+        if(!SetBPX(found.addr, found.titantype, cbUserBreakpoint))
         {
             dprintf(QT_TRANSLATE_NOOP("DBG", "Could not enable breakpoint %p (SetBPX)\n"), found.addr);
             return false;
@@ -246,7 +248,7 @@ bool cbDebugEnableBPX(int argc, char* argv[])
         GuiUpdateAllViews();
         return true;
     }
-    if(!SetBPX(found.addr, found.titantype, cbUserBreakpoint) && MemIsValidReadPtr(found.addr))
+    if(!SetBPX(found.addr, found.titantype, cbUserBreakpoint))
     {
         dprintf(QT_TRANSLATE_NOOP("DBG", "Could not enable breakpoint %p (SetBPX)\n"), found.addr);
         return false;
