@@ -24,7 +24,7 @@ OllyDumpEx is not redistributable: the archive contains install-plugins.ps1 to d
 param(
     [string] $Version = (Get-Date -Format 'yyyy.MM.dd'),
     [string] $OutDir,
-    [string] $Name = 'Fathom'   # archive base name: Fathom_<Version>.zip
+    [string] $ArchiveName = 'Fathom'   # archive base name: Fathom_<Version>.zip ($name is reused below)
 )
 
 $ErrorActionPreference = 'Stop'
@@ -113,8 +113,8 @@ $readme = $readme.Replace('%VERSION%', $Version).Replace('%COMMIT%', $commit)
 
 # 5. Archives
 New-Item -ItemType Directory -Force $OutDir | Out-Null
-$zip = Join-Path $OutDir "${Name}_$Version.zip"
-$symbols = Join-Path $OutDir "${Name}_${Version}_symbols.zip"
+$zip = Join-Path $OutDir "${ArchiveName}_$Version.zip"
+$symbols = Join-Path $OutDir "${ArchiveName}_${Version}_symbols.zip"
 Remove-Item -Force $zip, $symbols, (Join-Path $OutDir 'SHA256SUMS.txt') -ErrorAction SilentlyContinue
 Compress-Archive -CompressionLevel Optimal -Path (Join-Path $package 'release'), (Join-Path $package 'pluginsdk'), (Join-Path $package 'commithash.txt') -DestinationPath $zip
 Compress-Archive -CompressionLevel Optimal -Path (Join-Path $package 'pdb'), (Join-Path $package 'commithash.txt') -DestinationPath $symbols
