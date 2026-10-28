@@ -19,6 +19,7 @@ HvKdFusion (GPL-3.0-or-later, <https://github.com/EGKrb/HvKdFusion>) est livré 
 | Composant | Licence | Source | Dans la release |
 |---|---|---|---|
 | LiveCloudKd (`hvlib.dll`, `hvmm.sys`, `LiveCloudKd.exe`) | GPL-3.0 | <https://github.com/gerhart01/LiveCloudKd> | **non** : contient un pilote noyau |
+| LiveCloudKd SDK (`hvlib.lib` + 7 en-têtes de `LiveCloudKdSdk/public`) | GPL-3.0 | <https://github.com/gerhart01/LiveCloudKd> | **oui** : copies non modifiées dans `hvkdfusion/plugin_build/`, seulement pour compiler le plugin LeechCore `hvmm` |
 | MemProcFS (`vmm.dll`, `MemProcFS.exe`) | AGPL-3.0 | <https://github.com/ufrisk/MemProcFS> | **non** |
 | LeechCore (`leechcore.dll`, plugin `hvmm`) | AGPL-3.0 | <https://github.com/ufrisk/LeechCore> | **non** |
 | Dokany (`dokan2.sys`) | LGPL-3.0 / MIT | <https://github.com/dokan-dev/dokany> | **non** : pilote noyau signé, à installer avec `DokanSetup.exe` |

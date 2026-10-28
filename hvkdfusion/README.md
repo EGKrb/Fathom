@@ -146,13 +146,14 @@ foreach ($t in 'leechcore', 'vmm', 'memprocfs') {
 python hvkdfusion.py setup --memprocfs-exe "$mp\files\memprocfs.exe"
 ```
 
-The `leechcore_device_hvmm.dll` plugin (live VM device) lives in the LiveCloudKd tree and needs `..\LeechCore`, the hvlib headers and `charutil.c`:
+The `leechcore_device_hvmm.dll` plugin (live VM device) lives in the LiveCloudKd tree and needs `..\LeechCore`, the hvlib headers + `hvlib.lib`, and `charutil.c`. The headers and the library are in [`plugin_build/`](plugin_build), already laid out as the project expects (`files\hvlib.lib`, `hvlib\hvlib\include\public\`): unmodified copies of LiveCloudKd's `LiveCloudKdSdk\files\hvlib.lib` and `LiveCloudKdSdk\public\` (GPL-3.0).
 
 ```powershell
 New-Item -ItemType Junction -Path "$m2\LeechCore" -Target $lc | Out-Null
-New-Item -ItemType Directory -Force "$m2\hvlib\hvlib\include\public", "$m2\files" | Out-Null
-Copy-Item "$m2\LiveCloudKdSdk\public\*" "$m2\hvlib\hvlib\include\public\" -Recurse -Force
-Copy-Item "$m2\LiveCloudKdSdk\files\hvlib.lib" "$m2\files\" -Force
+$hk = "C:\Tools\x64dbg\release\hvkdfusion"                       # this folder (or hvkdfusion\ in a clone)
+Copy-Item "$hk\plugin_build\*" $m2 -Recurse -Force                # files\, hvlib\hvlib\include\public\
+# (without plugin_build: copy $m2\LiveCloudKdSdk\public\* to $m2\hvlib\hvlib\include\public\
+#  and $m2\LiveCloudKdSdk\files\hvlib.lib to $m2\files\)
 # add <ClCompile Include="..\LeechCore\leechcore\charutil.c" /> to the .vcxproj, then:
 msbuild "$m2\leechcore_device_hvmm\leechcore_device_hvmm.vcxproj" /p:Configuration=Release /p:Platform=x64 /p:SolutionDir="$m2\" /p:SpectreMitigation=false
 ```
@@ -176,8 +177,10 @@ hvkdfusion.py        CLI: setup, check, list, read, write, dump, resume, debug, 
 wineye.py            WinDbg-style REPL on vmm.dll (ctypes)
 hvkd.ps1             launcher with automatic elevation (used by the x64dbg 'hvkd' command)
 config.example.json  configuration keys; setup writes config.json (local paths, not versioned)
+plugin_build/        LiveCloudKd hvlib headers + hvlib.lib, to build the hvmm LeechCore plugin
+LICENSE              HvKdFusion license and third-party components
 ```
 
 ## Licenses
 
-HvKdFusion: GPL-3.0-or-later (© 2026 EGKrb). Third-party components, **not included**, keep their own licenses: LiveCloudKd/hvlib/hvmm (GPL-3.0), MemProcFS and LeechCore (AGPL-3.0), Dokany (LGPL/MIT), ntoseye (its own license), WinDbg/kd (Microsoft license, not redistributed).
+HvKdFusion: GPL-3.0-or-later (© 2026 EGKrb), see [LICENSE](LICENSE). `plugin_build/` holds unmodified LiveCloudKd files (GPL-3.0). The other third-party components, **not included**, keep their own licenses: LiveCloudKd/hvlib/hvmm binaries (GPL-3.0), MemProcFS and LeechCore (AGPL-3.0), Dokany (LGPL/MIT), ntoseye (its own license), WinDbg/kd (Microsoft license, not redistributed).

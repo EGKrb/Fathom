@@ -1,0 +1,33 @@
+HvKdFusion — unified Hyper-V live-kernel-debug / memory-forensics orchestrator
+
+SPDX-License-Identifier: GPL-3.0-or-later
+
+Copyright (C) 2026 EGKrb
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+Full text: https://www.gnu.org/licenses/gpl-3.0.txt
+
+--------------------------------------------------------------------------------
+INCLUDED THIRD-PARTY FILES:
+  - plugin_build/                   GPL-3.0            github.com/gerhart01/LiveCloudKd
+      files/hvlib.lib and hvlib/hvlib/include/public/*.h, unmodified copies of
+      LiveCloudKdSdk/files/hvlib.lib and LiveCloudKdSdk/public/ from
+      LiveCloudKd, laid out as the leechcore_device_hvmm project expects.
+      Only needed to build that plugin.
+
+THIRD-PARTY COMPONENTS (not included; obtain separately):
+  - LiveCloudKd / hvlib / hvmm      GPL-3.0            github.com/gerhart01/LiveCloudKd
+    (hvlib.dll, hvmm.sys, LiveCloudKd.exe)
+  - MemProcFS (vmm.dll)             AGPL-3.0           github.com/ufrisk/MemProcFS
+  - LeechCore (leechcore.dll)       AGPL-3.0 / GPL     github.com/ufrisk/LeechCore
+  - Dokany (dokan2.sys)             LGPL / MIT         github.com/dokan-dev/dokany
+  - ntoseye                         (its own license)  github.com/dmaivel/ntoseye
+  - WinDbg / kd                     Microsoft EULA — NOT redistributed here

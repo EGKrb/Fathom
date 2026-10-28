@@ -478,6 +478,8 @@ pybridge/
 extracmds/src/extracmds.cpp          plugin ExtraCmds (.init, .save, scylla_hide.*, hvkd*, wineye)
 hvkdfusion/                          HvKdFusion (débogage noyau / forensics mémoire Hyper-V, Python)
   hvkdfusion.py, wineye.py, hvkd.ps1 CLI, REPL façon WinDbg, lanceur avec élévation
+  plugin_build/                      en-têtes hvlib + hvlib.lib de LiveCloudKd (compilation du plugin hvmm)
+  LICENSE                            licence de HvKdFusion et composants tiers
 plugins/
   install-plugins.ps1                installeur des plugins tiers
   THIRD-PARTY.md                     versions, licences, empreintes

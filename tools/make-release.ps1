@@ -88,8 +88,8 @@ Get-ChildItem -Recurse -Directory $pybridge -Filter '__pycache__' | Remove-Item 
 # HvKdFusion (used by the hvkd/wineye commands of ExtraCmds). config.json holds local paths: not shipped
 $hvkd = Join-Path $main 'hvkdfusion'
 New-Item -ItemType Directory -Force $hvkd | Out-Null
-foreach ($item in 'hvkdfusion.py', 'wineye.py', 'hvkd.ps1', 'config.example.json', 'README.md') {
-    Copy-Item (Join-Path $root "hvkdfusion\$item") $hvkd
+foreach ($item in 'hvkdfusion.py', 'wineye.py', 'hvkd.ps1', 'config.example.json', 'README.md', 'LICENSE', 'plugin_build') {
+    Copy-Item -Recurse (Join-Path $root "hvkdfusion\$item") $hvkd
 }
 
 # Licenses
