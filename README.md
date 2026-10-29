@@ -2,7 +2,7 @@
 
 <img width="100" src="src/fathom-logo.png" alt="Fathom"/>
 
-[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE) [![Platform: Windows](https://img.shields.io/badge/Platform-Windows%20x86%2Fx64-0078D6.svg)](#) [![Release](https://img.shields.io/badge/release-v1.0.0-success.svg)](https://github.com/EGKrb/Fathom/releases/latest) [![Based on x64dbg](https://img.shields.io/badge/based%20on-x64dbg-444.svg)](https://github.com/x64dbg/x64dbg)
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE) [![Platform: Windows](https://img.shields.io/badge/Platform-Windows%20x86%2Fx64-0078D6.svg)](#) [![Release](https://img.shields.io/badge/release-v1.1.0-success.svg)](https://github.com/EGKrb/Fathom/releases/latest) [![Based on x64dbg](https://img.shields.io/badge/based%20on-x64dbg-444.svg)](https://github.com/x64dbg/x64dbg)
 
 **Fathom** — a Windows reverse-engineering and memory-forensics toolkit, from a single instruction to the whole machine. It is **built on [x64dbg](https://github.com/x64dbg/x64dbg)** (GPL-3.0), the open-source Windows debugger (malware analysis, reverse-engineering of executables without source code), tracks its official `development` branch, and adds, for **malware triage, reverse-engineering and CTF**:
 
@@ -537,8 +537,8 @@ By default the plugins use the `pluginsdk` of an x64dbg installed via winget; ot
 .\plugins\install-plugins.ps1                       # third-party plugins into bin\x32 and bin\x64
 py src\tests\run.py --arch x64                       # test suite (including trace_export)
 python hvkdfusion\tests\test_servers.py              # wineye MCP/DAP/gdb protocol tests
-.\tools\make-release.ps1 -Version 1.0.0             # release archives into dist\ (stages release\ too)
-.\tools\build-installer.ps1 -Version 1.0.0          # dist\Fathom_1.0.0_setup.exe (needs NSIS)
+.\tools\make-release.ps1 -Version 1.1.0             # release archives into dist\ (stages release\ too)
+.\tools\build-installer.ps1 -Version 1.1.0          # dist\Fathom_1.1.0_setup.exe (needs NSIS)
 ```
 
 ### Updating from official x64dbg

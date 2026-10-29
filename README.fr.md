@@ -4,7 +4,7 @@
 
 <img width="100" src="src/fathom-logo.png" alt="Fathom"/>
 
-[![Licence : GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE) [![Plateforme : Windows](https://img.shields.io/badge/Plateforme-Windows%20x86%2Fx64-0078D6.svg)](#) [![Release](https://img.shields.io/badge/release-v1.0.0-success.svg)](https://github.com/EGKrb/Fathom/releases/latest) [![Basé sur x64dbg](https://img.shields.io/badge/bas%C3%A9%20sur-x64dbg-444.svg)](https://github.com/x64dbg/x64dbg)
+[![Licence : GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE) [![Plateforme : Windows](https://img.shields.io/badge/Plateforme-Windows%20x86%2Fx64-0078D6.svg)](#) [![Release](https://img.shields.io/badge/release-v1.1.0-success.svg)](https://github.com/EGKrb/Fathom/releases/latest) [![Basé sur x64dbg](https://img.shields.io/badge/bas%C3%A9%20sur-x64dbg-444.svg)](https://github.com/x64dbg/x64dbg)
 
 **Fathom** — une boîte à outils Windows de rétro-ingénierie et de forensic mémoire, de l'instruction isolée à la machine entière. Elle est **construite sur [x64dbg](https://github.com/x64dbg/x64dbg)** (GPL-3.0), le débogueur open source pour Windows (analyse de malwares, rétro-ingénierie d'exécutables sans code source), dont elle reprend la branche `development` officielle, et ajoute :
 
@@ -498,8 +498,8 @@ Par défaut, les plugins utilisent le `pluginsdk` d'un x64dbg installé avec win
 .\plugins\install-plugins.ps1                       # plugins tiers dans bin\x32 et bin\x64
 py src\tests\run.py --arch x64                       # suite de tests (dont trace_export)
 python hvkdfusion\tests\test_servers.py              # tests protocolaires wineye MCP/DAP/gdb
-.\tools\make-release.ps1 -Version 1.0.0              # archives de release dans dist\ (stage aussi release\)
-.\tools\build-installer.ps1 -Version 1.0.0           # dist\Fathom_1.0.0_setup.exe (nécessite NSIS)
+.\tools\make-release.ps1 -Version 1.1.0              # archives de release dans dist\ (stage aussi release\)
+.\tools\build-installer.ps1 -Version 1.1.0           # dist\Fathom_1.1.0_setup.exe (nécessite NSIS)
 ```
 
 ### Mettre à jour depuis x64dbg officiel

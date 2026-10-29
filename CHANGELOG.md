@@ -6,7 +6,7 @@ branch; this changelog covers Fathom's own additions and branding.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.1.0] - 2026-10-29
 
 ### Added
 - **TraceExport** — two new output formats, the text traces of the IDA Pro
@@ -47,4 +47,5 @@ First release under the Fathom name.
 Fathom is a modified distribution of x64dbg; see [NOTICE](NOTICE) and
 [CONTRIBUTING](CONTRIBUTING.md).
 
+[1.1.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.1.0
 [1.0.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.0.0

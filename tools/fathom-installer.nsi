@@ -1,7 +1,7 @@
 ; Fathom installer (NSIS). Built by tools\build-installer.ps1, which passes the
 ; release payload dir, version, icon and license on the command line:
-;   makensis /DVERSION=1.0.0 /DSRCDIR=<release\release> /DICON=<fathom.ico>
-;            /DLICENSE=<LICENSE> /DOUTFILE=<dist\Fathom_1.0.0_setup.exe> fathom-installer.nsi
+;   makensis /DVERSION=1.1.0 /DSRCDIR=<release\release> /DICON=<fathom.ico>
+;            /DLICENSE=<LICENSE> /DOUTFILE=<dist\Fathom_1.1.0_setup.exe> fathom-installer.nsi
 ;
 ; Fathom is GPL-3.0, based on x64dbg. The installer only packages the portable
 ; distribution into Program Files, adds shortcuts, and registers an uninstaller.
@@ -11,7 +11,7 @@ Unicode true
 !include "FileFunc.nsh"
 
 !ifndef VERSION
-  !define VERSION "1.0.0"
+  !define VERSION "1.1.0"
 !endif
 !ifndef SRCDIR
   !error "pass /DSRCDIR=<release payload dir> (the folder that holds Fathom.exe)"
