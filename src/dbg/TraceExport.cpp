@@ -33,6 +33,8 @@ namespace
 
     // The exported registers are the first words of REGISTERCONTEXT, ending with eflags
     static_assert(FIELD_OFFSET(REGISTERCONTEXT, eflags) == (_countof(TraceExportRegNames) - 1) * sizeof(duint), "Unexpected REGISTERCONTEXT layout");
+    // Tenet traces only know the general purpose registers and the instruction pointer, which comes before the flags
+    constexpr size_t TraceExportIpIndex = _countof(TraceExportRegNames) - 2;
 
     class TraceExportReader
     {
@@ -244,6 +246,45 @@ namespace
         out.push_back('"');
     }
 
+    // Tenet text trace: one line per instruction, "name=0xvalue" entries separated by commas.
+    // Reference: https://github.com/gaasedelen/tenet/tree/master/tracers
+    String TraceExportTenetHex(duint value)
+    {
+        return StringUtils::sprintf("0x%llx", (unsigned long long)value);
+    }
+
+    // Appends the general purpose registers that differ from state (all of them when full is set) and updates state
+    void TraceExportTenetRegisters(String & line, const duint* regwords, duint* state, bool full)
+    {
+        for(size_t i = 0; i < TraceExportIpIndex; i++)
+        {
+            if(!full && regwords[i] == state[i])
+                continue;
+            if(!line.empty())
+                line.push_back(',');
+            line += TraceExportRegNames[i];
+            line.push_back('=');
+            line += TraceExportTenetHex(regwords[i]);
+            state[i] = regwords[i];
+        }
+    }
+
+    // Appends the memory accessed by an instruction with its content after execution: "mr" for an unchanged
+    // value, "mw" for a modified one. Each access is the pointer-sized little-endian word recorded by x64dbg.
+    void TraceExportTenetMemory(String & line, const TraceExportEntry & entry)
+    {
+        for(unsigned char i = 0; i < entry.memoryCount; i++)
+        {
+            const bool unchanged = (entry.memoryFlags[i] & 1) != 0;
+            line += unchanged ? ",mr=" : ",mw=";
+            line += TraceExportTenetHex(entry.memoryAddress[i]);
+            line.push_back(':');
+            const duint value = unchanged ? entry.memoryOld[i] : entry.memoryNew[i];
+            for(size_t b = 0; b < sizeof(duint); b++)
+                line += StringUtils::sprintf("%02x", (unsigned)((value >> (b * 8)) & 0xFF));
+        }
+    }
+
     struct TraceExportHeader
     {
         String path;
@@ -300,9 +341,17 @@ namespace
     }
 }
 
-bool TraceExportFile(const char* traceFileName, const char* outputFileName, TraceExportFormat format, TraceExportResult & result)
+bool TraceExportFile(const char* traceFileName, const char* outputFileName, TraceExportFormat format, TraceExportResult & result, duint slide)
 {
     result = TraceExportResult();
+#ifndef _WIN64
+    if(format == TraceExportFormat::Frinet)
+    {
+        // The Frinet IDA plugin looks for the instruction pointer as rip (x64) or pc (ARM64)
+        result.error = "The Frinet format only supports 64-bit traces, use the tenet format for 32-bit traces";
+        return false;
+    }
+#endif //_WIN64
     if(TraceExportSamePath(traceFileName, outputFileName))
     {
         result.error = "The output file must be different from the trace file";
@@ -340,6 +389,10 @@ bool TraceExportFile(const char* traceFileName, const char* outputFileName, Trac
     // Module names are only meaningful while debugging the process that recorded the trace
     const bool resolveModules = dbgisdebugging() && header.hashValue != 0 && header.hashValue == dbgfunctionsget()->DbGetHash();
 
+    // Frinet rebases the trace on the IDA database with the ASLR slide, the runtime base of the traced module
+    if(format == TraceExportFormat::Frinet)
+        result.slide = slide ? slide : (resolveModules ? dbgdebuggedbase() : 0);
+
     String line;
     if(format == TraceExportFormat::Json)
     {
@@ -351,7 +404,12 @@ bool TraceExportFile(const char* traceFileName, const char* outputFileName, Trac
         TraceExportJsonString(line, header.hash);
         line += ",\n\"instructions\": [\n";
     }
-    else
+    else if(format == TraceExportFormat::Frinet)
+    {
+        if(result.slide)
+            line = "slide=" + TraceExportTenetHex(result.slide) + "\n";
+    }
+    else if(format == TraceExportFormat::Csv)
     {
         line = "index,thread,address,module,bytes,disasm";
         for(auto name : TraceExportRegNames)
@@ -362,6 +420,30 @@ bool TraceExportFile(const char* traceFileName, const char* outputFileName, Trac
         line += ",memory\r\n";
     }
     fwrite(line.data(), 1, line.size(), output);
+
+    // Tenet and Frinet store the registers as differences from the previous line
+    duint tenetState[TraceExportIpIndex] = {};
+    bool tenetFull = true;
+    TraceExportEntry previous;
+    bool hasPrevious = false;
+
+    // Frinet line: the executed instruction, then its effects (registers and memory after execution)
+    auto writeFrinetLine = [&](const TraceExportEntry & executed, const TraceExportEntry * next)
+    {
+        line = TraceExportRegNames[TraceExportIpIndex];
+        line.push_back('=');
+        line += TraceExportTenetHex(executed.registers.regcontext.cip);
+        // The registers after execution are only known when the next instruction runs on the same thread
+        if(next && next->threadId == executed.threadId)
+        {
+            TraceExportTenetRegisters(line, next->regwords, tenetState, tenetFull);
+            tenetFull = false;
+        }
+        TraceExportTenetMemory(line, executed);
+        line.push_back('\n');
+        fwrite(line.data(), 1, line.size(), output);
+        result.count++;
+    };
 
     Zydis zydis;
     TraceExportEntry entry;
@@ -382,6 +464,32 @@ bool TraceExportFile(const char* traceFileName, const char* outputFileName, Trac
                 continue;
 
             const duint cip = entry.registers.regcontext.cip;
+            if(format == TraceExportFormat::Tenet)
+            {
+                // Tenet line: the state before the instruction, with the memory accessed by the previous one
+                line.clear();
+                TraceExportTenetRegisters(line, entry.regwords, tenetState, tenetFull);
+                tenetFull = false;
+                if(!line.empty())
+                    line.push_back(',');
+                line += TraceExportRegNames[TraceExportIpIndex];
+                line.push_back('=');
+                line += TraceExportTenetHex(cip);
+                if(hasPrevious)
+                    TraceExportTenetMemory(line, previous);
+                line.push_back('\n');
+                fwrite(line.data(), 1, line.size(), output);
+                result.count++;
+            }
+            else if(format == TraceExportFormat::Frinet && hasPrevious)
+                writeFrinetLine(previous, &entry);
+            if(format == TraceExportFormat::Tenet || format == TraceExportFormat::Frinet)
+            {
+                previous = entry;
+                hasPrevious = true;
+                continue;
+            }
+
             const String disasm = zydis.Disassemble(cip, entry.opcode, entry.opcodeSize) ? zydis.InstructionText() : "???";
             char moduleName[MAX_MODULE_SIZE] = "";
             if(resolveModules)
@@ -474,6 +582,9 @@ bool TraceExportFile(const char* traceFileName, const char* outputFileName, Trac
         result.error = StringUtils::sprintf("Malformed trace file after %llu instructions: %s", (unsigned long long)result.count, error.c_str());
     }
 
+    // The last Frinet instruction has no next instruction to read its registers from
+    if(format == TraceExportFormat::Frinet && hasPrevious)
+        writeFrinetLine(previous, nullptr);
     if(format == TraceExportFormat::Json)
     {
         line = result.count ? "\n]\n}\n" : "]\n}\n";

@@ -19,4 +19,16 @@ testassert $result == jsoncount, "csv and json exports have the same instruction
 TraceExport "tests/trace_export/trace.trace64", "tests/trace_export/trace.txt", csv
 testassert $result == jsoncount, "explicit format argument"
 
+TraceExport "tests/trace_export/trace.trace64", "tests/trace_export/trace.log", tenet
+testassert $result == jsoncount, "tenet export has the same instruction count"
+
+// The Frinet format is 64-bit only: 0xFFFFFFFF+1 wraps to 0 on x32
+cmp 0xFFFFFFFF+1, 0
+je done
+TraceExport "tests/trace_export/trace.trace64", "tests/trace_export/trace.tenet"
+testassert $result == jsoncount, "frinet export by extension"
+TraceExport "tests/trace_export/trace.trace64", "tests/trace_export/trace.frinet.txt", frinet, 0x140000000
+testassert $result == jsoncount, "frinet export with an explicit slide"
+
+done:
 run

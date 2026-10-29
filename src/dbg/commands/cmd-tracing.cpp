@@ -252,25 +252,54 @@ bool cbDebugTraceExport(int argc, char* argv[])
     String formatName = StringUtils::ToLower(argc > 3 ? argv[3] : "");
     if(formatName.empty())
     {
-        if(StringUtils::EndsWith(StringUtils::ToLower(argv[2]), ".csv"))
+        auto outputName = StringUtils::ToLower(argv[2]);
+        if(StringUtils::EndsWith(outputName, ".csv"))
             format = TraceExportFormat::Csv;
+        else if(StringUtils::EndsWith(outputName, ".tenet")) // extension used by the Frinet tracer
+            format = TraceExportFormat::Frinet;
     }
     else if(formatName == "csv")
         format = TraceExportFormat::Csv;
+    else if(formatName == "tenet")
+        format = TraceExportFormat::Tenet;
+    else if(formatName == "frinet")
+        format = TraceExportFormat::Frinet;
     else if(formatName != "json")
     {
-        dprintf(QT_TRANSLATE_NOOP("DBG", "Unknown export format \"%s\", use \"json\" or \"csv\"\n"), argv[3]);
+        dprintf(QT_TRANSLATE_NOOP("DBG", "Unknown export format \"%s\", use \"json\", \"csv\", \"tenet\" or \"frinet\"\n"), argv[3]);
         return false;
     }
 
+    duint slide = 0;
+    if(argc > 4)
+    {
+        if(format != TraceExportFormat::Frinet)
+        {
+            dputs(QT_TRANSLATE_NOOP("DBG", "The slide argument is only used by the frinet format"));
+            return false;
+        }
+        if(!valfromstring(argv[4], &slide, false))
+        {
+            dprintf(QT_TRANSLATE_NOOP("DBG", "Invalid expression \"%s\"\n"), argv[4]);
+            return false;
+        }
+    }
+
     TraceExportResult result;
-    if(!TraceExportFile(argv[1], argv[2], format, result))
+    if(!TraceExportFile(argv[1], argv[2], format, result, slide))
     {
         dprintf(QT_TRANSLATE_NOOP("DBG", "Trace export failed: %s\n"), result.error.c_str());
         return false;
     }
     if(result.truncated)
         dputs(QT_TRANSLATE_NOOP("DBG", "The last trace block is incomplete and was skipped (is the trace still being recorded?)"));
+    if(format == TraceExportFormat::Frinet)
+    {
+        if(result.slide)
+            dprintf(QT_TRANSLATE_NOOP("DBG", "ASLR slide: %p\n"), (void*)result.slide);
+        else
+            dputs(QT_TRANSLATE_NOOP("DBG", "No ASLR slide written (pass it as the 4th argument, for example mod.main())"));
+    }
     varset("$result", result.count, false);
     dprintf(QT_TRANSLATE_NOOP("DBG", "Exported %llu instructions to %s\n"), (unsigned long long)result.count, argv[2]);
     return true;

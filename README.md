@@ -6,7 +6,7 @@
 
 **Fathom** — a Windows reverse-engineering and memory-forensics toolkit, from a single instruction to the whole machine. It is **built on [x64dbg](https://github.com/x64dbg/x64dbg)** (GPL-3.0), the open-source Windows debugger (malware analysis, reverse-engineering of executables without source code), tracks its official `development` branch, and adds, for **malware triage, reverse-engineering and CTF**:
 
-- **`TraceExport`** — turn execution traces into readable **JSON** or **CSV** that any tool can parse;
+- **`TraceExport`** — turn execution traces into readable **JSON** or **CSV** that any tool can parse, or into **Tenet** / **Frinet** text traces to explore them in IDA Pro;
 - **pybridge** — drive Fathom **from Python** (breakpoints, single-stepping, registers, memory, traces);
 - ready-to-use **script templates** for **`headless.exe`** (Fathom with no GUI);
 - a **memory dump viewer** (`.dmp`) and handy commands: **`.init`** (executable or dump), **`.save`**, **`scylla_hide.enable` / `.disable` / `.status`**;
@@ -122,7 +122,7 @@ A second file, `Fathom_<version>_symbols.zip`, contains the debug symbols (`.pdb
 | | Official x64dbg | This fork |
 |---|---|---|
 | Code base | published releases (e.g. 2026.05.27) | recent `development` branch (features and fixes not yet in an official release) |
-| Trace export | binary `.trace64`, readable only by x64dbg; CSV export only from the GUI | `TraceExport` command → JSON or CSV, also in scripts and `headless.exe` |
+| Trace export | binary `.trace64`, readable only by x64dbg; CSV export only from the GUI | `TraceExport` command → JSON, CSV, Tenet or Frinet, also in scripts and `headless.exe` |
 | Automation | x64dbg script language, C/C++ SDK | + Python client (pybridge) + headless templates with a launcher |
 | Memory dumps (`.dmp`) | creation only (`minidump`) | + dump viewer (`minidump.exe`), opened with `.init file.dmp`; kernel dumps and raw memory images open in wineye |
 | Kernel / whole machine | — (user-mode only) | HvKdFusion: Hyper-V VM memory read/write/dump, WinDbg/kd on a VM, MemProcFS mount, wineye REPL (`hvkd`, `wineye`) |
@@ -177,14 +177,15 @@ For each instruction, x64dbg writes to the `.trace64` file: the thread, the inst
 ## TraceExport: exporting traces
 
 ```
-TraceExport trace_file, output_file[, format]
+TraceExport trace_file, output_file[, format[, slide]]
 ```
 
 | Argument | Description |
 |---|---|
 | `trace_file` | trace to read: `.trace64` with x64dbg, `.trace32` with x32dbg |
 | `output_file` | created file (overwritten if it exists) |
-| `format` | `json` or `csv`. Without this 3rd argument: `csv` if the name ends in `.csv`, otherwise `json` |
+| `format` | `json`, `csv`, `tenet` or `frinet`. Without this 3rd argument: `csv` if the name ends in `.csv`, `frinet` if it ends in `.tenet`, otherwise `json` |
+| `slide` | `frinet` only, optional: ASLR slide (runtime base of the traced module, e.g. `mod.main()`). Default: base of the debugged module if the trace belongs to it, otherwise none |
 
 After the command, **`$result`** holds the number of exported instructions. The command **does not need a process being debugged**: it also works to convert old traces, and inside `headless.exe`.
 
@@ -221,6 +222,34 @@ Addresses and values are **hex strings**: a 64-bit integer does not fit in a sta
 
 One line per instruction, columns `index,thread,address,module,bytes,disasm,<registers>,memory`. The `memory` column lists accesses separated by `;`: `address:value` if memory was unchanged (read), `address:before->after` if it was modified. The file opens directly in Excel or with `pandas.read_csv`.
 
+### Tenet and Frinet formats (IDA Pro trace explorers)
+
+[Tenet](https://github.com/gaasedelen/tenet) (ret2) and [Frinet](https://github.com/synacktiv/frinet) (Synacktiv) are IDA Pro plugins to step **backwards and forwards** through an execution trace, set memory breakpoints across time and seek to the instruction that wrote a register. Both read the same human-readable text trace: one line per instruction, comma-separated `name=0xvalue` entries — the registers that changed since the previous line (all of them on the first line), the instruction pointer, and memory accesses as `mr=0xaddress:bytes` (read / unchanged) or `mw=0xaddress:bytes` (modified), `bytes` being the content after execution in memory order. Flags are not exported (neither tool reads them).
+
+```
+TraceExport C:\traces\sample.trace64, C:\traces\sample.log, tenet
+TraceExport C:\traces\sample.trace64, C:\traces\sample.tenet, frinet, mod.main()
+```
+
+| | `tenet` | `frinet` |
+|---|---|---|
+| A line is | the state **before** its instruction, with the memory accessed by the previous one (Tenet's reference tracers) | the instruction, with the registers **after** it and the memory it accessed (Frinet tracer) |
+| Order | changed registers, then `rip`/`eip` last | `rip` first, then changed registers, then memory |
+| Header | — | `slide=0x…` (ASLR slide, used to rebase the trace on the IDA database) |
+| Architectures | x86 and x64 | x64 only (the Frinet plugin only reads `rip`/`pc`) |
+| Open with | IDA: *File > Load file > Tenet trace file* | `frinet index --format tenet sample.tenet sample.db`, then IDA: *File > Load file > Open Frinet DB* |
+
+```
+rax=0x7ff7fa51128c,rcx=0xcee8e5b000,…,r15=0x0,rip=0x7ff7fa51128c          ← tenet
+rsp=0xcee90fff18,rip=0x7ff7fa5114e0,mr=0xcee90fff20:0000000000000000,mw=0xcee90fff18:951251faf77f0000
+
+slide=0x7ff7fa510000                                                      ← frinet
+rip=0x7ff7fa51128c,rax=0x7ff7fa51128c,…,rsp=0xcee90fff20,…
+rip=0x7ff7fa511290,rsp=0xcee90fff18,mr=0xcee90fff20:0000000000000000,mw=0xcee90fff18:951251faf77f0000
+```
+
+Limits: x64dbg stores each memory access as one pointer-sized value, so an access may cover more bytes than the operand; a multi-thread trace is written as a single timeline; in `tenet`, the memory of the last instruction is lost (no following line), and in `frinet` the registers after the last instruction (or before a thread switch) are unknown.
+
 ### How it works internally
 
 [`src/dbg/TraceExport.cpp`](src/dbg/TraceExport.cpp) streams the file (constant memory, whatever the trace size):
@@ -228,7 +257,7 @@ One line per instruction, columns `index,thread,address,module,bytes,disasm,<reg
 1. checks the `TRAC` header and its JSON (version 1, same architecture as the debugger);
 2. for each instruction block, applies the changed registers to the current state (registers are delta-encoded), reads the memory accesses, then disassembles the bytes;
 3. skips user blocks (type ≥ 0x80) allowed by the format;
-4. writes the JSON or CSV as it goes.
+4. writes the JSON, CSV, Tenet or Frinet output as it goes (Tenet/Frinet keep the previous instruction to place memory accesses and post-execution registers on the right line).
 
 Safety: an output file identical to the input file is refused (it would be overwritten); a trace **still being recorded** can be exported, its incomplete last block is skipped with a warning; a corrupt file gives a precise message stating after how many instructions.
 
@@ -293,7 +322,7 @@ with Debugger.launch(r"C:\Tools\x64dbg\release") as dbg:
 | Breakpoints | `set_breakpoint(addr, condition, log, command, break_, singleshot)` | software, with condition, automatic log text and command |
 | | `set_hardware_breakpoint(addr, kind="x"/"w"/"r", size)`, `delete_breakpoint(addr)` | hardware; delete (all if `addr` omitted) |
 | Traces | `trace(file, condition, max_steps, step_over)` | trace (and record) until the condition |
-| | `export_trace(trace, output, fmt)` | `TraceExport`; returns the number of instructions |
+| | `export_trace(trace, output, fmt, slide)` | `TraceExport` (`fmt`: `json`, `csv`, `tenet`, `frinet`); returns the number of instructions |
 | Commands | `cmd("text")`, `command(name, *args)`, `eval(expr)`, `result` | any x64dbg command; `command()` escapes text arguments |
 
 Addresses and values accept an **integer** or an **x64dbg expression** (string); results are Python integers. Errors (unreadable memory, invalid expression, refused command) raise `BridgeError` with the x64dbg message.
@@ -349,7 +378,7 @@ How the launcher works:
 | Template | What it does | Files produced |
 |---|---|---|
 | `api-log` | logs API calls and their arguments, never stopping the program | `headless.log` (`[api]` lines) |
-| `trace-export` | traces 50,000 instructions from the entry point and exports them | `trace.trace64`, `trace.json`, `trace.csv` |
+| `trace-export` | traces 50,000 instructions from the entry point and exports them | `trace.trace64`, `trace.json`, `trace.csv`, `trace.log` (Tenet) |
 | `dump-module` | saves the main module and a full minidump at the entry point | `<module>.mem`, `process.dmp` |
 | `break-on-file` | stops only when the program opens a `.txt` file, then logs the call, saves the stack and writes a minidump; exits cleanly if no file matches | `stack.bin`, `at_createfile.dmp` |
 

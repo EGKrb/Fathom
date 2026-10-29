@@ -28,9 +28,11 @@ powershell -ExecutionPolicy Bypass -File .\install-plugins.ps1 -Plugins OllyDump
 
 ## Nouveautés par rapport à x64dbg officiel
 
-- Commande `TraceExport` : convertit une trace (`.trace64`/`.trace32`) en JSON ou CSV.
+- Commande `TraceExport` : convertit une trace (`.trace64`/`.trace32`) en JSON, CSV, ou trace texte Tenet / Frinet (explorateurs de traces pour IDA Pro).
   ```
   TraceExport "C:\traces\cible.trace64", "C:\traces\cible.json"
+  TraceExport "C:\traces\cible.trace64", "C:\traces\cible.log", tenet
+  TraceExport "C:\traces\cible.trace64", "C:\traces\cible.tenet", frinet, mod.main()
   ```
 - `pybridge\python\x64dbg_bridge.py` : client Python (breakpoints, pas à pas, registres, mémoire, traces).
 - `pybridge\headless\run-headless.ps1` : modèles de scripts prêts à l'emploi (journal d'API, trace + export, dump, breakpoint conditionnel).

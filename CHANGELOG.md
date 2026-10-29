@@ -6,6 +6,15 @@ branch; this changelog covers Fathom's own additions and branding.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+- **TraceExport** — two new output formats, the text traces of the IDA Pro
+  trace explorers [Tenet](https://github.com/gaasedelen/tenet) (`tenet`, x86
+  and x64) and [Frinet](https://github.com/synacktiv/frinet) (`frinet`, x64,
+  chosen automatically for `.tenet` files, with an optional ASLR `slide`
+  argument). pybridge's `export_trace()` accepts them, plus a `slide`.
+
 ## [1.0.0] - 2026-10-29
 
 First release under the Fathom name.

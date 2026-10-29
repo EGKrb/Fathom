@@ -125,7 +125,7 @@ Le lanceur remplace `%TARGET%`, `%MODULE%`, `%OUT%` et `%BITS%` dans le modèle,
 | Modèle | Rôle |
 |---|---|
 | `api-log` | journalise les appels d'API avec leurs arguments, sans pause |
-| `trace-export` | trace 50 000 instructions depuis le point d'entrée et exporte en JSON/CSV (nécessite `TraceExport`) |
+| `trace-export` | trace 50 000 instructions depuis le point d'entrée et exporte en JSON/CSV/Tenet (nécessite `TraceExport`) |
 | `dump-module` | sauvegarde le module principal (`.mem`) et un minidump complet au point d'entrée |
 | `break-on-file` | breakpoint conditionnel (chemin contenant `.txt`) puis actions automatiques : log, sauvegarde de la pile, minidump |
 | `antidebug` | lance la cible avec `hide` (PEB patché : `BeingDebugged`, `NtGlobalFlag`, heap flags) et journalise les sondes anti-debug |

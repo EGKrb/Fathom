@@ -1,4 +1,4 @@
-// Records an execution trace from the entry point and exports it to JSON and CSV.
+// Records an execution trace from the entry point and exports it to JSON, CSV and Tenet.
 // Needs an x64dbg build with the TraceExport command.
 // Change the stop condition (0 = never) and the maximum count (.N = decimal) as needed,
 // for example: TraceIntoConditional "cip == kernelbase.ExitProcess", .1000000
@@ -14,4 +14,6 @@ StopTraceRecording
 
 TraceExport "%OUT%\trace.trace%BITS%", "%OUT%\trace.json"
 TraceExport "%OUT%\trace.trace%BITS%", "%OUT%\trace.csv"
+// Tenet text trace for IDA Pro; on x64, a Frinet one can be added with: TraceExport "...", "%OUT%\trace.tenet", frinet
+TraceExport "%OUT%\trace.trace%BITS%", "%OUT%\trace.log", tenet
 log "[template] done"

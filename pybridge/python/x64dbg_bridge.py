@@ -491,9 +491,17 @@ class Debugger:
                 self.cmd("StopTraceRecording", check=False)
         return self.eval("$tracecounter")
 
-    def export_trace(self, trace_file: str | os.PathLike, output_file: str | os.PathLike, fmt: str | None = None) -> int:
-        """Convert a trace file to JSON or CSV with the TraceExport command. Returns the instruction count."""
-        self.command("TraceExport", str(trace_file), str(output_file), Expr(fmt) if fmt else None)
+    def export_trace(self, trace_file: str | os.PathLike, output_file: str | os.PathLike, fmt: str | None = None,
+                     slide: int | str | None = None) -> int:
+        """Convert a trace file with the TraceExport command. Returns the instruction count.
+
+        fmt: "json", "csv", "tenet" or "frinet" (default: from the output file extension).
+        slide: frinet only, the ASLR slide (an integer or an expression such as "mod.main()").
+        """
+        if slide is not None and not fmt:
+            fmt = "frinet"
+        self.command("TraceExport", str(trace_file), str(output_file), Expr(fmt) if fmt else None,
+                     Expr(slide) if isinstance(slide, str) else slide)
         return self.result
 
 
