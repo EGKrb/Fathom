@@ -116,6 +116,25 @@ Addresses accept `0x..`, decimal and `module!symbol`. On a **live** VM (`--live 
 
 `wineye.py` can also be imported from Python (`Vmm` class) — e.g. next to a [pybridge](../pybridge/README.md) script, to compare what a process sees with what the kernel holds.
 
+### Server modes (`--serve`)
+
+The modes ntoseye exposes — now native Windows, no WSL. They run instead of the REPL, on the same target (`--dump` / `--live` / `--device`), and are **read-only passive memory** (VP registers only on a live VM, with `--vm N`); no breakpoints/stepping — for run control use `hvkdfusion.py debug`.
+
+| Mode | Command | Use |
+|---|---|---|
+| **MCP** | `wineye --dump d.raw --serve mcp` | MCP server (JSON-RPC 2.0 over stdio) for an AI/agent client. Tools: `list_processes`, `process_info`, `list_modules`, `list_handles`, `list_vads`, `read_memory`, `resolve_symbol`, `registers`. |
+| **gdbserver** | `wineye --dump d.raw --serve gdb [--listen 127.0.0.1:2159]` | GDB Remote Serial Protocol over TCP. From GDB: `target remote 127.0.0.1:2159`, then read memory (`x/16xg <addr>`) and, on a live VM, `info registers`. |
+| **DAP** | `wineye --dump d.raw --serve dap [--listen 127.0.0.1:4711]` | Debug Adapter Protocol (stdio, or TCP with `--listen`) for an IDE: `modules`, `readMemory`, `evaluate module!symbol`. |
+
+Example — register wineye as an MCP server (e.g. in an MCP client config):
+
+```json
+{ "command": "python",
+  "args": ["hvkdfusion.py", "wineye", "--dump", "C:\\dumps\\vm0.raw", "--serve", "mcp"] }
+```
+
+In every server mode the startup banner goes to stderr, so stdout carries only the protocol stream.
+
 ---
 
 ## Preparing the components

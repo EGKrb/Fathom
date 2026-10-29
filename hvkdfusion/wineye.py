@@ -42,6 +42,19 @@ or '.ctl <N>'). This lifts the passive-only limit for registers and run state:
 Addresses accept 0x.., decimal, and `module!symbol`. Scripting: `-c "cmd;cmd"`,
 `--batch`, `--json` (structured commands), or import wineye and use the Vmm class.
 
+Server modes (the ones ntoseye has; here native, no WSL) - `--serve`:
+    --serve mcp              MCP server over stdio (JSON-RPC 2.0): tools
+                             list_processes / process_info / list_modules /
+                             list_handles / list_vads / read_memory /
+                             resolve_symbol / registers, for an AI/agent client.
+    --serve gdb [--listen H:P]   GDB Remote Serial Protocol over TCP
+                             (default 127.0.0.1:2159): 'target remote' then read
+                             memory (x/...) and, on a live VM, registers.
+    --serve dap [--listen H:P]   Debug Adapter Protocol (stdio, or TCP with
+                             --listen): modules, readMemory, evaluate module!sym.
+All server modes are read-only passive memory (VP registers only on a live VM);
+no breakpoints/stepping - for run control use WinDbg/kd (hvkdfusion.py debug).
+
 GPL-AGPL (uses MemProcFS vmm.dll).
 """
 
@@ -693,6 +706,447 @@ class Repl:
 
 
 # --------------------------------------------------------------------------- #
+#  Server backends (MCP / DAP / gdbserver) - the modes ntoseye has and the REPL
+#  lacked. All read-only passive memory (VP registers only on a live VM); no run
+#  control, same limit as the REPL. Pure stdlib (no pip), reusing the Vmm class.
+# --------------------------------------------------------------------------- #
+class WineyeOps:
+    """Thin facade over Vmm (+ optional HvControl) shared by the server modes."""
+    DEFAULT_PID = 4   # System: kernel-VA context
+
+    def __init__(self, vmm: Vmm, ctl: "HvControl | None" = None):
+        self.vmm = vmm
+        self.ctl = ctl
+
+    @staticmethod
+    def _int(v, default=None):
+        if v is None:
+            return default
+        return v if isinstance(v, int) else int(str(v), 0)
+
+    def processes(self):
+        out = []
+        for pid in sorted(self.vmm.pids()):
+            p = self.vmm.process(pid)
+            if p:
+                out.append(p)
+        return out
+
+    def process(self, pid):
+        return self.vmm.process(self._int(pid, self.DEFAULT_PID))
+
+    def modules(self, pid):
+        return self.vmm.modules(self._int(pid, self.DEFAULT_PID))
+
+    def handles(self, pid):
+        return self.vmm.handles(self._int(pid, self.DEFAULT_PID))
+
+    def vads(self, pid):
+        return self.vmm.vads(self._int(pid, self.DEFAULT_PID))
+
+    def symbol(self, module, name):
+        return self.vmm.symbol(module, name)
+
+    def read(self, pid, addr, size):
+        return self.vmm.read(self._int(pid, self.DEFAULT_PID), self._int(addr), self._int(size))
+
+    def registers(self):
+        if not self.ctl:
+            raise VmmError("registres indisponibles : cible passive "
+                           "(VM Hyper-V live + --vm <N> requis).")
+        return {n: self.ctl.reg(HV_REG[n]) for n in _REG_ORDER}
+
+
+class McpServer:
+    """Minimal MCP server (JSON-RPC 2.0 over stdio, newline-delimited messages).
+    Exposes wineye's passive-memory views as tools for an AI/agent client."""
+    PROTOCOL = "2024-11-05"
+
+    def __init__(self, ops: WineyeOps):
+        self.ops = ops
+
+    def _tools(self):
+        pid = {"type": "string", "description": "PID (decimal or 0x..); default: System (4)"}
+        return [
+            {"name": "list_processes",
+             "description": "List processes (pid, ppid, name, eprocess, peb).",
+             "inputSchema": {"type": "object", "properties": {}}},
+            {"name": "process_info", "description": "Details for one process.",
+             "inputSchema": {"type": "object", "properties": {"pid": pid}}},
+            {"name": "list_modules", "description": "Loaded modules of a process.",
+             "inputSchema": {"type": "object", "properties": {"pid": pid}}},
+            {"name": "list_handles", "description": "Handles of a process.",
+             "inputSchema": {"type": "object", "properties": {"pid": pid}}},
+            {"name": "list_vads", "description": "Virtual address descriptors of a process.",
+             "inputSchema": {"type": "object", "properties": {"pid": pid}}},
+            {"name": "read_memory", "description": "Read memory; returns hex bytes.",
+             "inputSchema": {"type": "object", "properties": {
+                 "address": {"type": "string", "description": "0x.. or decimal"},
+                 "size": {"type": "string", "description": "byte count"}, "pid": pid},
+                 "required": ["address", "size"]}},
+            {"name": "resolve_symbol",
+             "description": "Resolve module!symbol to an address via the PDB.",
+             "inputSchema": {"type": "object", "properties": {
+                 "module": {"type": "string"}, "symbol": {"type": "string"}},
+                 "required": ["module", "symbol"]}},
+            {"name": "registers",
+             "description": "VP0 registers (live Hyper-V VM only).",
+             "inputSchema": {"type": "object", "properties": {}}},
+        ]
+
+    def _call(self, name, a):
+        o = self.ops
+        if name == "list_processes":
+            return o.processes()
+        if name == "process_info":
+            return o.process(a.get("pid"))
+        if name == "list_modules":
+            return o.modules(a.get("pid"))
+        if name == "list_handles":
+            return o.handles(a.get("pid"))
+        if name == "list_vads":
+            return o.vads(a.get("pid"))
+        if name == "read_memory":
+            data = o.read(a.get("pid"), a["address"], a["size"])
+            return {"address": a["address"], "size": len(data), "hex": data.hex()}
+        if name == "resolve_symbol":
+            return {"address": hex(o.symbol(a["module"], a["symbol"]))}
+        if name == "registers":
+            return {k: hex(v) for k, v in o.registers().items()}
+        raise VmmError(f"outil inconnu : {name}")
+
+    def serve(self):
+        out = sys.stdout
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            mid, method = msg.get("id"), msg.get("method")
+            if method == "initialize":
+                resp = {"result": {"protocolVersion": self.PROTOCOL,
+                                   "capabilities": {"tools": {"listChanged": False}},
+                                   "serverInfo": {"name": "wineye", "version": "1.0"}}}
+            elif method in ("notifications/initialized", "initialized", "notifications/cancelled"):
+                continue
+            elif method == "ping":
+                resp = {"result": {}}
+            elif method == "tools/list":
+                resp = {"result": {"tools": self._tools()}}
+            elif method == "tools/call":
+                params = msg.get("params", {})
+                try:
+                    data = self._call(params.get("name"), params.get("arguments") or {})
+                    resp = {"result": {"content": [{"type": "text", "text": _jdump(data)}]}}
+                except Exception as e:
+                    resp = {"result": {"content": [{"type": "text", "text": f"error: {e}"}],
+                                       "isError": True}}
+            elif mid is None:
+                continue   # unknown notification: ignore
+            else:
+                resp = {"error": {"code": -32601, "message": f"method not found: {method}"}}
+            resp.update({"jsonrpc": "2.0", "id": mid})
+            out.write(json.dumps(resp) + "\n")
+            out.flush()
+
+
+class GdbServer:
+    """Read-only GDB Remote Serial Protocol server (TCP). Serves memory (m) in the
+    kernel context, and VP registers on a live VM. No run control: continue/step
+    just report 'stopped' (hvlib delivers no trap events)."""
+    # i386:x86-64 'g' packet order
+    REG64 = ["rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
+             "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "rip"]
+
+    def __init__(self, ops: WineyeOps):
+        self.ops = ops
+
+    @staticmethod
+    def _hexle(value, nbytes):
+        return value.to_bytes(nbytes, "little").hex()
+
+    @staticmethod
+    def _checksum(body: bytes) -> int:
+        return sum(body) & 0xFF
+
+    def _send(self, conn, payload: str):
+        body = payload.encode()
+        conn.sendall(b"$" + body + b"#" + f"{self._checksum(body):02x}".encode())
+
+    def serve(self, host, port):
+        import socket
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind((host, port))
+        srv.listen(1)
+        print(f"[*] gdbserver : écoute sur {host}:{port}  "
+              f"(connecte GDB : target remote {host}:{port})", file=sys.stderr)
+        while True:
+            conn, addr = srv.accept()
+            print(f"[+] GDB connecté : {addr}", file=sys.stderr)
+            try:
+                self._session(conn)
+            except (ConnectionError, OSError):
+                pass
+            finally:
+                conn.close()
+            print("[~] GDB déconnecté (en attente d'une nouvelle connexion)", file=sys.stderr)
+
+    def _session(self, conn):
+        buf = b""
+        noack = False
+        while True:
+            data = conn.recv(4096)
+            if not data:
+                return
+            buf += data
+            while buf:
+                c = buf[:1]
+                if c in (b"+", b"-"):
+                    buf = buf[1:]
+                    continue
+                if c == b"\x03":            # Ctrl-C interrupt
+                    buf = buf[1:]
+                    self._send(conn, "S05")
+                    continue
+                if c != b"$":
+                    buf = buf[1:]
+                    continue
+                end = buf.find(b"#")
+                if end == -1 or len(buf) < end + 3:
+                    break                   # incomplete packet, wait for more
+                body = buf[1:end]
+                buf = buf[end + 3:]
+                if not noack:
+                    conn.sendall(b"+")
+                reply = self._handle(body.decode(errors="replace"))
+                if reply is not None:
+                    self._send(conn, reply)
+                if body == b"QStartNoAckMode":
+                    noack = True
+
+    def _handle(self, p):
+        if p == "?":
+            return "S05"
+        if p.startswith("qSupported"):
+            return "PacketSize=4000;QStartNoAckMode+"
+        if p == "QStartNoAckMode":
+            return "OK"
+        if p == "qAttached":
+            return "1"
+        if p == "qC":
+            return "QC1"
+        if p.startswith("qfThreadInfo"):
+            return "m1"
+        if p.startswith("qsThreadInfo"):
+            return "l"
+        if p.startswith(("H", "qSymbol")):
+            return "OK"
+        if p == "g":
+            return self._read_regs()
+        if p.startswith("p"):
+            try:
+                return self._read_one_reg(int(p[1:], 16))
+            except ValueError:
+                return "E01"
+        if p.startswith("m"):
+            return self._read_mem(p[1:])
+        if p.startswith(("M", "X", "G", "P")):
+            return "E01"                    # read-only
+        if p.startswith(("c", "C", "s", "S")):
+            return "S05"                    # no run control: report stopped
+        if p in ("D", "k"):
+            return "OK"
+        return ""                           # unsupported -> empty
+
+    def _regs(self):
+        try:
+            return self.ops.registers()
+        except Exception:
+            return {}
+
+    def _read_regs(self):
+        regs = self._regs()
+        parts = [self._hexle(regs[n], 8) if n in regs else "xx" * 8 for n in self.REG64]
+        parts.append(self._hexle(regs["rflags"], 4) if "rflags" in regs else "xx" * 4)
+        parts += ["xx" * 4] * 6             # cs ss ds es fs gs: unavailable
+        return "".join(parts)
+
+    def _read_one_reg(self, n):
+        regs = self._regs()
+        if 0 <= n < len(self.REG64):
+            name = self.REG64[n]
+            return self._hexle(regs[name], 8) if name in regs else "xx" * 8
+        if n == 17:
+            return self._hexle(regs["rflags"], 4) if "rflags" in regs else "xx" * 4
+        if 18 <= n <= 23:
+            return "xx" * 4
+        return "xx" * 8
+
+    def _read_mem(self, spec):
+        try:
+            a, length = spec.split(",")
+            data = self.ops.read(None, int(a, 16), int(length, 16))
+            return data.hex() if data else "E00"
+        except Exception:
+            return "E01"
+
+
+class DapServer:
+    """Minimal read-only Debug Adapter Protocol adapter (stdio or TCP). Exposes the
+    target's modules and memory (readMemory, evaluate module!symbol); no run control."""
+    def __init__(self, ops: WineyeOps):
+        self.ops = ops
+        self.seq = 0
+
+    def serve(self, rfile, wfile):
+        self.rfile, self.wfile = rfile, wfile
+        while True:
+            msg = self._read()
+            if msg is None:
+                break
+            if msg.get("type") == "request":
+                if not self._dispatch(msg):
+                    break
+
+    def _read(self):
+        headers = {}
+        while True:
+            line = self.rfile.readline()
+            if not line:
+                return None
+            line = line.decode("ascii", "replace").strip()
+            if line == "":
+                break
+            if ":" in line:
+                k, v = line.split(":", 1)
+                headers[k.strip().lower()] = v.strip()
+        n = int(headers.get("content-length", 0))
+        if not n:
+            return {}
+        return json.loads(self.rfile.read(n).decode("utf-8"))
+
+    def _write(self, obj):
+        data = json.dumps(obj).encode("utf-8")
+        self.wfile.write(f"Content-Length: {len(data)}\r\n\r\n".encode("ascii"))
+        self.wfile.write(data)
+        self.wfile.flush()
+
+    def _event(self, event, body=None):
+        self.seq += 1
+        self._write({"seq": self.seq, "type": "event", "event": event, "body": body or {}})
+
+    def _respond(self, req, body=None, success=True, message=None):
+        self.seq += 1
+        r = {"seq": self.seq, "type": "response", "request_seq": req["seq"],
+             "success": success, "command": req["command"]}
+        if message:
+            r["message"] = message
+        if body is not None:
+            r["body"] = body
+        self._write(r)
+
+    def _dispatch(self, req):
+        cmd = req.get("command")
+        a = req.get("arguments") or {}
+        try:
+            if cmd == "initialize":
+                self._respond(req, {"supportsReadMemoryRequest": True,
+                                    "supportsModulesRequest": True,
+                                    "supportsEvaluateForHovers": True})
+                self._event("initialized")
+            elif cmd in ("attach", "launch"):
+                self._respond(req)
+                self._event("stopped", {"reason": "entry", "threadId": 1,
+                                        "allThreadsStopped": True})
+            elif cmd == "configurationDone":
+                self._respond(req)
+            elif cmd == "threads":
+                self._respond(req, {"threads": [{"id": 1, "name": "target (passive memory)"}]})
+            elif cmd == "stackTrace":
+                self._respond(req, {"stackFrames": [], "totalFrames": 0})
+            elif cmd == "scopes":
+                self._respond(req, {"scopes": []})
+            elif cmd == "modules":
+                mods = self.ops.modules(None)
+                out = [{"id": m["base"], "name": m["name"], "path": m["path"],
+                        "addressRange": hex(m["base"])} for m in mods]
+                self._respond(req, {"modules": out, "totalModules": len(out)})
+            elif cmd == "readMemory":
+                import base64
+                addr = int(str(a.get("memoryReference", "0")), 0) + int(a.get("offset", 0))
+                count = int(a.get("count", 0))
+                try:
+                    data = self.ops.read(None, addr, count)
+                    self._respond(req, {"address": hex(addr),
+                                        "data": base64.b64encode(data).decode()})
+                except Exception:
+                    self._respond(req, {"address": hex(addr), "data": "",
+                                        "unreadableBytes": count})
+            elif cmd == "writeMemory":
+                self._respond(req, success=False, message="mémoire passive : lecture seule")
+            elif cmd == "evaluate":
+                self._respond(req, {"result": self._evaluate((a.get("expression") or "").strip()),
+                                    "variablesReference": 0})
+            elif cmd == "continue":
+                self._respond(req, {"allThreadsContinued": True})
+                self._event("stopped", {"reason": "pause", "threadId": 1,
+                                        "allThreadsStopped": True})
+            elif cmd in ("next", "stepIn", "stepOut", "pause"):
+                self._respond(req)
+                self._event("stopped", {"reason": "step", "threadId": 1,
+                                        "allThreadsStopped": True})
+            elif cmd in ("disconnect", "terminate"):
+                self._respond(req)
+                return False
+            else:
+                self._respond(req, success=False, message=f"non supporté : {cmd}")
+        except Exception as e:
+            self._respond(req, success=False, message=str(e))
+        return True
+
+    def _evaluate(self, expr):
+        if "!" in expr and " " not in expr:
+            mod, sym = expr.split("!", 1)
+            return hex(self.ops.symbol(mod, sym))
+        if expr.lower().startswith("0x") or expr.isdigit():
+            return self.ops.read(None, int(expr, 0), 16).hex()
+        return "(expression non supportée : module!symbole ou adresse)"
+
+
+def _parse_hostport(s, default_host, default_port):
+    if not s:
+        return default_host, default_port
+    if ":" in s:
+        host, port = s.rsplit(":", 1)
+        return (host or default_host), int(port)
+    return default_host, int(s)
+
+
+def _serve_dap(ops, listen):
+    if listen:
+        import socket
+        host, port = _parse_hostport(listen, "127.0.0.1", 4711)
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind((host, port))
+        srv.listen(1)
+        print(f"[*] DAP : écoute sur {host}:{port}", file=sys.stderr)
+        conn, addr = srv.accept()
+        print(f"[+] DAP client : {addr}", file=sys.stderr)
+        f = conn.makefile("rwb")
+        try:
+            DapServer(ops).serve(f, f)
+        finally:
+            conn.close()
+    else:
+        DapServer(ops).serve(sys.stdin.buffer, sys.stdout.buffer)
+
+
+# --------------------------------------------------------------------------- #
 #  target resolution + CLI
 # --------------------------------------------------------------------------- #
 def find_vmm_dll(explicit: str | None) -> str:
@@ -743,12 +1197,20 @@ def main(argv=None):
     p.add_argument("-c", "--command", action="append", help="commande(s) à exécuter (répétable)")
     p.add_argument("--batch", action="store_true", help="quitter après -c")
     p.add_argument("--json", action="store_true", help="sortie JSON (commandes structurées)")
+    p.add_argument("--serve", choices=["mcp", "dap", "gdb"],
+                   help="lance un backend serveur au lieu de la REPL "
+                        "(mcp: JSON-RPC stdio ; dap: Debug Adapter Protocol ; gdb: GDB remote)")
+    p.add_argument("--listen", help="host:port pour --serve gdb (défaut 127.0.0.1:2159) "
+                                    "ou dap en TCP (défaut: stdio)")
     args = p.parse_args(argv)
 
+    # In a server mode the stdout carries the protocol (MCP/DAP over stdio), so the
+    # startup banner must go to stderr to keep that stream clean.
+    log = sys.stderr if args.serve else sys.stdout
     vmm_dll = find_vmm_dll(args.vmm)
     device = build_device_args(args)
-    print(f"[*] vmm.dll: {vmm_dll}")
-    print(f"[*] cible  : {' '.join(device)}")
+    print(f"[*] vmm.dll: {vmm_dll}", file=log)
+    print(f"[*] cible  : {' '.join(device)}", file=log)
     try:
         vmm = Vmm(vmm_dll, device + ["-waitinitialize"])
     except VmmError as e:
@@ -757,9 +1219,29 @@ def main(argv=None):
     if args.vm is not None:
         try:
             ctl = HvControl(args.vm)
-            print(f"[*] contrôle: canal hvlib lié à la VM {args.vm} (freeze/resume/r)")
+            print(f"[*] contrôle: canal hvlib lié à la VM {args.vm} (freeze/resume/r)", file=log)
         except Exception as e:
-            print(f"[~] canal de contrôle indisponible: {e}")
+            print(f"[~] canal de contrôle indisponible: {e}", file=log)
+
+    if args.serve:
+        ops = WineyeOps(vmm, ctl)
+        print(f"[*] mode serveur: {args.serve}", file=log)
+        try:
+            if args.serve == "mcp":
+                McpServer(ops).serve()
+            elif args.serve == "gdb":
+                host, port = _parse_hostport(args.listen, "127.0.0.1", 2159)
+                GdbServer(ops).serve(host, port)
+            else:  # dap
+                _serve_dap(ops, args.listen)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            vmm.close()
+            if ctl:
+                ctl.close()
+        return
+
     repl = Repl(vmm, json_out=args.json, ctl=ctl)
     try:
         for c in (args.command or []):
