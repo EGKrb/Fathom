@@ -44,10 +44,14 @@ Récupérez **`Fathom_<version>.zip`** depuis la [dernière release](https://git
 
 ## Installation
 
-1. Téléchargez `x64dbg-egkrb_<version>.zip` depuis la [page des releases](https://github.com/EGKrb/x64dbg/releases/latest).
-2. Extrayez-le dans un dossier **où vous avez le droit d'écrire** (par exemple `C:\Outils\x64dbg`, pas `C:\Program Files`) : x64dbg enregistre sa configuration (`x64dbg.ini`) et ses bases de données (`db\`) à côté des exécutables.
-3. Lancez `release\Fathom.exe` (lanceur qui choisit la bonne architecture), ou directement `release\x64\x64dbg.exe` pour un programme 64 bits et `release\x32\x32dbg.exe` pour un programme 32 bits.
-4. Facultatif : installez OllyDumpEx (non redistribuable, voir [Plugins inclus](#plugins-inclus)) :
+Depuis la [page des releases](https://github.com/EGKrb/Fathom/releases/latest), au choix :
+
+- **Installateur** — lancez `Fathom_<version>_setup.exe`. Il installe **par utilisateur, sans admin** dans `%LOCALAPPDATA%\Programs\Fathom` — un dossier inscriptible, ce qui compte car Fathom (x64dbg) garde sa configuration (`x64dbg.ini`) et ses bases (`db\`) à côté des exécutables. Il ajoute des raccourcis (menu Démarrer + bureau) et un désinstalleur dans Ajout/Suppression de programmes.
+- **Portable** — téléchargez `Fathom_<version>.zip` et extrayez-le dans un dossier **où vous avez le droit d'écrire** (ex. `C:\Outils\Fathom`, **pas** `C:\Program Files`), pour la même raison.
+
+Puis lancez **Fathom** (le raccourci, ou `Fathom.exe` — le lanceur choisit l'architecture), ou directement `x64\x64dbg.exe` / `x32\x32dbg.exe` pour une cible 64 ou 32 bits.
+
+Facultatif : installez OllyDumpEx (non redistribuable, voir [Plugins inclus](#plugins-inclus)) :
    ```powershell
    cd release
    powershell -ExecutionPolicy Bypass -File .\install-plugins.ps1 -Plugins OllyDumpEx
@@ -70,7 +74,7 @@ pluginsdk\                   en-têtes et bibliothèques pour écrire des plugin
 commithash.txt               commit exact de la compilation
 ```
 
-Un second fichier, `x64dbg-egkrb_<version>_symbols.zip`, contient les symboles de débogage (`.pdb`), utiles seulement pour analyser un plantage d'x64dbg lui-même. `SHA256SUMS.txt` donne les empreintes des deux archives.
+Un second fichier, `Fathom_<version>_symbols.zip`, contient les symboles de débogage (`.pdb`), utiles seulement pour analyser un plantage d'x64dbg lui-même. `SHA256SUMS.txt` donne les empreintes des deux archives.
 
 ---
 
@@ -87,7 +91,7 @@ Un second fichier, `x64dbg-egkrb_<version>_symbols.zip`, contient les symboles d
 | Plugins | aucun | ScyllaHide et xAnalyzer inclus, pybridge et ExtraCmds inclus, OllyDumpEx via `install-plugins.ps1` |
 | Compilation | — | correctif d'un `using namespace std` qui cassait le *unity build* (`patternfind.cpp`) |
 
-Le cœur du débogueur n'est pas modifié : tout ce qui fonctionne dans x64dbg officiel fonctionne ici à l'identique. Une branche [`feature/trace-export`](https://github.com/EGKrb/x64dbg/tree/feature/trace-export) ne contient que `TraceExport`, isolé du reste.
+Le cœur du débogueur n'est pas modifié : tout ce qui fonctionne dans x64dbg fonctionne ici à l'identique.
 
 > Basé sur une version de développement : elle passe la suite de tests automatiques du projet (81 tests en 64 bits), mais peut être moins éprouvée qu'une release officielle.
 
@@ -430,7 +434,7 @@ Chaque fichier téléchargé est vérifié par son **empreinte SHA-256** (liste 
 Prérequis : Windows 10/11, **Visual Studio 2022** (charge de travail C++), **CMake** ≥ 3.15, **Ninja**, **git**, Python 3 (pour les tests).
 
 ```bat
-git clone --recursive https://github.com/EGKrb/x64dbg
+git clone --recursive https://github.com/EGKrb/Fathom
 cd x64dbg
 
 :: 64 bits, dans un terminal « x64 Native Tools » (ou après vcvars64.bat)
@@ -464,7 +468,9 @@ Par défaut, les plugins utilisent le `pluginsdk` d'un x64dbg installé avec win
 ```powershell
 .\plugins\install-plugins.ps1                       # plugins tiers dans bin\x32 et bin\x64
 py src\tests\run.py --arch x64                       # suite de tests (dont trace_export)
-.\tools\make-release.ps1 -Version 2026.10.03         # archives de release dans dist\
+python hvkdfusion\tests\test_servers.py              # tests protocolaires wineye MCP/DAP/gdb
+.\tools\make-release.ps1 -Version 1.0.0              # archives de release dans dist\ (stage aussi release\)
+.\tools\build-installer.ps1 -Version 1.0.0           # dist\Fathom_1.0.0_setup.exe (nécessite NSIS)
 ```
 
 ### Mettre à jour depuis x64dbg officiel
@@ -480,7 +486,7 @@ git submodule update --init --recursive
 
 ## Organisation du dépôt
 
-Fichiers propres à ce fork (le reste est identique à x64dbg officiel) :
+Fichiers propres à Fathom (le reste est identique à x64dbg) :
 
 ```
 src/dbg/TraceExport.cpp, .h          commande TraceExport
@@ -503,6 +509,8 @@ plugins/
   THIRD-PARTY.md                     versions, licences, empreintes
 tools/
   make-release.ps1                   construction des archives de release
+  build-installer.ps1                construction de l'installateur NSIS (dist\Fathom_<v>_setup.exe)
+  fathom-installer.nsi               script d'installation NSIS
   build-minidump-viewer.ps1          compilation du visualiseur de dumps (src/cross/minidump)
   LISEZMOI.md                        démarrage rapide inclus dans l'archive
 README.x64dbg.md                     README officiel d'x64dbg
@@ -512,7 +520,7 @@ README.x64dbg.md                     README officiel d'x64dbg
 
 ## Licences et crédits
 
-- **x64dbg** et ce fork : [GPL-3.0](LICENSE). Code source de chaque release : le commit indiqué dans `commithash.txt`.
+- **x64dbg** et **Fathom** : [GPL-3.0](LICENSE). Code source de chaque release : le commit indiqué dans `commithash.txt`.
 - **ScyllaHide** : GPL-3.0 — <https://github.com/x64dbg/ScyllaHide> (source de la v1.4 : tag `v1.4`).
 - **xAnalyzer** : MIT — <https://github.com/ThunderCls/xAnalyzer>, par ThunderCls.
 - **OllyDumpEx** : freeware de Low Priority — <https://low-priority.appspot.com/ollydumpex/>, non redistribué.

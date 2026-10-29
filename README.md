@@ -7,8 +7,8 @@
 **Fathom** — a Windows reverse-engineering and memory-forensics toolkit, from a single instruction to the whole machine. It is **built on [x64dbg](https://github.com/x64dbg/x64dbg)** (GPL-3.0), the open-source Windows debugger (malware analysis, reverse-engineering of executables without source code), tracks its official `development` branch, and adds, for **malware triage, reverse-engineering and CTF**:
 
 - **`TraceExport`** — turn execution traces into readable **JSON** or **CSV** that any tool can parse;
-- **pybridge** — drive x64dbg **from Python** (breakpoints, single-stepping, registers, memory, traces);
-- ready-to-use **script templates** for **`headless.exe`** (x64dbg with no GUI);
+- **pybridge** — drive Fathom **from Python** (breakpoints, single-stepping, registers, memory, traces);
+- ready-to-use **script templates** for **`headless.exe`** (Fathom with no GUI);
 - a **memory dump viewer** (`.dmp`) and handy commands: **`.init`** (executable or dump), **`.save`**, **`scylla_hide.enable` / `.disable` / `.status`**;
 - **HvKdFusion** — **Hyper-V kernel debugging and memory forensics**: `hvkd` (LiveCloudKd + WinDbg/kd + MemProcFS + ntoseye) and **wineye** — a native WinDbg-style REPL on kernel dumps, raw memory images and live VMs, with **MCP / DAP / gdbserver** server modes — plus a dockable **HvKdFusion GUI tab** in the debugger;
 - the **ScyllaHide** and **xAnalyzer** plugins bundled in the release, **OllyDumpEx** installable with one command.
@@ -17,7 +17,12 @@
 
 ### Download
 
-Grab **`Fathom_<version>.zip`** from the [latest release](https://github.com/EGKrb/Fathom/releases/latest), extract it, and run **`release\Fathom.exe`** (the launcher picks 32- or 64-bit). `Fathom_<version>_symbols.zip` holds the `.pdb` debug symbols; `SHA256SUMS.txt` has the checksums. HvKdFusion's third-party components are not bundled — run `python hvkdfusion.py setup` once (see [hvkdfusion/README.md](hvkdfusion/README.md)).
+From the [latest release](https://github.com/EGKrb/Fathom/releases/latest):
+
+- **Installer** — `Fathom_<version>_setup.exe`: per-user, **no admin**, into `%LOCALAPPDATA%\Programs\Fathom` (a writable folder), with Start-menu/desktop shortcuts and an entry in Add/Remove Programs.
+- **Portable** — `Fathom_<version>.zip`: extract to a folder **you can write to** and run `release\Fathom.exe`.
+
+`Fathom_<version>_symbols.zip` holds the `.pdb` debug symbols; `SHA256SUMS.txt` has the checksums. HvKdFusion's third-party components are not bundled — run `python hvkdfusion.py setup` once (see [hvkdfusion/README.md](hvkdfusion/README.md)).
 
 > **Platform: Windows (x86/x64).** x64dbg debugs Windows processes through the Windows debugging API, so the debugger, `headless.exe` and the plugins are Windows-only. The pybridge Python **client** is OS-agnostic (standard library only), but it drives an x64dbg instance — which runs on Windows.
 
@@ -78,10 +83,14 @@ TraceExport C:\traces\sample.trace64, C:\traces\sample.json
 
 ## Install
 
-1. Download `x64dbg-egkrb_<version>.zip` from the [releases page](https://github.com/EGKrb/x64dbg/releases/latest).
-2. Extract it into a folder **you can write to** (e.g. `C:\Tools\x64dbg`, not `C:\Program Files`): x64dbg stores its configuration (`x64dbg.ini`) and databases (`db\`) next to the executables.
-3. Run `release\Fathom.exe` (launcher that picks the right architecture), or `release\x64\x64dbg.exe` directly for a 64-bit program and `release\x32\x32dbg.exe` for a 32-bit program.
-4. Optional — install OllyDumpEx (not redistributable, see [Bundled plugins](#bundled-plugins)):
+From the [releases page](https://github.com/EGKrb/Fathom/releases/latest), either:
+
+- **Installer** — run `Fathom_<version>_setup.exe`. It installs **per-user, no admin** into `%LOCALAPPDATA%\Programs\Fathom` — a writable folder, which matters because Fathom (x64dbg) keeps its configuration (`x64dbg.ini`) and databases (`db\`) next to the executables. It adds Start-menu and desktop shortcuts and registers an uninstaller in Add/Remove Programs.
+- **Portable** — download `Fathom_<version>.zip` and extract it into a folder **you can write to** (e.g. `C:\Tools\Fathom`, **not** `C:\Program Files`), for the same config-next-to-exe reason.
+
+Then launch **Fathom** (the shortcut, or `Fathom.exe` — the launcher picks the architecture), or run `x64\x64dbg.exe` / `x32\x32dbg.exe` directly for a 64- or 32-bit target.
+
+Optional — install OllyDumpEx (not redistributable, see [Bundled plugins](#bundled-plugins)):
    ```powershell
    cd release
    powershell -ExecutionPolicy Bypass -File .\install-plugins.ps1 -Plugins OllyDumpEx
@@ -104,7 +113,7 @@ pluginsdk\                   headers and libs for writing plugins
 commithash.txt               exact commit of the build
 ```
 
-A second file, `x64dbg-egkrb_<version>_symbols.zip`, contains the debug symbols (`.pdb`), only useful to analyze a crash of x64dbg itself. `SHA256SUMS.txt` lists the hashes of both archives.
+A second file, `Fathom_<version>_symbols.zip`, contains the debug symbols (`.pdb`), only useful to analyze a crash of the debugger itself. `SHA256SUMS.txt` lists the hashes of the archives.
 
 ---
 
@@ -121,7 +130,7 @@ A second file, `x64dbg-egkrb_<version>_symbols.zip`, contains the debug symbols 
 | Plugins | none | ScyllaHide and xAnalyzer bundled, pybridge and ExtraCmds bundled, OllyDumpEx via `install-plugins.ps1` |
 | Build | — | fixes a `using namespace std` that broke the *unity build* (`patternfind.cpp`) |
 
-The debugger core is unchanged: everything that works in official x64dbg works here identically. A [`feature/trace-export`](https://github.com/EGKrb/x64dbg/tree/feature/trace-export) branch holds only `TraceExport`, isolated from the rest.
+The debugger core is unchanged: everything that works in x64dbg works here identically.
 
 > Based on a development build: it passes the project's automated test suite (81 tests on 64-bit), but may be less battle-tested than an official release.
 
@@ -464,7 +473,7 @@ Each downloaded file is verified by its **SHA-256 hash** (list in [`plugins/THIR
 Requirements: Windows 10/11, **Visual Studio 2022** (C++ workload), **CMake** ≥ 3.15, **Ninja**, **git**, Python 3 (for the tests).
 
 ```bat
-git clone --recursive https://github.com/EGKrb/x64dbg
+git clone --recursive https://github.com/EGKrb/Fathom
 cd x64dbg
 
 :: 64-bit, in an "x64 Native Tools" terminal (or after vcvars64.bat)
@@ -498,7 +507,9 @@ By default the plugins use the `pluginsdk` of an x64dbg installed via winget; ot
 ```powershell
 .\plugins\install-plugins.ps1                       # third-party plugins into bin\x32 and bin\x64
 py src\tests\run.py --arch x64                       # test suite (including trace_export)
-.\tools\make-release.ps1 -Version 2026.10.03        # release archives into dist\
+python hvkdfusion\tests\test_servers.py              # wineye MCP/DAP/gdb protocol tests
+.\tools\make-release.ps1 -Version 1.0.0             # release archives into dist\ (stages release\ too)
+.\tools\build-installer.ps1 -Version 1.0.0          # dist\Fathom_1.0.0_setup.exe (needs NSIS)
 ```
 
 ### Updating from official x64dbg
@@ -514,7 +525,7 @@ git submodule update --init --recursive
 
 ## Repository layout
 
-Files specific to this fork (the rest is identical to official x64dbg):
+Files specific to Fathom (the rest is identical to x64dbg):
 
 ```
 src/dbg/TraceExport.cpp, .h          TraceExport command
@@ -529,7 +540,8 @@ pybridge/
 extracmds/src/extracmds.cpp          ExtraCmds plugin (.init, .save, scylla_hide.*, hvkd*, wineye)
 extracmds/src/hvkdpanel.h, .cpp      HvKdFusion dockable GUI tab (Qt, x64 only)
 hvkdfusion/                          HvKdFusion (Hyper-V kernel debugging / memory forensics, Python)
-  hvkdfusion.py, wineye.py, hvkd.ps1 CLI, WinDbg-style REPL, elevated launcher
+  hvkdfusion.py, wineye.py, hvkd.ps1 CLI, WinDbg-style REPL (incl. MCP/DAP/gdb modes), elevated launcher
+  tests/test_servers.py              wineye MCP/DAP/gdbserver protocol tests
   plugin_build/                      LiveCloudKd hvlib headers + hvlib.lib (to build the hvmm plugin)
   LICENSE                            HvKdFusion license and third-party components
 plugins/
@@ -537,8 +549,13 @@ plugins/
   THIRD-PARTY.md                     versions, licenses, hashes
 tools/
   make-release.ps1                   release archive builder
+  build-installer.ps1                NSIS installer builder (dist\Fathom_<v>_setup.exe)
+  fathom-installer.nsi               NSIS installer script
   build-minidump-viewer.ps1          dump viewer build (src/cross/minidump)
   LISEZMOI.md                        quick start shipped in the archive
+src/launcher/fathom.rc, fathom.ico   Fathom launcher icon
+src/fathom-logo.png                  Fathom logo (README header)
+NOTICE, CHANGELOG.md, CODE_OF_CONDUCT.md   project / legal files
 README.x64dbg.md                     official x64dbg README
 README.fr.md                         this README in French
 ```
@@ -547,11 +564,11 @@ README.fr.md                         this README in French
 
 ## Licenses and credits
 
-- **x64dbg** and this fork: [GPL-3.0](LICENSE). Source for each release: the commit listed in `commithash.txt`.
+- **x64dbg** and **Fathom**: [GPL-3.0](LICENSE). Source for each release: the commit listed in `commithash.txt`. See [NOTICE](NOTICE) for the modifications and third-party licenses.
 - **ScyllaHide**: GPL-3.0 — <https://github.com/x64dbg/ScyllaHide> (v1.4 source: tag `v1.4`).
 - **xAnalyzer**: MIT — <https://github.com/ThunderCls/xAnalyzer>, by ThunderCls.
 - **OllyDumpEx**: freeware by Low Priority — <https://low-priority.appspot.com/ollydumpex/>, not redistributed.
 - **HvKdFusion**: GPL-3.0-or-later — <https://github.com/EGKrb/HvKdFusion>. The components it drives are not redistributed: LiveCloudKd (GPL-3.0), MemProcFS and LeechCore (AGPL-3.0), Dokany (LGPL/MIT), ntoseye, WinDbg (Microsoft license).
 - **Dump viewer**: x64dbg code (GPL-3.0); libraries [udmp-parser](https://github.com/0vercl0k/udmp-parser) (MIT), [cpp-httplib](https://github.com/yhirose/cpp-httplib) (MIT), [linux-pe](https://github.com/can1357/linux-pe) (BSD), [nlohmann/json](https://github.com/nlohmann/json) (MIT), Qt 5.12 (LGPL-3.0, DLLs shared with x64dbg).
 
-x64dbg is developed by mrexodia and contributors ([list](https://github.com/x64dbg/x64dbg/graphs/contributors)); see the [official README](README.x64dbg.md) for full credits. This fork is neither affiliated with nor endorsed by the x64dbg team; for official builds, go to <https://x64dbg.com>.
+Fathom is built on x64dbg, developed by mrexodia and contributors ([list](https://github.com/x64dbg/x64dbg/graphs/contributors)); see the [official README](README.x64dbg.md) for full credits. Fathom is neither affiliated with nor endorsed by the x64dbg team; for official x64dbg builds, go to <https://x64dbg.com>.
