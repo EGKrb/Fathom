@@ -2,16 +2,22 @@
 
 <img width="100" src="src/fathom-logo.png" alt="Fathom"/>
 
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE) [![Platform: Windows](https://img.shields.io/badge/Platform-Windows%20x86%2Fx64-0078D6.svg)](#) [![Release](https://img.shields.io/badge/release-v1.0.0-success.svg)](https://github.com/EGKrb/Fathom/releases/latest) [![Based on x64dbg](https://img.shields.io/badge/based%20on-x64dbg-444.svg)](https://github.com/x64dbg/x64dbg)
+
 **Fathom** — a Windows reverse-engineering and memory-forensics toolkit, from a single instruction to the whole machine. It is **built on [x64dbg](https://github.com/x64dbg/x64dbg)** (GPL-3.0), the open-source Windows debugger (malware analysis, reverse-engineering of executables without source code), tracks its official `development` branch, and adds, for **malware triage, reverse-engineering and CTF**:
 
 - **`TraceExport`** — turn execution traces into readable **JSON** or **CSV** that any tool can parse;
 - **pybridge** — drive x64dbg **from Python** (breakpoints, single-stepping, registers, memory, traces);
 - ready-to-use **script templates** for **`headless.exe`** (x64dbg with no GUI);
 - a **memory dump viewer** (`.dmp`) and handy commands: **`.init`** (executable or dump), **`.save`**, **`scylla_hide.enable` / `.disable` / `.status`**;
-- **HvKdFusion** — **Hyper-V kernel debugging and memory forensics** from the command bar: `hvkd` (LiveCloudKd + WinDbg/kd + MemProcFS + ntoseye) and **wineye**, a WinDbg-style REPL on kernel dumps, raw memory images and live VMs;
+- **HvKdFusion** — **Hyper-V kernel debugging and memory forensics**: `hvkd` (LiveCloudKd + WinDbg/kd + MemProcFS + ntoseye) and **wineye** — a native WinDbg-style REPL on kernel dumps, raw memory images and live VMs, with **MCP / DAP / gdbserver** server modes — plus a dockable **HvKdFusion GUI tab** in the debugger;
 - the **ScyllaHide** and **xAnalyzer** plugins bundled in the release, **OllyDumpEx** installable with one command.
 
-**[⬇ Download the latest release](https://github.com/EGKrb/x64dbg/releases/latest)** · [Official x64dbg README](README.x64dbg.md) · [Official docs](https://help.x64dbg.com) · 🇫🇷 [Lire en français](README.fr.md)
+**[⬇ Download the latest release](https://github.com/EGKrb/Fathom/releases/latest)** · [Changelog](CHANGELOG.md) · [Based on x64dbg](https://github.com/x64dbg/x64dbg) · 🇫🇷 [Lire en français](README.fr.md)
+
+### Download
+
+Grab **`Fathom_<version>.zip`** from the [latest release](https://github.com/EGKrb/Fathom/releases/latest), extract it, and run **`release\Fathom.exe`** (the launcher picks 32- or 64-bit). `Fathom_<version>_symbols.zip` holds the `.pdb` debug symbols; `SHA256SUMS.txt` has the checksums. HvKdFusion's third-party components are not bundled — run `python hvkdfusion.py setup` once (see [hvkdfusion/README.md](hvkdfusion/README.md)).
 
 > **Platform: Windows (x86/x64).** x64dbg debugs Windows processes through the Windows debugging API, so the debugger, `headless.exe` and the plugins are Windows-only. The pybridge Python **client** is OS-agnostic (standard library only), but it drives an x64dbg instance — which runs on Windows.
 

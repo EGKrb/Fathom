@@ -1,0 +1,29 @@
+name: Fathom CI
+
+on: [push, pull_request]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: HvKdFusion / wineye (Python)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Syntax check
+        shell: bash
+        run: |
+          python -c "import ast,io; [ast.parse(io.open(f,encoding='utf-8').read()) for f in ('hvkdfusion/hvkdfusion.py','hvkdfusion/wineye.py')]; print('syntax OK')"
+
+      - name: wineye server protocol tests (MCP / DAP / gdb)
+        run: python hvkdfusion/tests/test_servers.py
+
+      - name: HvKdFusion readiness report
+        run: python hvkdfusion/hvkdfusion.py check --json

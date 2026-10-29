@@ -1,0 +1,49 @@
+Fathom
+Copyright (C) 2026 EGKrb
+
+This product is a MODIFIED version of x64dbg (https://github.com/x64dbg/x64dbg),
+Copyright (C) the x64dbg contributors, licensed under the GNU General Public
+License version 3 or later (GPL-3.0-or-later).
+
+Fathom is distributed under the same license (GPL-3.0-or-later); see the LICENSE
+file. Fathom is NOT affiliated with or endorsed by the x64dbg project. The name
+"Fathom" and its logo identify this distribution; the underlying debugger engine
+is x64dbg and is credited as such throughout (README, the About dialog, here).
+
+----------------------------------------------------------------------
+Modifications in Fathom relative to upstream x64dbg
+----------------------------------------------------------------------
+- TraceExport            : export execution traces to JSON / CSV.
+- pybridge               : drive the debugger from Python (plugin + client).
+- headless templates     : ready-to-use scripts for headless.exe.
+- ExtraCmds plugin       : .init / .save / scylla_hide.* convenience commands,
+                           a minidump viewer, and the HvKdFusion commands; plus a
+                           dockable "HvKdFusion" GUI tab.
+- HvKdFusion             : Hyper-V kernel debugging and memory forensics
+                           (hvkd*, and "wineye", a native WinDbg-style passive
+                           memory REPL with MCP / DAP / gdbserver modes).
+- plugin installer       : ScyllaHide / xAnalyzer / PE-sieve / OllyDumpEx, with
+                           SHA-256 verification.
+- build / release fixes  : minidump viewer CMAKE_SYSTEM_VERSION, unity build.
+- branding               : launcher renamed to Fathom.exe with its own icon, the
+                           main-window title and the version resource set to
+                           "Fathom". The engine executables and DLLs keep their
+                           x64dbg names (x64dbg.exe/x32dbg.exe, x64dbg.dll,
+                           x64gui.dll, x64bridge.dll) because the plugin SDK and
+                           all plugins depend on those names.
+
+----------------------------------------------------------------------
+Third-party components
+----------------------------------------------------------------------
+The debugger core and the bundled or driven third-party components keep their own
+licenses and copyrights, and are not relicensed by Fathom:
+
+- x64dbg                                   GPL-3.0-or-later
+- ScyllaHide, xAnalyzer, OllyDumpEx, PE-sieve   (their respective licenses)
+- LiveCloudKd (hvlib/hvmm)                 GPL-3.0
+- MemProcFS, LeechCore                     AGPL-3.0
+- Dokany                                   LGPL / MIT
+- ntoseye                                  (its own license)
+- WinDbg / kd                              Microsoft license (NOT redistributed)
+
+See plugins/THIRD-PARTY.md and hvkdfusion/LICENSE for details.
