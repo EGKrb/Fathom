@@ -178,7 +178,7 @@ foreach ($t in 'leechcore', 'vmm', 'memprocfs') {
 python hvkdfusion.py setup --memprocfs-exe "$mp\files\memprocfs.exe"
 ```
 
-The `leechcore_device_hvmm.dll` plugin (live VM device) lives in the LiveCloudKd tree and needs `..\LeechCore`, the hvlib headers + `hvlib.lib`, and `charutil.c`. The headers and the library are in [`plugin_build/`](plugin_build), already laid out as the project expects (`files\hvlib.lib`, `hvlib\hvlib\include\public\`): unmodified copies of LiveCloudKd's `LiveCloudKdSdk\files\hvlib.lib` and `LiveCloudKdSdk\public\` (GPL-3.0).
+The `leechcore_device_hvmm.dll` plugin (live VM device) lives in the LiveCloudKd tree and needs `..\LeechCore`, the hvlib headers + `hvlib.lib`, and `charutil.c`. The headers and the library are in [`plugin_build/`](plugin_build), already laid out as the project expects (`files\hvlib.lib`, `hvlib\hvlib\include\public\`): unmodified copies of LiveCloudKd's `LiveCloudKdSdk\files\hvlib.lib` and `LiveCloudKdSdk\public\` (Hyper-V Memory Manager library, CC BY-NC-ND 4.0: see `LiveCloudKdSdk\LICENSE.txt`).
 
 ```powershell
 New-Item -ItemType Junction -Path "$m2\LeechCore" -Target $lc | Out-Null
@@ -194,11 +194,11 @@ msbuild "$m2\leechcore_device_hvmm\leechcore_device_hvmm.vcxproj" /p:Configurati
 
 ### Dokany (mount only)
 
-Install the signed `DokanSetup.exe` from <https://github.com/dokan-dev/dokany/releases> (kernel driver `dokan2.sys`). wineye does not need it.
+Install the signed `DokanSetup.exe` from <https://github.com/dokan-dev/dokany/releases> (kernel driver `dokan2.sys`), as administrator. Fathom releases ship it in `dokany\` next to `hvkdfusion.py`; `setup`, `check` and `mount` point to it when Dokany is missing (they never install a driver themselves). wineye does not need it.
 
 ### ntoseye (optional)
 
-In WSL: `uv tool install ntoseye` (or `pipx` / `cargo`), or let `setup --install-ntoseye` do it. Linear dumps are raw, not `.dmp`: ntoseye needs a crash dump (`dump --type crash` or `ntoseye --vm N`). Windows paths are translated to `/mnt/c/...` automatically.
+Fathom releases ship ntoseye's Linux x86_64 build in `ntoseye\` next to `hvkdfusion.py`: when no ntoseye is installed, `setup` runs it through WSL (`/mnt/c/...`), after checking that `ntoseye --version` works there. Otherwise, in WSL: `uv tool install ntoseye` (or `pipx` / `cargo`), or let `setup --install-ntoseye` do it. Linear dumps are raw, not `.dmp`: ntoseye needs a crash dump (`dump --type crash` or `ntoseye --vm N`). Windows paths are translated to `/mnt/c/...` automatically.
 
 ---
 

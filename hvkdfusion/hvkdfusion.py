@@ -56,6 +56,9 @@ DEFAULT_DOKANY = DOWNLOADS / "dokany-master" / "dokany-master"
 DEFAULT_LEECHCORE = DOWNLOADS / "LeechCore-master" / "LeechCore-master"
 # MemProcFS + LeechCore + the hvmm device plugin, when shipped next to this script (Fathom releases)
 BUNDLED_MEMPROCFS = HERE / "memprocfs"
+# ntoseye's Linux build (run through WSL) and the signed Dokany installer, same origin
+BUNDLED_NTOSEYE = HERE / "ntoseye" / "ntoseye"
+BUNDLED_DOKANY_SETUP = HERE / "dokany" / "DokanSetup.exe"
 
 # LiveCloudKd.exe action codes (see its README /a option).
 ACTION_LIVE_KD = 0
@@ -225,6 +228,26 @@ def ntoseye_prefix(cfg: dict):
     return [path], False
 
 
+def bundled_ntoseye_wsl() -> str:
+    """WSL path of the ntoseye Linux build shipped next to this script, '' if absent or not runnable."""
+    if not BUNDLED_NTOSEYE.exists() or not _wsl_available():
+        return ""
+    path = to_wsl_path(str(BUNDLED_NTOSEYE))
+    try:
+        r = subprocess.run(["wsl.exe", "--", path, "--version"],
+                           capture_output=True, text=True, timeout=60)
+        return path if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def dokan_hint() -> str:
+    """How to get Dokany: the bundled signed installer if present, else the official release."""
+    if BUNDLED_DOKANY_SETUP.exists():
+        return f"lancer {BUNDLED_DOKANY_SETUP} (administrateur)"
+    return "installer DokanSetup.exe signé : github.com/dokan-dev/dokany/releases"
+
+
 def dokan_installed() -> bool:
     """True if a Dokany kernel driver (dokan2/1.sys) is present on the system."""
     sysroot = os.environ.get("SystemRoot", r"C:\Windows")
@@ -376,6 +399,10 @@ def cmd_setup(args):
         cfg["ntoseye_src_dir"] = args.ntoseye_src
     if not args.no_ntoseye:
         use_wsl, npath = detect_ntoseye()
+        if not npath:
+            bundled = bundled_ntoseye_wsl()
+            if bundled:
+                use_wsl, npath = True, bundled
         if not npath and args.install_ntoseye:
             use_wsl, npath = install_ntoseye_wsl()
         cfg["ntoseye_use_wsl"] = use_wsl
@@ -439,7 +466,7 @@ def cmd_setup(args):
     print(f"[+] plugin hvmm: {hvmm_dll if hvmm_dll else '(non compilé - mode live hvmm indisponible ; voir README)'}")
 
     cfg["dokan_installed"] = dokan_installed()
-    print(f"[+] Dokany: {'installé' if cfg['dokan_installed'] else 'ABSENT (installer DokanSetup.exe signé)'}")
+    print(f"[+] Dokany: {'installé' if cfg['dokan_installed'] else 'ABSENT (' + dokan_hint() + ')'}")
 
     # Stage the hvmm plugin + engine next to MemProcFS.exe (device 'hvmm').
     if mp_exe and hvmm_dll and not args.no_stage:
@@ -630,8 +657,7 @@ def cmd_mount(args):
             "(github.com/ufrisk/MemProcFS/releases) puis relance "
             "setup --memprocfs-exe <chemin>.")
     if not cfg.get("dokan_installed") and not dokan_installed():
-        print("[!] Dokany absent (dokan2.sys) : le montage échouera. Installe la "
-              "release signée DokanSetup.exe : github.com/dokan-dev/dokany/releases")
+        print(f"[!] Dokany absent (dokan2.sys) : le montage échouera ({dokan_hint()}).")
 
     if args.live:
         if not cfg.get("leechcore_hvmm_dll") and not locate(Path(cfg["memprocfs_dir"] or "."), ["leechcore_device_hvmm.dll"]):
@@ -865,7 +891,7 @@ def cmd_check(args):
     add("Plugin live hvmm", live_ok, live_detail, soft=not live_ok)
     dokan = cfg.get("dokan_installed") or dokan_installed()
     add("Dokany (dokan2.sys)", dokan,
-        "installé" if dokan else "ABSENT - installer DokanSetup.exe signé")
+        "installé" if dokan else "ABSENT - " + dokan_hint())
 
     # --- rendu du tableau ---
     if not as_json:
