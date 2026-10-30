@@ -55,7 +55,7 @@ python hvkdfusion.py check        # what is ready, what is missing
 .\hvkd.ps1                        # interactive menu, elevated
 ```
 
-`setup` looks for the component source trees in `%USERPROFILE%\Downloads\<project>-master\...` by default (GitHub "Download ZIP" archives) and accepts an explicit path for each one: `--livecloudkd`, `--livecloudkd-exe`, `--windbg-dir` (an installed WinDbg), `--windbg-src`, `--memprocfs-exe`, `--memprocfs-src`, `--leechcore-src`, `--ntoseye-src`, `--install-ntoseye` (installs ntoseye in WSL if missing), `--no-extract`, `--no-stage`. It copies `hvlib.dll` + `hvmm.sys` next to `windbg.exe` and, when present, the `hvmm` LeechCore plugin next to `MemProcFS.exe`.
+In a Fathom release, the components ship next to `hvkdfusion.py` — `hvlib\` (LiveCloudKd engine), `windbg64\` (WinDbg and `LiveCloudKd.exe`), `memprocfs\`, `ntoseye\`, `dokany\` — and `setup` uses them when it finds no source tree: nothing to download or build. Otherwise, `setup` looks for the component source trees in `%USERPROFILE%\Downloads\<project>-master\...` by default (GitHub "Download ZIP" archives) and accepts an explicit path for each one: `--livecloudkd`, `--livecloudkd-exe`, `--windbg-dir` (an installed WinDbg), `--windbg-src`, `--memprocfs-exe`, `--memprocfs-src`, `--leechcore-src`, `--ntoseye-src`, `--install-ntoseye` (installs ntoseye in WSL if missing), `--no-extract`, `--no-stage`. It copies `hvlib.dll` + `hvmm.sys` next to `windbg.exe` and, when present, the `hvmm` LeechCore plugin next to `MemProcFS.exe`.
 
 `check` reports each component (`[OK]` ready, `[~~]` optional missing, `[!!]` blocking missing) and which features are usable; `--deep` also runs `MemProcFS.exe -h`.
 
@@ -211,8 +211,15 @@ hvkd.ps1             launcher with automatic elevation (used by the x64dbg 'hvkd
 config.example.json  configuration keys; setup writes config.json (local paths, not versioned)
 plugin_build/        LiveCloudKd hvlib headers + hvlib.lib, to build the hvmm LeechCore plugin
 LICENSE              HvKdFusion license and third-party components
+
+Shipped in Fathom releases only (each with its README.txt and licenses):
+hvlib/               hvlib.dll + hvlib.py + hvmm.sys (LiveCloudKd engine)
+windbg64/            WinDbg and LiveCloudKd.exe (windbg64\Debug\)
+memprocfs/           MemProcFS, LeechCore, leechcore_device_hvmm.dll
+ntoseye/             ntoseye Linux x86_64 build (run through WSL)
+dokany/              signed DokanSetup.exe
 ```
 
 ## Licenses
 
-HvKdFusion: GPL-3.0-or-later (© 2026 EGKrb), see [LICENSE](LICENSE). `plugin_build/` holds unmodified LiveCloudKd files (GPL-3.0). The other third-party components, **not included**, keep their own licenses: LiveCloudKd/hvlib/hvmm binaries (GPL-3.0), MemProcFS and LeechCore (AGPL-3.0), Dokany (LGPL/MIT), ntoseye (its own license), WinDbg/kd (Microsoft license, not redistributed).
+HvKdFusion: GPL-3.0-or-later (© 2026 EGKrb), see [LICENSE](LICENSE). `plugin_build/` holds unmodified files of the Hyper-V Memory Manager library (LiveCloudKd SDK, CC BY-NC-ND 4.0). Third-party components keep their own licenses: `hvlib.dll` / `hvmm.sys` (CC BY-NC-ND 4.0), `hvlib.py` (GPL-3.0), `LiveCloudKd.exe` and `leechcore_device_hvmm.dll` (LiveCloudKd project, which declares no license), MemProcFS (AGPL-3.0), LeechCore (GPL-3.0), Dokany (LGPL / MIT), ntoseye (MIT), WinDbg (Microsoft license). Fathom releases include them, with the sources of MemProcFS, LeechCore, the hvmm plugin and Dokany as separate release assets.

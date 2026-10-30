@@ -17,17 +17,21 @@ Full text: https://www.gnu.org/licenses/gpl-3.0.txt
 
 --------------------------------------------------------------------------------
 INCLUDED THIRD-PARTY FILES:
-  - plugin_build/                   GPL-3.0            github.com/gerhart01/LiveCloudKd
+  - plugin_build/                   CC BY-NC-ND 4.0    github.com/gerhart01/LiveCloudKd
       files/hvlib.lib and hvlib/hvlib/include/public/*.h, unmodified copies of
       LiveCloudKdSdk/files/hvlib.lib and LiveCloudKdSdk/public/ from
-      LiveCloudKd, laid out as the leechcore_device_hvmm project expects.
+      LiveCloudKd (Hyper-V Memory Manager library, LiveCloudKdSdk/LICENSE.txt),
+      laid out as the leechcore_device_hvmm project expects.
       Only needed to build that plugin.
 
-THIRD-PARTY COMPONENTS (not included; obtain separately):
-  - LiveCloudKd / hvlib / hvmm      GPL-3.0            github.com/gerhart01/LiveCloudKd
-    (hvlib.dll, hvmm.sys, LiveCloudKd.exe)
+THIRD-PARTY COMPONENTS (shipped next to hvkdfusion.py in Fathom releases, each
+folder with its README.txt and licenses; obtain them separately otherwise):
+  - hvlib.dll, hvmm.sys             CC BY-NC-ND 4.0    github.com/gerhart01/LiveCloudKd
+  - hvlib.py                        GPL-3.0            github.com/gerhart01/LiveCloudKd
+  - LiveCloudKd.exe,                no license declared by the LiveCloudKd project;
+    leechcore_device_hvmm.dll       the plugin is built on LeechCore (GPL-3.0)
   - MemProcFS (vmm.dll)             AGPL-3.0           github.com/ufrisk/MemProcFS
-  - LeechCore (leechcore.dll)       AGPL-3.0 / GPL     github.com/ufrisk/LeechCore
-  - Dokany (dokan2.sys)             LGPL / MIT         github.com/dokan-dev/dokany
-  - ntoseye                         (its own license)  github.com/dmaivel/ntoseye
-  - WinDbg / kd                     Microsoft EULA — NOT redistributed here
+  - LeechCore (leechcore.dll)       GPL-3.0            github.com/ufrisk/LeechCore
+  - Dokany (DokanSetup.exe)         LGPL / MIT         github.com/dokan-dev/dokany
+  - ntoseye                         MIT                github.com/dmaivel/ntoseye
+  - WinDbg                          Microsoft license

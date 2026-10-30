@@ -56,6 +56,8 @@ DEFAULT_DOKANY = DOWNLOADS / "dokany-master" / "dokany-master"
 DEFAULT_LEECHCORE = DOWNLOADS / "LeechCore-master" / "LeechCore-master"
 # MemProcFS + LeechCore + the hvmm device plugin, when shipped next to this script (Fathom releases)
 BUNDLED_MEMPROCFS = HERE / "memprocfs"
+# LiveCloudKd's engine (hvlib.dll + its hvlib.py wrapper + hvmm.sys), same origin
+BUNDLED_HVLIB = HERE / "hvlib"
 # ntoseye's Linux build (run through WSL) and the signed Dokany installer, same origin
 BUNDLED_NTOSEYE = HERE / "ntoseye" / "ntoseye"
 BUNDLED_DOKANY_SETUP = HERE / "dokany" / "DokanSetup.exe"
@@ -342,10 +344,15 @@ def cmd_setup(args):
     hvlib_dll = locate(lck, ["hvlib.dll"])
     hvlib_py = locate(lck, ["hvlib.py"])
     hvmm_sys = locate(lck, ["hvmm.sys"])
+    if not (hvlib_dll and hvlib_py) and locate(BUNDLED_HVLIB, ["hvlib.py"]):
+        # No LiveCloudKd tree: use the engine shipped next to this script
+        hvlib_dll = locate(BUNDLED_HVLIB, ["hvlib.dll"])
+        hvlib_py = locate(BUNDLED_HVLIB, ["hvlib.py"])
+        hvmm_sys = locate(BUNDLED_HVLIB, ["hvmm.sys"])
     if not hvlib_dll:
-        die(f"hvlib.dll not found under {lck}")
+        die(f"hvlib.dll not found under {lck} (nor in {BUNDLED_HVLIB})")
     if not hvlib_py:
-        die(f"hvlib.py not found under {lck}")
+        die(f"hvlib.py not found under {lck} (nor in {BUNDLED_HVLIB})")
     cfg["hvlib_dll"] = str(hvlib_dll)
     cfg["hvlib_py"] = str(hvlib_py)
     cfg["hvlib_dir"] = str(hvlib_dll.parent)
@@ -378,7 +385,8 @@ def cmd_setup(args):
     print(f"[+] debugger: kd.exe     {kd_exe if kd_exe else '(not found)'}")
 
     # --- 3. LiveCloudKd.exe launcher (optional; source ships none) ---------- #
-    lck_exe = locate(lck, ["LiveCloudKd.exe"])
+    # Fathom releases ship it with WinDbg (windbg64\Debug\)
+    lck_exe = locate(lck, ["LiveCloudKd.exe"]) or locate(windbg_out, ["LiveCloudKd.exe"])
     # An explicitly supplied prebuilt exe (official release) wins over auto-locate.
     if args.livecloudkd_exe:
         p = Path(args.livecloudkd_exe)
@@ -419,7 +427,7 @@ def cmd_setup(args):
     if cfg["windbg_dir"] and not args.no_stage:
         dst = Path(cfg["windbg_dir"])
         for src in [hvlib_dll, hvmm_sys, lck_exe]:
-            if src and src.exists():
+            if src and src.exists() and src.parent.resolve() != dst.resolve():
                 try:
                     shutil.copy2(src, dst / src.name)
                     print(f"[+] staged {src.name} -> {dst}")
