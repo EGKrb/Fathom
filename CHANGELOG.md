@@ -16,6 +16,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   PDBs (`--sympath`), user-mode minidumps (`.dump /u`), and a native engine
   that opens kernel `.dmp` files without MemProcFS. MCP tools `stack`,
   `analyze`, `disassemble`. Tests in `hvkdfusion/tests/test_debugger.py`.
+- wineye: user-mode minidumps as targets; on kernel dumps without user pages,
+  modules rebuilt from the VADs and the user-mode entry frame of each thread
+  symbolized; `kb`, and `dv` without a private PDB (parameter home slots).
 
 ### Fixed
 - wineye: `vmm.dll` was never initialized (its argument parsing starts at

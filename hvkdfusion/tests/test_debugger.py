@@ -8,7 +8,12 @@
   tests/data/fixture.exe and a hand-built stack entry -> outer -> inner, then k, dv,
   .frame, ln, u, uf through the REPL;
 - native crash-dump reader on a synthetic PAGEDU64 full dump (header, runs, 4-level
-  page tables with 4 KB / 2 MB pages).
+  page tables with 4 KB / 2 MB pages);
+- kb / dv without a PDB (parameter home slots);
+- a local image recognized by SizeOfImage + CheckSum + file size;
+- user modules rebuilt from the VADs when a kernel dump has no user pages (with and
+  without the image TimeDateStamp in the kernel), symbolization through the image;
+- user-mode minidump engine on a synthetic MDMP: ~, !analyze -v (exception), k, dv.
 
 Exits non-zero on failure.
 """
@@ -208,7 +213,7 @@ check("dv: buffer 'w'", "'w'" in out_dv)
 output(repl.run, ".frame 1")
 out_dv1 = output(repl.run, "dv")
 check(".frame 1 + dv: seed = 7", "seed" in out_dv1 and "0n7" in out_dv1)
-check(".frame 1 + dv: p (struct)", "88 77 66 55 44 33 22 11" in out_dv1)
+check(".frame 1 + dv: p (struct fields)", "{x=7 y=8 z=0x1122334455667788}" in out_dv1)
 check("ln", "fixture!outer+0x37" in output(repl.run, f"ln {BASE + 0x10A7:#x}"))
 out_u = output(repl.run, "u fixture!entry L3")
 check("u fixture!entry", "sub     rsp,28h" in out_u and "fixture!outer" in out_u)
@@ -270,6 +275,182 @@ with tempfile.TemporaryDirectory() as tmp:
         check("beyond the dump -> short read", d.read_phys(PAGES * 0x1000, 8) == b"")
     finally:
         d.close()
+
+# ----------------------------- kb / dv without a private PDB -----------------------------
+print("== kb, dv without PDB ==")
+kd_nopdb = wineye.KernelDebugger(FakeEngine(), wineye.SymbolStore(download=False), dis, log=lambda m: None)
+kd_nopdb.pid = PID
+repl_np = wineye.Repl(FakeEngine(), kd=kd_nopdb)
+with contextlib.redirect_stdout(io.StringIO()):
+    repl_np._set_context(dict(regs), set(regs), "test", None, PID)
+out_kb = output(repl_np.run, "kb")
+check("kb: Args to Child of inner = depth, &p", f"0000000000000007 {S - 0x50:016x}" in out_kb)
+out_dvp = output(repl_np.run, "dv")
+check("dv without PDB: says so", "pas de PDB pour fixture" in out_dvp)
+check("dv without PDB: home slots", "arg1  0000000000000007" in out_dvp and f"arg2  {S - 0x50:016x}" in out_dvp)
+
+# ----------------------------- local image identification -----------------------------
+print("== local image (SizeOfImage + CheckSum + file size) ==")
+store_local = wineye.SymbolStore(sympath=[str(DATA)], download=False)
+img = store_local.image("fixture.exe", 0, pe.size_of_image, pe.checksum, len(image))
+check("matching copy found", img is not None and img.timestamp == pe.timestamp)
+check("wrong file size -> rejected", store_local.image("fixture.exe", 0, pe.size_of_image, pe.checksum, len(image) + 1) is None)
+check("wrong SizeOfImage -> rejected", store_local.image("fixture.exe", 0, pe.size_of_image + 0x1000, pe.checksum, len(image)) is None)
+check("SizeOfImage alone -> not enough", store_local.image("fixture.exe", 0, pe.size_of_image, 0, 0) is None)
+
+# ----------------------------- modules from the VADs (kernel dump) -----------------------------
+print("== modules from the VADs (no user pages) ==")
+kmem = {}
+
+
+def kpoke(addr, data):
+    for k, b in enumerate(data):
+        a = addr + k
+        kmem.setdefault(a & ~0xFFF, bytearray(0x1000))[a & 0xFFF] = b
+
+
+VAD, SUB, CA, FO, NAME, SEG, INFO = (0xFFFF800000010000 + 0x10000 * i for i in range(7))
+path_u16 = "\\Windows\\System32\\fixture.exe".encode("utf-16-le")
+kpoke(VAD + 0x48, struct.pack("<Q", SUB))                  # _MMVAD.Subsection
+kpoke(SUB, struct.pack("<Q", CA))                          # _SUBSECTION.ControlArea
+kpoke(CA, struct.pack("<Q", SEG))                          # _CONTROL_AREA.Segment
+kpoke(CA + 0x38, struct.pack("<I", 1 << 5))                # u.Flags.Image
+kpoke(CA + 0x40, struct.pack("<Q", FO | 0x7))              # FilePointer (EX_FAST_REF)
+kpoke(FO + 0x58, struct.pack("<HHxxxxQ", len(path_u16), len(path_u16), NAME))
+kpoke(NAME, path_u16)
+kpoke(SEG + 0x38, struct.pack("<Q", INFO))                 # _SEGMENT.u2.ImageInformation
+kpoke(INFO + 0x38, struct.pack("<II", len(image), pe.checksum))       # ImageFileSize, CheckSum
+kpoke(INFO + 0x44, struct.pack("<II", pe.size_of_image, pe.timestamp))  # SizeOfImage, TimeDateStamp
+
+
+class KernelOnlyEngine(FakeEngine):
+    """A kernel dump: kernel structures readable, no user-mode page, no loader list."""
+
+    def modules(self, pid):
+        return []
+
+    def vads(self, pid):
+        return [{"start": BASE, "end": BASE + 0x3FFF, "vad": VAD}]
+
+    def read(self, pid, addr, size):
+        page = kmem.get(addr & ~0xFFF)
+        if page is None:
+            raise wineye.VmmError("absent")
+        return bytes(page[addr & 0xFFF:(addr & 0xFFF) + size])
+
+
+OFFS = {("_MMVAD", "Subsection"): 0x48, ("_CONTROL_AREA", "Segment"): 0, ("_CONTROL_AREA", "FilePointer"): 0x40,
+        ("_CONTROL_AREA", "u"): 0x38, ("_FILE_OBJECT", "FileName"): 0x58, ("_SEGMENT", "u2"): 0x38,
+        ("_MI_SECTION_IMAGE_INFORMATION", "InternalImageInformation"): 0x40,
+        ("_MI_EXTRA_IMAGE_INFORMATION", "SizeOfImage"): 4, ("_MI_EXTRA_IMAGE_INFORMATION", "TimeDateStamp"): 8,
+        ("_SECTION_IMAGE_INFORMATION", "CheckSum"): 0x3C, ("_SECTION_IMAGE_INFORMATION", "ImageFileSize"): 0x38}
+
+
+def vad_kd(layout):
+    class VadKd(wineye.KernelDebugger):
+        def off(self, typ, field, default=None):
+            v = layout.get((typ, field))
+            if v is None:
+                if default is not None:
+                    return default
+                raise wineye.DbgError(f"{typ}.{field}")
+            return v
+    k = VadKd(KernelOnlyEngine(), wineye.SymbolStore(sympath=[str(DATA)], download=False), dis, log=lambda m: None)
+    k.pid = PID
+    return k
+
+
+for label, layout in (("Windows 10 2004+ (TimeDateStamp in the kernel)", OFFS),
+                      ("Windows 10 1803 (no TimeDateStamp: local copy)",
+                       {k: v for k, v in OFFS.items() if k[1] != "TimeDateStamp"})):
+    kv = vad_kd(layout)
+    mods = kv.user_modules(PID)
+    m = mods[0] if mods else None
+    check(f"{label}: module rebuilt", m is not None and m.name == "fixture.exe" and m.base == BASE
+          and m.size == pe.size_of_image and m.from_vad and m.file_size == len(image))
+    check(f"{label}: timestamp", m is not None and m.timestamp == (pe.timestamp if "TimeDateStamp" in str(layout) else 0))
+    check(f"{label}: symbolized through the image + PDB",
+          kv.symbolize(BASE + 0x1031, PID)[0] == "fixture!inner+0x31")
+    fr = kv.stack(dict(regs), set(regs), pid=PID)
+    check(f"{label}: one frame, stack noted as missing", len(fr) == 1 and fr[0].note == "nostack")
+
+# ----------------------------- user-mode minidump -----------------------------
+print("== user-mode minidump (MDMP) ==")
+
+
+def build_minidump(path, ranges, threads, modules, exc):
+    n_streams = 6
+    base = 32 + 12 * n_streams
+    blob = bytearray()
+
+    def place(b):
+        off = base + len(blob)
+        blob.extend(b)
+        return off
+    si_rva = place(struct.pack("<HHHBBIIIIIHH", 9, 6, 0, 1, 1, 10, 0, 19045, 2, 0, 0, 0) + b"\0" * 24)
+    misc_rva = place(struct.pack("<IIIIII", 24, 1, PID, 0, 0, 0))
+    name_rvas = [place(struct.pack("<I", len(nm.encode("utf-16-le"))) + nm.encode("utf-16-le") + b"\0\0")
+                 for *_x, nm in modules]
+    ml = struct.pack("<I", len(modules)) + b"".join(
+        struct.pack("<QIIII", b, sz, cs, ts, nr) + b"\0" * 84 for (b, sz, cs, ts, _n), nr in zip(modules, name_rvas))
+    ml_rva = place(ml)
+    ctx_rvas = [place(c) for _t, _teb, c in threads]
+    tl = struct.pack("<I", len(threads)) + b"".join(
+        struct.pack("<IIIIQQIIII", tid, 0, 0, 0, teb, 0, 0, 0, len(c), cr)
+        for (tid, teb, c), cr in zip(threads, ctx_rvas))
+    tl_rva = place(tl)
+    tid, code, address, params, ctx = exc
+    exc_ctx_rva = place(ctx)
+    ex = struct.pack("<IIIIQQII", tid, 0, code, 0, 0, address, len(params), 0)
+    ex += struct.pack("<15Q", *(params + [0] * (15 - len(params)))) + struct.pack("<II", len(ctx), exc_ctx_rva)
+    ex_rva = place(ex)
+    m64 = bytearray(struct.pack("<QQ", len(ranges), 0))
+    for start, data in ranges:
+        m64 += struct.pack("<QQ", start, len(data))
+    m64_rva = place(bytes(m64))
+    struct.pack_into("<Q", blob, m64_rva - base + 8, base + len(blob))
+    for _start, data in ranges:
+        blob.extend(data)
+    directory = [(7, 56, si_rva), (15, 24, misc_rva), (4, len(ml), ml_rva), (3, len(tl), tl_rva),
+                 (6, len(ex), ex_rva), (9, len(m64), m64_rva)]
+    with open(path, "wb") as f:
+        f.write(struct.pack("<IIIIIIQ", 0x504D444D, 0xA793, n_streams, 32, 0, 0, 0))
+        f.write(b"".join(struct.pack("<III", *d) for d in directory))
+        f.write(blob)
+
+
+ctx_crash = wineye.build_context(dict(regs))
+ctx_t1 = wineye.build_context(dict(regs, rip=BASE + 0x10C9, rsp=S - 0x28))   # entry, at the call
+with tempfile.TemporaryDirectory() as tmp:
+    md = os.path.join(tmp, "fixture.dmp")
+    build_minidump(md, sorted((a, bytes(b)) for a, b in mem.items()),
+                   [(0x111, 0x7FF000, ctx_crash), (0x222, 0x7FE000, ctx_t1)],
+                   [(BASE, pe.size_of_image, pe.checksum, pe.timestamp, r"C:\fixture.exe")],
+                   (0x111, 0xC0000005, BASE + 0x1031, [1, 0], ctx_crash))
+    eng = wineye.MinidumpEngine(md, error_cls=wineye.VmmError)
+    try:
+        check("engine: pid, threads, modules", eng.pid == PID and len(eng.threads) == 2 and eng.modules(0)[0]["base"] == BASE)
+        check("engine: exception stream", eng.exception and eng.exception["code"] == 0xC0000005 and eng.exception["tid"] == 0x111)
+        check("engine: memory read", eng.read(PID, S - 0x50, 16) == struct.pack("<iiq", 7, 8, 0x1122334455667788))
+        kdm = wineye.KernelDebugger(eng, store, dis, log=lambda m: None)
+        rm = wineye.Repl(eng, kd=kdm)
+        rm.pid = kdm.pid = eng.pid
+        out_t = output(rm.run, "~")
+        check("~ lists the 2 threads", "111" in out_t and "222" in out_t and "fixture!inner+0x31" in out_t)
+        out_a = output(rm.run, "!analyze -v")
+        check("!analyze: exception, write at 0", "c0000005" in out_a and "criture" in out_a and "0x0000000000000000" in out_a)
+        check("!analyze: faulting function and bucket", "FAULTING_IP : fixture!inner+0x31" in out_a
+              and "FAILURE_BUCKET_ID : C0000005_fixture!inner" in out_a)
+        out_km = output(rm.run, "k")
+        check("k on the exception thread", all(x in out_km for x in ("fixture!inner+0x31", "fixture!outer+0x37", "fixture!entry+0xe")))
+        out_dm = output(rm.run, "dv")
+        check("dv on the minidump", "0n7" in out_dm and "0n21" in out_dm and "'w'" in out_dm)
+        output(rm.run, "~1")
+        out_k1 = output(rm.run, "k")
+        check("~1 then k: other thread", "fixture!entry+0x9" in out_k1 and "fixture!inner" not in out_k1)
+        check(".dump /u refused on a minidump", "déjà un minidump" in output(rm.run, ".dump /u x.dmp"))
+    finally:
+        eng.close()
 
 print()
 print("RESULT:", "ALL PASS" if _failures == 0 else f"{_failures} FAILURE(S)")

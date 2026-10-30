@@ -123,7 +123,7 @@ WinDbg-style commands on the memory of the target, which is not aware it is bein
 | `dv` | parameters and locals of the selected frame (private PDB) |
 | `.dump /u [pid] <file>` | user-mode minidump of a process, for WinDbg / Visual Studio |
 
-Kernel crash dumps (`.dmp`) also open without MemProcFS (`--engine native`, automatic when `vmm.dll` is missing). Full documentation: [EGKrb/wineye](https://github.com/EGKrb/wineye).
+Kernel crash dumps (`.dmp`) also open without MemProcFS (`--engine native`, automatic when `vmm.dll` is missing), and so do user-mode minidumps (`~` lists the threads, `!analyze` reads the exception). On a kernel dump without user pages, modules are rebuilt from the VADs and each thread's user-mode entry frame is still symbolized; `kb` and `dv` show the parameter home slots when there is no private PDB. Full documentation: [EGKrb/wineye](https://github.com/EGKrb/wineye).
 
 Addresses are hexadecimal by default as in WinDbg (`0x..` too, `0n` for decimal), with registers and `module!symbol`. On a **live** VM (`--live --vm N`, or `.ctl N` in the REPL), the hvlib control channel adds `freeze`, `resume` / `g` and `r [reg...]` (VP0 registers). There are no breakpoints or single-stepping there: hvlib delivers no trap events. For run control, use `hvkdfusion.py debug` (WinDbg/kd).
 

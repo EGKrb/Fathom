@@ -36,8 +36,10 @@ Debugger (crash dumps, images, live VMs; symbols from the PDBs):
                            module, symbol and stack
     k [n]                  call stack of the current context, kernel then user mode
                            across the system call; source lines with a private PDB
+    kb [n]                 same, with the 4 parameter home slots ("Args to Child")
     ~                      processors: current thread, process, rip
-    ~<n>                   switch to processor n (its saved context)
+                           (user-mode minidump: its threads)
+    ~<n>                   switch to processor n (its saved context) / thread n
     !thread [ethread]      thread details and stack (default: current thread)
     .thread <ethread>      switch the context to a thread (switch frame / processor)
     .cxr [addr]            context from a CONTEXT record (no argument: back to default)
@@ -47,9 +49,11 @@ Debugger (crash dumps, images, live VMs; symbols from the PDBs):
     uf <addr|mod!func>     disassemble a whole function (flow analysis, split chunks)
     ln <addr>              nearest symbol and source line
     .frame [n]             select a frame of the last k (n in hex, as k prints it)
-    dv                     locals and parameters of the selected frame (private PDB)
+    dv                     locals and parameters of the selected frame (private PDB;
+                           without one: the parameter home slots, marked unreliable)
     .dump /u [pid] <file>  write a full user-mode minidump of a process: threads with
                            their user-mode registers, modules, every resident page
+                           (from a kernel dump: threads + modules, no memory)
     .sympath [p1;p2...]    private PDB search path (also --sympath / WINEYE_SYMPATH)
     .reload                reload symbols
 
@@ -71,10 +75,17 @@ wineye and use the Vmm / NativeEngine / KernelDebugger classes.
 Engines (--engine): vmm.dll (MemProcFS: dumps, raw images, LeechCore devices,
 live Hyper-V VMs) or native (Windows x64 kernel crash dumps .dmp, all formats:
 full, bitmap, kernel, kernel+user, complete, live - no MemProcFS needed). auto
-uses vmm.dll and falls back to native for a .dmp. Symbols: wineye reads PDBs
-itself and downloads Microsoft's (PDB, or the image when a module header is not
-in memory) into ~/.wineye/symbols; --sympath for private PDBs,
---no-symbol-download to stay offline.
+uses vmm.dll and falls back to native for a .dmp. User-mode minidumps (MDMP:
+WinDbg .dump, MiniDumpWriteDump, Task Manager, .dump /u) open with their own
+engine: ~ lists the threads, !analyze reads the exception record. Symbols: wineye
+reads PDBs itself and downloads Microsoft's (PDB, or the image when a module
+header is not in memory) into ~/.wineye/symbols; --sympath for private PDBs (and
+local copies of images), --no-symbol-download to stay offline.
+
+Kernel dumps hold no user-mode pages: wineye then rebuilds each process' modules
+from its VADs (image section: name, SizeOfImage, CheckSum, file size and, from
+Windows 10 2004, TimeDateStamp), so the user-mode frame where each thread entered
+the kernel is still symbolized; the rest of the user stack is not in the dump.
 
 Server modes (the ones ntoseye has; here native, no WSL) - `--serve`:
     --serve mcp              MCP server over stdio (JSON-RPC 2.0): tools
@@ -2177,6 +2188,9 @@ class PeFile:
             vsize, va, rawsize, rawptr = struct.unpack_from("<IIII", data, sec + i * 40 + 8)
             self.sections.append((va, max(vsize, rawsize), rawptr, rawsize))
         self.header_size = sec + nsec * 40
+        self.timestamp = struct.unpack_from("<I", data, pe + 8)[0]
+        self.size_of_image = struct.unpack_from("<I", data, pe + 24 + 56)[0]
+        self.checksum = struct.unpack_from("<I", data, pe + 24 + 64)[0]
 
     def read(self, rva, size):
         if rva + size <= self.header_size:
@@ -2240,9 +2254,14 @@ class SymbolStore:
         dest.write_bytes(data)
         return Pdb(dest)
 
-    def image(self, name: str, timestamp: int, size: int):
-        """Image file of a module (name, TimeDateStamp, SizeOfImage): local cache, then
-        the symbol server - used when the PE header of a module is not in the dump."""
+    def image(self, name: str, timestamp: int, size: int, checksum: int = 0, file_size: int = 0,
+              path: str = ""):
+        """Image file of a module (name, TimeDateStamp, SizeOfImage): local cache, then the
+        symbol server - used when the PE header of a module is not in the dump. Without a
+        TimeDateStamp, a local copy (search path, cache, or the same path on this machine)
+        is used when its SizeOfImage, CheckSum and file size all match."""
+        if not timestamp:
+            return self._local_image(name, size, checksum, file_size, path)
         key = f"{timestamp:08X}{size:X}"
         cached = self.cache / name / key / name
         for root in [Path(r) for r in self.paths] + [self.cache]:
@@ -2252,8 +2271,8 @@ class SymbolStore:
                     return PeFile(f.read_bytes())
                 except PdbError:
                     pass
-        if not self.download or not timestamp or not size:
-            return None
+        if not self.download or not size:
+            return self._local_image(name, size, checksum, file_size, path)
         url = f"{MS_SYMBOL_SERVER}/{name}/{key}/{name}"
         self.log(f"[*] symboles : téléchargement de l'image {url}")
         req = urllib.request.Request(url, headers={"User-Agent": "Microsoft-Symbol-Server/10.0.0.0"})
@@ -2268,6 +2287,31 @@ class SymbolStore:
         cached.parent.mkdir(parents=True, exist_ok=True)
         cached.write_bytes(data)
         return PeFile(data)
+
+    def _local_image(self, name, size, checksum, file_size, path=""):
+        if not size or not (checksum or file_size):
+            return None              # SizeOfImage alone would be too weak an identification
+        cand = []
+        for root in [Path(r) for r in self.paths] + [self.cache]:
+            cand.append(root / name)
+            if (root / name).is_dir():
+                cand += sorted((root / name).glob(f"*/{name}"))
+        low = path.lower()
+        for prefix in ("\\windows\\", "\\systemroot\\"):
+            if low.startswith(prefix):
+                windir = os.environ.get("SystemRoot") or os.environ.get("windir")
+                if windir:
+                    cand.append(Path(windir) / path[len(prefix):])
+        for c in cand:
+            try:
+                if not c.is_file() or (file_size and c.stat().st_size != file_size):
+                    continue
+                pe = PeFile(c.read_bytes())
+            except (OSError, PdbError, struct.error):
+                continue
+            if pe.size_of_image == size and (not checksum or pe.checksum == checksum):
+                return pe
+        return None
 
     def for_image(self, read, base: int):
         """PDB of the image mapped at base (cached per base)."""
@@ -2733,6 +2777,170 @@ _CTX_OFF = {"rax": 0x78, "rcx": 0x80, "rdx": 0x88, "rbx": 0x90, "rsp": 0x98, "rb
 CONTEXT_SIZE = 0x4D0
 
 
+# --------------------------------------------------------------------------- #
+#  User-mode minidump engine: MDMP files (WinDbg .dump, MiniDumpWriteDump, Task
+#  Manager "Create dump file", wineye's .dump /u) - threads, modules, memory
+# --------------------------------------------------------------------------- #
+
+class MinidumpEngine:
+    """Same interface as the other engines, for one process captured in a user-mode
+    minidump (x64). Any pid maps to that process; reads come from the dump's memory
+    ranges (full-memory dumps hold everything, small ones only the stacks)."""
+
+    user_mode = True
+
+    def __init__(self, path, error_cls=Exception):
+        self.Err = error_cls
+        self.path = path
+        self.f = open(path, "rb")
+        self.m = mmap.mmap(self.f.fileno(), 0, access=mmap.ACCESS_READ)
+        sig, _ver, n, dir_rva = struct.unpack_from("<IIII", self.m, 0)
+        if sig != _MD_SIG:
+            raise self.Err("pas un minidump (signature MDMP attendue)")
+        self.streams = {}
+        for i in range(n):
+            t, size, rva = struct.unpack_from("<III", self.m, dir_rva + 12 * i)
+            self.streams.setdefault(t, (rva, size))
+        si = self._stream(7)
+        if si is None or struct.unpack_from("<H", si, 0)[0] != 9:
+            raise self.Err("minidump non x64 (seuls les minidumps AMD64 sont pris en charge)")
+        self.build = struct.unpack_from("<I", si, 16)[0]
+        self.processors = si[6]
+        misc = self._stream(15)
+        self.pid = struct.unpack_from("<I", misc, 8)[0] if misc and struct.unpack_from("<I", misc, 4)[0] & 1 else 0
+        self._ranges = []                       # sorted [(start, size, file offset)]
+        self.threads = self._threads()
+        self.exception = self._exception()
+        self._mods = self._modules()
+        self._memory()
+        self._ranges.sort()
+        self._starts = [r[0] for r in self._ranges]
+        name = self._mods[0]["name"] if self._mods else "?"
+        self._proc = {"pid": self.pid, "ppid": 0, "name": name, "name_long": name, "eprocess": 0,
+                      "peb": 0, "dtb": 0, "wow64": False, "session": 0, "integrity": "?", "sid": "",
+                      "system": f"windows-x64 build {self.build}"}
+
+    def _stream(self, t):
+        loc = self.streams.get(t)
+        return bytes(self.m[loc[0]:loc[0] + loc[1]]) if loc else None
+
+    def _string(self, rva):
+        if not rva or rva + 4 > len(self.m):
+            return ""
+        n = struct.unpack_from("<I", self.m, rva)[0]
+        return bytes(self.m[rva + 4:rva + 4 + n]).decode("utf-16-le", "replace")
+
+    def _threads(self):
+        out = []
+        data = self._stream(3)
+        if not data:
+            return out
+        starts = {}
+        info = self._stream(17)                  # ThreadInfoList: start addresses
+        if info and len(info) >= 12:
+            hsize, esize, count = struct.unpack_from("<III", info, 0)
+            for i in range(min(count, (len(info) - hsize) // max(esize, 1))):
+                o = hsize + i * esize
+                if o + 64 <= len(info):
+                    starts[struct.unpack_from("<I", info, o)[0]] = struct.unpack_from("<Q", info, o + 48)[0]
+        for i in range(struct.unpack_from("<I", data, 0)[0]):
+            tid, _sus, _pc, _pr, teb, st_start, st_size, st_rva, c_size, c_rva = \
+                struct.unpack_from("<IIIIQQIIII", data, 4 + 48 * i)
+            if st_size and st_rva:          # full-memory dumps: RVA 0, data in Memory64List
+                self._ranges.append((st_start, st_size, st_rva))
+            out.append({"tid": tid, "teb": teb, "stack": (st_start, st_size),
+                        "context": bytes(self.m[c_rva:c_rva + c_size]), "start": starts.get(tid, 0)})
+        return out
+
+    def _exception(self):
+        data = self._stream(6)
+        if not data or len(data) < 168:
+            return None
+        tid = struct.unpack_from("<I", data, 0)[0]
+        code, flags, _rec, address, nparams = struct.unpack_from("<IIQQI", data, 8)
+        params = list(struct.unpack_from(f"<{min(nparams, 15)}Q", data, 40))
+        c_size, c_rva = struct.unpack_from("<II", data, 160)
+        return {"tid": tid, "code": code, "flags": flags, "address": address, "params": params,
+                "context": bytes(self.m[c_rva:c_rva + c_size])}
+
+    def _modules(self):
+        out = []
+        data = self._stream(4)
+        if not data:
+            return out
+        for i in range(struct.unpack_from("<I", data, 0)[0]):
+            o = 4 + 108 * i
+            base, size, csum, ts, name_rva = struct.unpack_from("<QIIII", data, o)
+            path = self._string(name_rva)
+            out.append({"base": base, "size": size, "entry": 0, "wow64": False,
+                        "name": path.rsplit("\\", 1)[-1], "path": path, "timestamp": ts, "checksum": csum})
+        return out
+
+    def _memory(self):
+        data = self._stream(9)                   # Memory64List: full-memory dumps
+        if data:
+            count, rva = struct.unpack_from("<QQ", data, 0)
+            for i in range(count):
+                start, size = struct.unpack_from("<QQ", data, 16 + 16 * i)
+                self._ranges.append((start, size, rva))
+                rva += size
+        data = self._stream(5)                   # MemoryList: small dumps
+        if data:
+            for i in range(struct.unpack_from("<I", data, 0)[0]):
+                start, size, rva = struct.unpack_from("<QII", data, 4 + 16 * i)
+                self._ranges.append((start, size, rva))
+
+    # -- Vmm-compatible API -- #
+    def read(self, pid, addr, size):
+        out = bytearray()
+        while size > 0:
+            i = bisect.bisect_right(self._starts, addr) - 1
+            if i < 0:
+                break
+            start, rsize, rva = self._ranges[i]
+            if addr >= start + rsize:
+                break
+            take = min(size, start + rsize - addr)
+            out += self.m[rva + addr - start: rva + addr - start + take]
+            addr += take
+            size -= take
+        if not out:
+            raise self.Err(f"lecture impossible @ {addr:#x} : mémoire absente du minidump")
+        return bytes(out)
+
+    def pids(self):
+        return [self.pid]
+
+    def process(self, pid):
+        return dict(self._proc)
+
+    def modules(self, pid):
+        return [dict(m) for m in self._mods]
+
+    def vads(self, pid):
+        return [{"start": a, "end": a + n - 1, "vad": 0, "protection": 0, "image": False, "file": False,
+                 "stack": False, "text": ""} for a, n, _r in self._ranges]
+
+    def handles(self, pid):
+        raise self.Err("!handle : pas de handles dans ce minidump")
+
+    def symbol(self, module, name):
+        raise self.Err("symboles : lecteur de PDB de wineye")
+
+    def type_size(self, module, typ):
+        raise self.Err("types : lecteur de PDB de wineye")
+
+    def type_child_offset(self, module, typ, child):
+        raise self.Err("types : lecteur de PDB de wineye")
+
+    def close(self):
+        try:
+            self.m.close()
+            self.f.close()
+        except Exception:
+            pass
+
+
 class DbgError(Exception):
     pass
 
@@ -2778,9 +2986,10 @@ def build_context(regs: dict) -> bytes:
 
 
 class Module:
-    __slots__ = ("name", "base", "size", "path", "pdata", "exports", "pdb", "pdb_tried", "timestamp", "image")
+    __slots__ = ("name", "base", "size", "path", "pdata", "exports", "pdb", "pdb_tried", "timestamp", "image",
+                 "checksum", "file_size", "from_vad")
 
-    def __init__(self, name, base, size, path="", timestamp=0):
+    def __init__(self, name, base, size, path="", timestamp=0, checksum=0, file_size=0, from_vad=False):
         self.name = name
         self.base = base
         self.size = size
@@ -2791,6 +3000,9 @@ class Module:
         self.pdb_tried = False
         self.timestamp = timestamp
         self.image = None          # PE file from the symbol server (False: not available)
+        self.checksum = checksum   # PE CheckSum and file size (from the kernel's image section),
+        self.file_size = file_size  # used to recognize a local copy of the image file
+        self.from_vad = from_vad   # rebuilt from the VADs (loader list not in memory)
 
     @property
     def short(self):
@@ -2825,6 +3037,7 @@ class KernelDebugger:
         self.syms = symbols
         self.dis = disassembler
         self.dump = dump               # CrashDump (header, context) when the target is a .dmp
+        self.user_target = getattr(engine, "user_mode", False)   # user-mode minidump: threads, no kernel
         self.log = log
         self._kmods = None
         self._umods = {}
@@ -2883,9 +3096,10 @@ class KernelDebugger:
                     head = None
             if head:
                 mods = self._ldr_list(head, 4)
-            if not mods:
+            if not mods and not self.user_target:
                 for m in self.e.modules(4):
-                    mods.append(Module(m["name"], m["base"], m["size"], m.get("path", ""), m.get("timestamp", 0)))
+                    if m["base"] >= KERNEL_SPACE:
+                        mods.append(Module(m["name"], m["base"], m["size"], m.get("path", ""), m.get("timestamp", 0)))
             mods.sort(key=lambda m: m.base)
             self._kmods = mods
         return self._kmods
@@ -2916,16 +3130,69 @@ class KernelDebugger:
 
     def user_modules(self, pid):
         if pid not in self._umods:
+            self._umods[pid] = []          # re-entrancy guard (the VAD fallback needs the nt PDB)
             mods = []
             try:
                 for m in self.e.modules(pid):
                     if m["base"] < KERNEL_SPACE:
-                        mods.append(Module(m["name"], m["base"], m["size"], m.get("path", ""), m.get("timestamp", 0)))
+                        mods.append(Module(m["name"], m["base"], m["size"], m.get("path", ""), m.get("timestamp", 0),
+                                           m.get("checksum", 0)))
             except Exception:
                 pass
+            if not mods:
+                mods = self._vad_modules(pid)
             mods.sort(key=lambda m: m.base)
             self._umods[pid] = mods
         return self._umods[pid]
+
+    def _vad_modules(self, pid):
+        """Images mapped in a process, rebuilt from its VADs (kernel memory) when the PEB /
+        loader list is not in memory - a kernel dump has no user-mode pages. The image
+        section gives the file name, SizeOfImage, CheckSum and file size and, on recent
+        builds, the TimeDateStamp (enough to fetch the image and its PDB)."""
+        try:
+            vads = self.e.vads(pid)
+            off = self.off
+            o_sub, o_seg = off("_MMVAD", "Subsection"), off("_CONTROL_AREA", "Segment")
+            o_fp, o_flags = off("_CONTROL_AREA", "FilePointer"), off("_CONTROL_AREA", "u")
+            o_name, o_info = off("_FILE_OBJECT", "FileName"), off("_SEGMENT", "u2")
+            o_int = off("_MI_SECTION_IMAGE_INFORMATION", "InternalImageInformation")
+            o_size = o_int + off("_MI_EXTRA_IMAGE_INFORMATION", "SizeOfImage")
+            o_ts = off("_MI_EXTRA_IMAGE_INFORMATION", "TimeDateStamp", -1)
+            o_csum = off("_SECTION_IMAGE_INFORMATION", "CheckSum")
+            o_fsize = off("_SECTION_IMAGE_INFORMATION", "ImageFileSize")
+        except Exception:
+            return []
+        image_bit = 5
+        try:
+            ti = self.ntpdb.find_type("_MMSECTION_FLAGS")
+        except DbgError:
+            ti = None
+        for f in (self.ntpdb.fields(ti) if ti is not None else []):
+            if f[0] == "Image" and f[3] is not None:
+                image_bit = f[3]
+        mods = []
+        for v in vads:
+            try:
+                sub = self.q(v["vad"] + o_sub, 4)
+                ca = self.q(sub, 4) if sub else 0
+                if not ca or not self.u32(ca + o_flags, 4) >> image_bit & 1:
+                    continue
+                fo = self.q(ca + o_fp, 4) & ~0xF
+                ln, buf = struct.unpack("<H6xQ", self.read(fo + o_name, 16, 4))
+                path = self.read(buf, ln, 4).decode("utf-16-le", "replace") if ln else ""
+                info = self.q(self.q(ca + o_seg, 4) + o_info, 4)
+                raw = self.read(info, max(o_size, o_int + o_ts, o_csum, o_fsize) + 4, 4)
+            except (DbgError, struct.error):
+                continue
+
+            def get(o):
+                return struct.unpack_from("<I", raw, o)[0] if 0 <= o and o + 4 <= len(raw) else 0
+            size = get(o_size) or (v["end"] - v["start"] + 1)
+            ts = get(o_int + o_ts) if o_ts >= 0 else 0
+            name = path.rsplit("\\", 1)[-1] or f"image_{v['start']:x}"
+            mods.append(Module(name, v["start"], size, path, ts, get(o_csum), get(o_fsize), from_vad=True))
+        return mods
 
     def module_at(self, addr, pid=None):
         mods = self.kernel_modules() if addr >= KERNEL_SPACE else self.user_modules(self.pid if pid is None else pid)
@@ -2937,8 +3204,8 @@ class KernelDebugger:
 
     def module_by_name(self, name, pid=None):
         low = name.lower()
-        for mods in (self.kernel_modules(), self.user_modules(self.pid if pid is None else pid)):
-            for m in mods:
+        for get in (self.kernel_modules, lambda: self.user_modules(self.pid if pid is None else pid)):
+            for m in get():
                 if m.short.lower() == low or m.name.lower() == low or m.name.lower().rsplit(".", 1)[0] == low:
                     return m
         return None
@@ -2960,7 +3227,8 @@ class KernelDebugger:
             return data
         if mod.image is None:
             name = mod.name.rsplit("\\", 1)[-1]
-            mod.image = (self.syms.image(name, mod.timestamp, mod.size) if mod.timestamp else None) or False
+            mod.image = self.syms.image(name, mod.timestamp, mod.size, mod.checksum, mod.file_size,
+                                        mod.path) or False
         if mod.image:
             return mod.image.read(rva, size)
         return data
@@ -3402,6 +3670,9 @@ class KernelDebugger:
                 f.note = f.note or "user"
                 crossed_user = True
             regs, known = nregs, nknown | {"rip", "rsp"}
+        last = frames[-1] if frames else None
+        if last is not None and last.rip < KERNEL_SPACE and len(self.read(last.rsp, 8, pid)) < 8:
+            last.note = "nostack"            # the walk stops here: user stack not in memory
         return frames
 
     def _on_thread_stack(self, thread, rsp):
@@ -3551,6 +3822,8 @@ class BugcheckAnalyzer:
 
     def run(self, verbose=True):
         kd = self.kd
+        if kd.user_target:
+            return self._exception_report()
         out = []
         w = out.append
         code, args, source = self.bugcheck_data()
@@ -3615,6 +3888,39 @@ class BugcheckAnalyzer:
             pass
         return out + self._context_report(regs, known, label, th, fault_ip, exc_code, code)
 
+    def _exception_report(self):
+        """User-mode minidump: the exception stream (code, address, parameters, context
+        record of the faulting thread), else the current thread."""
+        kd = self.kd
+        e = kd.e
+        out = ["*" * 79, "*" + "Analyse de l'exception".center(77) + "*", "*" * 79, ""]
+        w = out.append
+        exc = e.exception
+        name = e.process(e.pid)["name"]
+        if exc is None or not exc["code"]:
+            w(f"Aucune exception dans ce minidump ({name}, pid {e.pid}) : analyse du thread courant.")
+            regs, label = kd.ctx or parse_context(e.threads[0]["context"]), kd.ctx_label or "thread 0"
+            return out + self._context_report(regs, set(regs), label, None, None, None, 0)
+        code = exc["code"]
+        w(f"PROCESS_NAME : {name}  (pid {e.pid})")
+        w(f"EXCEPTION_RECORD : code {code:08x} ({_EXCEPTIONS.get(code, 'exception')}), "
+          f"adresse {kd.symbolize(exc['address'], e.pid)[0]}, thread {exc['tid']:#x}")
+        if code == 0xC0000005 and len(exc["params"]) >= 2:
+            op = {0: "lecture", 1: "écriture", 8: "exécution"}.get(exc["params"][0], str(exc["params"][0]))
+            w(f"  accès en {op} à l'adresse {exc['params'][1]:#018x}")
+        elif exc["params"]:
+            w("  paramètres : " + " ".join(f"{x:#x}" for x in exc["params"]))
+        regs = parse_context(exc["context"]) if len(exc["context"]) >= 0x100 else None
+        label = f"contexte de l'exception (thread {exc['tid']:#x})"
+        if regs is None:
+            idx = next((i for i, t in enumerate(e.threads) if t["tid"] == exc["tid"]), 0)
+            regs, label = parse_context(e.threads[idx]["context"]), f"thread {idx}"
+        out += self._context_report(regs, set(regs), label, None, exc["address"], code, 0)
+        sym = next((x.split(" : ", 1)[1] for x in out if x.startswith("SYMBOL_NAME : ")), None)
+        if sym:
+            w(f"FAILURE_BUCKET_ID : {code:08X}_{sym}")
+        return out
+
     def _context_report(self, regs, known, label, thread, fault_ip, exc_code, code):
         kd = self.kd
         out = []
@@ -3655,6 +3961,8 @@ class BugcheckAnalyzer:
               + (f"  [{f.line[0].rsplit(chr(92), 1)[-1]} @ {f.line[1]}]" if f.line else ""))
             if f.note == "user" and i + 1 < len(frames):
                 w("       --- passage en mode utilisateur ---")
+            elif f.note == "nostack":
+                w("       " + "(suite de la pile user-mode absente : la source ne contient pas la mémoire utilisateur)")
         # faulting module: the faulting IP's module, else the first frame outside nt/hal
         culprit = None
         if ip is not None:
@@ -3764,7 +4072,12 @@ def write_user_minidump(kd, pid, path, log=print):
         ctx_rvas = [place(ctx) for _info, ctx, _rsp, _sb in threads]
         ml = bytearray(struct.pack("<I", len(mods)))
         for (m, _cv), nrva, (cvrva, cvsize) in zip(mods, name_rvas, cv_refs):
-            ml += struct.pack("<QIIII", m.base, m.size, 0, m.timestamp or 0, nrva)
+            if not m.timestamp and m.image is None and m.from_vad:
+                # kernel dump: a local copy of the image (no download here) gives the
+                # TimeDateStamp that debuggers need to fetch the image and its symbols
+                m.image = kd.syms.image(m.name, 0, m.size, m.checksum, m.file_size, m.path) or None
+            ts = m.timestamp or (m.image.timestamp if m.image else 0)
+            ml += struct.pack("<QIIII", m.base, m.size, m.checksum, ts, nrva)
             ml += b"\0" * 52                          # VS_FIXEDFILEINFO (not recovered)
             ml += struct.pack("<IIII", cvsize, cvrva, 0, 0) + struct.pack("<QQ", 0, 0)
         ml_rva = place(bytes(ml))
@@ -3861,8 +4174,27 @@ class DebugCommands:
         self.kd.pid = self.pid
         return True
 
+    def _user_thread(self, i, quiet=False):
+        kd = self.kd
+        t = kd.e.threads[i]
+        exc = kd.e.exception
+        raw = exc["context"] if exc and exc["tid"] == t["tid"] and len(exc["context"]) >= 0x100 else t["context"]
+        regs = parse_context(raw)
+        kd.cpu = i
+        label = f"thread {i} (tid {t['tid']:#x})" + (" - contexte de l'exception" if raw is not t["context"] else "")
+        if quiet:
+            kd.ctx, kd.ctx_known, kd.ctx_label, kd.thread = regs, set(regs), label, None
+            kd.frames, kd.frame_index = None, 0
+            self.pid = kd.pid = kd.e.pid
+        else:
+            self._set_context(regs, set(regs), label, None, kd.e.pid)
+
     def _ensure_context(self):
         kd = self.kd
+        if kd.ctx is None and kd.user_target:
+            exc = kd.e.exception
+            idx = next((i for i, t in enumerate(kd.e.threads) if exc and t["tid"] == exc["tid"]), 0)
+            self._user_thread(idx, quiet=True)
         if kd.ctx is None:
             cpu = kd._crash_cpu() if kd.dump is not None else 0
             kd.cpu = cpu
@@ -3937,7 +4269,17 @@ class DebugCommands:
             raise
 
     # -- k / .frame / dv -- #
-    def _cmd_k(self, args):
+    def _home_args(self, frames, i):
+        """The 4 parameter home slots of frame i (x64: just above its return address, i.e.
+        at the caller's Child-SP) - what WinDbg's kb shows as "Args to Child". Valid only
+        where the function spilled RCX/RDX/R8/R9 there (always with /Od, often not when
+        optimized: the slots are then scratch space)."""
+        if i + 1 >= len(frames) or frames[i].note in ("user", "trap"):
+            return None
+        raw = self.kd.read(frames[i + 1].rsp, 32, self.pid)
+        return list(struct.unpack("<4Q", raw)) if len(raw) == 32 else None
+
+    def _cmd_k(self, args, args_to_child=False):
         if not self._need_kd():
             return
         frames = self._frames()
@@ -3945,18 +4287,30 @@ class DebugCommands:
         if self.json:
             print(_jdump([{"index": f.index, "rsp": f.rsp, "rip": f.rip, "symbol": f.symbol,
                            "file": f.line[0] if f.line else None, "line": f.line[1] if f.line else None,
-                           "transition": f.note} for f in frames[:count]]))
+                           "transition": f.note,
+                           **({"args_to_child": self._home_args(frames, i)} if args_to_child else {})}
+                          for i, f in enumerate(frames[:count])]))
             return
         print(f"contexte : {self.kd.ctx_label}")
-        print(f" #  {'Child-SP':<17} {'RetAddr':<17} Site d'appel")
+        if args_to_child:
+            print(f" #  {'Child-SP':<17} {'RetAddr':<17} : {'Args to Child':<71} : Site d'appel")
+        else:
+            print(f" #  {'Child-SP':<17} {'RetAddr':<17} Site d'appel")
         for i, f in enumerate(frames[:count]):
             ret = frames[i + 1].rip if i + 1 < len(frames) else 0
             src = f"  [{f.line[0]} @ {f.line[1]}]" if f.line else ""
-            print(f"{f.index:02x}  {f.rsp:016x}  {ret:016x}  {f.symbol}{src}")
+            if args_to_child:
+                ha = self._home_args(frames, i)
+                cols = " ".join(f"{a:016x}" for a in ha) if ha else " ".join(["?" * 16] * 4)
+                print(f"{f.index:02x}  {f.rsp:016x}  {ret:016x}  : {cols} : {f.symbol}{src}")
+            else:
+                print(f"{f.index:02x}  {f.rsp:016x}  {ret:016x}  {f.symbol}{src}")
             if f.note == "user" and i + 1 < len(frames):
                 print("    --- passage en mode utilisateur ---")
             elif f.note == "trap" and i + 1 < len(frames):
                 print("    --- trap / interruption ---")
+            elif f.note == "nostack":
+                print("    " + "(suite de la pile user-mode absente : la source ne contient pas la mémoire utilisateur)")
 
     def _cmd_frame(self, args):
         if not self._need_kd():
@@ -3983,11 +4337,13 @@ class DebugCommands:
             return
         pdb = kd.pdb(f.module, self.pid)
         if pdb is None:
-            print("[!] pas de symboles pour ce module")
+            self._dv_public(frames, kd.frame_index, f"pas de PDB pour {f.module.short}")
             return
-        fname, variables = pdb.locals_at(f.rip - f.module.base - (1 if f.index else 0))
-        if fname is None or not pdb.has_private_info:
-            print("[!] PDB public : pas de variables locales (il faut le PDB privé, voir .sympath)")
+        rva = f.rip - f.module.base - (1 if f.index else 0)
+        fname, variables = pdb.locals_at(rva)
+        # public PDBs (Microsoft's) may keep procedure records, but without variables or lines
+        if fname is None or not (variables or pdb.line_at(rva)):
+            self._dv_public(frames, kd.frame_index)
             return
         seen = set()
         rows = []
@@ -4004,10 +4360,38 @@ class DebugCommands:
                            "address": addr, "value": val} for v, val, addr in rows]))
             return
         print(f"{fname}  (frame {f.index:02x})")
+        if not rows:
+            print("  (ni paramètre ni variable locale)")
         for v, value, addr in rows:
             kind = "param" if v["param"] else "local"
             where = f"@ {addr:016x}" if addr is not None else f"@ {v['where'][1]}"
             print(f"  {kind:<6} {pdb.type_name(v['type']):<22} {v['name']:<20} = {value if value is not None else '<indisponible>'}   {where}")
+
+    def _dv_public(self, frames, i, reason=None):
+        """dv without a private PDB: names and types of locals are not in a public PDB, so
+        show what the stack still holds - the 4 parameter home slots - and, at the first
+        frame, the argument registers."""
+        f = frames[i]
+        ha = self._home_args(frames, i)
+        regs = [f.regs.get(r) if r in f.known else None for r in ("rcx", "rdx", "r8", "r9")] if i == 0 else None
+        if self.json:
+            print(_jdump({"function": f.symbol, "private_pdb": False, "home_slots": ha, "arg_registers": regs}))
+            return
+        print(f"[!] {reason or 'PDB public pour ' + f.module.short} : pas de noms ni de types de variables "
+              f"locales (il faut le PDB privé, voir .sympath)")
+        print(f"{f.symbol}  (frame {f.index:02x})")
+        if ha:
+            print("  slots de paramètres (home space) - valables si la fonction y a rangé ses arguments,")
+            print("  ce que fait tout code /Od ; en code optimisé, ce peut être autre chose :")
+            for n, a in enumerate(ha, 1):
+                sym = self.kd.symbolize(a, self.pid)[0] if a >= 0x10000 and self.kd.module_at(a, self.pid) else ""
+                print(f"    arg{n}  {a:016x}  {sym}")
+        else:
+            print("  slots de paramètres illisibles (pas de frame appelante en mémoire)")
+        if regs and any(v is not None for v in regs):
+            print("  registres d'arguments à cet instant (= paramètres seulement à l'entrée de la fonction) :")
+            for r, v in zip(("rcx", "rdx", "r8", "r9"), regs):
+                print(f"    {r:<4}  {v:016x}" if v is not None else f"    {r:<4}  ?")
 
     def _local_value(self, pdb, f, v):
         kd = self.kd
@@ -4022,7 +4406,7 @@ class DebugCommands:
             raw = kd.read(addr, min(size, 64), self.pid)
             if not raw:
                 return None, addr
-            return self._format_value(pdb, v["type"], raw, size), addr
+            return self._with_string(pdb, v["type"], raw, self._format_value(pdb, v["type"], raw, size)), addr
         if where[0] == "reg":
             reg = where[1]
             full = {"eax": "rax", "ebx": "rbx", "ecx": "rcx", "edx": "rdx", "esi": "rsi", "edi": "rdi",
@@ -4030,13 +4414,43 @@ class DebugCommands:
             if full not in f.known:
                 return None, None
             val = f.regs.get(full, 0) & ((1 << (8 * min(size, 8))) - 1)
-            return self._format_value(pdb, v["type"], val.to_bytes(8, "little")[:min(size, 8)], size), None
+            raw = val.to_bytes(8, "little")[:min(size, 8)]
+            return self._with_string(pdb, v["type"], raw, self._format_value(pdb, v["type"], raw, size)), None
         return None, None
 
+    def _with_string(self, pdb, ti, raw, text):
+        """char * / wchar_t * : append the string it points to, as WinDbg does."""
+        name = pdb.type_name(ti).replace("const ", "")
+        if text is None or len(raw) < 8 or name not in ("char *", "wchar_t *", "unsigned short *"):
+            return text
+        ptr = int.from_bytes(raw[:8], "little")
+        data = self.kd.read(ptr, 256, self.pid) if ptr >= 0x10000 else b""
+        if not data:
+            return text
+        if name == "char *":
+            out = data.split(b"\0", 1)[0].decode("latin-1")
+        else:
+            out = data[:len(data) & ~1].decode("utf-16-le", "replace").split("\0", 1)[0]
+        return f"{text} {out!r}"
+
     @staticmethod
-    def _format_value(pdb, ti, raw, size):
+    def _format_value(pdb, ti, raw, size, depth=0):
         kind = pdb.type_kind(ti)
         name = pdb.type_name(ti)
+        if kind in ("struct", "union") and depth < 2:
+            fields = pdb.fields(ti)
+            parts = []
+            for fname, foff, fti, bpos, _blen in fields[:8]:
+                fsize = pdb.type_size(fti) or 0
+                if bpos is not None or not fsize or foff + fsize > len(raw):
+                    continue
+                val = DebugCommands._format_value(pdb, fti, raw[foff:foff + fsize], fsize, depth + 1)
+                dec, _, hx = val.partition("  (")
+                if hx and dec.startswith("0n"):          # small integers in decimal, others in hex
+                    val = dec[2:] if -0x10000 < int(dec[2:]) < 0x10000 else hx.rstrip(")")
+                parts.append(f"{fname}={val}")
+            if parts:
+                return "{" + " ".join(parts) + (" ..." if len(fields) > 8 or size > len(raw) else "") + "}"
         if kind in ("base", "pointer", "enum", "modifier", "bitfield") and size in (1, 2, 4, 8) and len(raw) >= size:
             v = int.from_bytes(raw[:size], "little", signed=kind == "base" and "unsigned" not in name and "bool" not in name)
             if kind == "pointer":
@@ -4056,6 +4470,9 @@ class DebugCommands:
             return
         kd = self.kd
         self._ensure_context()
+        if kd.user_target:
+            self._cmd_user_threads(args)
+            return
         n = kd.processor_count()
         if args:
             cpu = int(args[0].rstrip("s"), 0)
@@ -4089,6 +4506,33 @@ class DebugCommands:
             mark = "*" if cpu == kd.cpu else " "
             print(f"{mark}{cpu:>2}  {th:#018x} {pid if pid is not None else '?':>6}  {name:<16} {sym}")
 
+    def _cmd_user_threads(self, args):
+        """~ on a user-mode minidump: its threads (as WinDbg in user mode); ~<n> switches."""
+        kd = self.kd
+        threads = kd.e.threads
+        if args:
+            i = int(args[0].rstrip("s"), 0)
+            if not 0 <= i < len(threads):
+                print(f"[!] thread {i} hors plage (0..{len(threads) - 1})")
+                return
+            self._user_thread(i)
+            return
+        rows = []
+        for i, t in enumerate(threads):
+            rip = parse_context(t["context"])["rip"]
+            rows.append({"index": i, "tid": t["tid"], "teb": t["teb"], "rip": rip,
+                         "symbol": kd.symbolize(rip, kd.e.pid)[0],
+                         "start": kd.symbolize(t["start"], kd.e.pid)[0] if t["start"] else None})
+        if self.json:
+            print(_jdump(rows))
+            return
+        exc = kd.e.exception
+        print(f"  #  {'tid':>6}  {'TEB':<18} rip / début")
+        for r in rows:
+            mark = "." if r["index"] == kd.cpu else ("#" if exc and exc["tid"] == r["tid"] else " ")
+            start = f"   (début {r['start']})" if r["start"] else ""
+            print(f"{mark}{r['index']:>3}  {r['tid']:>6x}  {r['teb']:#018x} {r['symbol']}{start}")
+
     def _thread_arg(self, args):
         if args:
             return self.eval_expr(args[0])
@@ -4099,6 +4543,9 @@ class DebugCommands:
         if not self._need_kd():
             return
         kd = self.kd
+        if kd.user_target:
+            print("[!] minidump user-mode : pas de structures noyau (ETHREAD) ; threads avec ~ et ~<n>")
+            return
         th = self._thread_arg(args)
         regs, known, label, info = kd.thread_context(th)
         pid = kd.pid_of_eprocess(info["process"])
@@ -4128,6 +4575,8 @@ class DebugCommands:
             print(f"  {f.rsp:016x}  {ret:016x}  {f.symbol}" + (f"  [{f.line[0]} @ {f.line[1]}]" if f.line else ""))
             if f.note == "user" and i + 1 < len(frames):
                 print("      --- passage en mode utilisateur ---")
+            elif f.note == "nostack":
+                print("      " + "(suite de la pile user-mode absente : la source ne contient pas la mémoire utilisateur)")
 
     def _cmd_cxr(self, args):
         if not self._need_kd():
@@ -4292,6 +4741,9 @@ class DebugCommands:
         if not args or args[0].lower() != "/u" or len(args) < 2:
             print("usage: .dump /u [<pid>] <fichier.dmp>   (minidump user-mode complet d'un processus)")
             return
+        if self.kd.user_target:
+            print("[!] la cible est déjà un minidump user-mode")
+            return
         pid = int(args[1], 0) if len(args) >= 3 else self.pid
         path = args[-1]
         if pid in (4, PID_PHYSICAL):
@@ -4300,6 +4752,9 @@ class DebugCommands:
         r = write_user_minidump(self.kd, pid, path)
         print(f"[+] {path} : {r['threads']} threads, {r['modules']} modules, "
               f"{r['ranges']} plages, {r['bytes'] / 1048576:.1f} Mo de mémoire")
+        if not r["bytes"]:
+            print("[~] aucune page user-mode dans la source (dump noyau) : minidump sans mémoire, avec les "
+                  "threads (registres au passage en mode noyau) et les modules (reconstruits depuis les VAD)")
 
     def _cmd_sympath(self, args):
         if not self._need_kd():
@@ -4429,7 +4884,7 @@ class Repl(DebugCommands):
                 else:
                     self._cmd_regs_context(args)
             elif cmd in ("k", "kb", "kn", "kp", "kv"):
-                self._cmd_k(args)
+                self._cmd_k(args, args_to_child=cmd in ("kb", "kv"))
             elif cmd == "~" or (cmd.startswith("~") and cmd[1:].rstrip("s").isdigit()):
                 self._cmd_processors(([cmd[1:]] if len(cmd) > 1 else []) + args)
             elif cmd == "!thread":
@@ -4513,7 +4968,17 @@ class Repl(DebugCommands):
 
     def _cmd_lm(self, args):
         pid = self._pid_arg(args)
-        mods = self.vmm.modules(pid)
+        try:
+            mods = self.vmm.modules(pid)
+        except VmmError:
+            mods = []
+        rebuilt = False
+        if not mods and self.kd is not None and pid not in (4, -1, PID_PHYSICAL):
+            # no loader list in memory (kernel dump): the images mapped in the VADs
+            mods = [{"base": m.base, "size": m.size, "name": m.name, "path": m.path,
+                     "timestamp": m.timestamp, "checksum": m.checksum}
+                    for m in self.kd.user_modules(pid)]
+            rebuilt = bool(mods)
         if self.json:
             print(_jdump(mods))
             return
@@ -4521,6 +4986,8 @@ class Repl(DebugCommands):
         print("-" * 60)
         for m in mods:
             print(f"{m['base']:#018x}  {m['size']:>9}  {m['name']}")
+        if rebuilt:
+            print("(liste reconstruite depuis les VAD : PEB / liste du loader absents de la source)")
 
     def _cmd_x(self, args):
         if not args or "!" not in args[0]:
@@ -4722,6 +5189,21 @@ class WineyeOps:
     def stack(self, thread=None):
         """Call stack of a thread (ETHREAD address) or of the current processor."""
         kd = self._need_kd()
+        if kd.user_target:
+            # user-mode minidump: thread index (default: the exception's thread, else 0)
+            e = kd.e
+            exc = e.exception
+            if thread is not None:
+                i = self._int(thread)
+            else:
+                i = next((n for n, t in enumerate(e.threads) if exc and t["tid"] == exc["tid"]), 0)
+            t = e.threads[i]
+            raw = exc["context"] if exc and exc["tid"] == t["tid"] and len(exc["context"]) >= 0x100 else t["context"]
+            regs = parse_context(raw)
+            kd.pid = e.pid
+            return [{"index": f.index, "rsp": f.rsp, "rip": f.rip, "symbol": f.symbol,
+                     "file": f.line[0] if f.line else None, "line": f.line[1] if f.line else None,
+                     "transition": f.note} for f in kd.stack(regs, set(regs), pid=e.pid)]
         if thread is not None:
             th = self._int(thread)
             regs, known, _label, info = kd.thread_context(th)
@@ -5239,6 +5721,14 @@ def _is_kernel_dump(path: str) -> bool:
         return False
 
 
+def _is_user_minidump(path: str) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"MDMP"
+    except OSError:
+        return False
+
+
 def build_device_args(args) -> list[str]:
     if args.dump:
         return ["-device", args.dump]
@@ -5296,8 +5786,19 @@ def main(argv=None):
     store = SymbolStore(sympath=sympath, download=not args.no_symbol_download,
                         log=lambda m: print(m, file=sys.stderr))
     is_kdump = bool(args.dump) and _is_kernel_dump(args.dump)
+    is_udump = bool(args.dump) and _is_user_minidump(args.dump)
     vmm = None
-    if args.engine in ("auto", "vmm"):
+    if is_udump:
+        # user-mode minidump: MemProcFS does not read them, wineye does
+        try:
+            vmm = MinidumpEngine(args.dump, error_cls=VmmError)
+        except (VmmError, struct.error) as e:
+            raise SystemExit(f"[!] {e}")
+        print(f"[*] minidump user-mode : {args.dump}", file=log)
+        print(f"[*] {vmm.process(vmm.pid)['name']} (pid {vmm.pid}), Windows build {vmm.build}, "
+              f"{len(vmm.threads)} threads, {len(vmm.modules(vmm.pid))} modules"
+              + (f", exception {vmm.exception['code']:08x}" if vmm.exception else ""), file=log)
+    elif args.engine in ("auto", "vmm"):
         try:
             vmm_dll = find_vmm_dll(args.vmm)
             device = build_device_args(args)
@@ -5350,6 +5851,8 @@ def main(argv=None):
         return
 
     repl = Repl(vmm, json_out=args.json, ctl=ctl, kd=kd)
+    if is_udump:
+        repl.pid = kd.pid = vmm.pid
     try:
         for c in (args.command or []):
             for one in c.split(";"):
