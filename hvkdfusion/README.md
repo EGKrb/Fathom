@@ -164,6 +164,8 @@ python hvkdfusion.py setup --livecloudkd $m2 --livecloudkd-exe "$m2\LiveCloudKd\
 
 ### MemProcFS and the hvmm plugin (wineye, mount, live device)
 
+Fathom releases ship a ready-built copy in `memprocfs\` next to `hvkdfusion.py` (MemProcFS, LeechCore, `leechcore_device_hvmm.dll`, `hvlib.dll`, `hvmm.sys`; licenses and sources described in `memprocfs\README.txt`): `setup` finds it on its own, so the steps below are only needed to build it yourself.
+
 `MemProcFS.sln` expects LeechCore as a sibling folder (`..\LeechCore`); build `leechcore`, `vmm`, then `memprocfs` through the solution:
 
 ```powershell

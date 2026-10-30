@@ -54,6 +54,8 @@ DEFAULT_NTOSEYE = DOWNLOADS / "ntoseye-master" / "ntoseye-master"
 DEFAULT_MEMPROCFS = DOWNLOADS / "MemProcFS-master" / "MemProcFS-master"
 DEFAULT_DOKANY = DOWNLOADS / "dokany-master" / "dokany-master"
 DEFAULT_LEECHCORE = DOWNLOADS / "LeechCore-master" / "LeechCore-master"
+# MemProcFS + LeechCore + the hvmm device plugin, when shipped next to this script (Fathom releases)
+BUNDLED_MEMPROCFS = HERE / "memprocfs"
 
 # LiveCloudKd.exe action codes (see its README /a option).
 ACTION_LIVE_KD = 0
@@ -409,6 +411,8 @@ def cmd_setup(args):
             mp_exe = Path(found)
         elif cfg.get("memprocfs_exe") and Path(cfg["memprocfs_exe"]).exists():
             mp_exe = Path(cfg["memprocfs_exe"])
+        elif locate(BUNDLED_MEMPROCFS, ["MemProcFS.exe"]):
+            mp_exe = locate(BUNDLED_MEMPROCFS, ["MemProcFS.exe"])
         else:  # a prebuilt MemProcFS.exe dropped into the source tree
             mp_exe = locate(Path(cfg["memprocfs_src_dir"]), ["MemProcFS.exe"])
     if mp_exe:
@@ -429,6 +433,8 @@ def cmd_setup(args):
     print(f"[+] LeechCore: {lc_dll if lc_dll else '(leechcore.dll non trouvé)'}")
 
     hvmm_dll = locate(lck, ["leechcore_device_hvmm.dll"])
+    if not hvmm_dll and mp_exe:  # already staged next to MemProcFS.exe (bundled MemProcFS)
+        hvmm_dll = locate(mp_exe.parent, ["leechcore_device_hvmm.dll"])
     cfg["leechcore_hvmm_dll"] = str(hvmm_dll) if hvmm_dll else ""
     print(f"[+] plugin hvmm: {hvmm_dll if hvmm_dll else '(non compilé - mode live hvmm indisponible ; voir README)'}")
 
@@ -438,7 +444,7 @@ def cmd_setup(args):
     # Stage the hvmm plugin + engine next to MemProcFS.exe (device 'hvmm').
     if mp_exe and hvmm_dll and not args.no_stage:
         for src in [hvmm_dll, hvlib_dll, hvmm_sys]:
-            if src and src.exists():
+            if src and src.exists() and src.parent.resolve() != mp_exe.parent.resolve():
                 try:
                     shutil.copy2(src, mp_exe.parent / src.name)
                     print(f"[+] staged {src.name} -> {mp_exe.parent}")
