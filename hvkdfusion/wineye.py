@@ -547,7 +547,7 @@ _INVALID64 = {0x06, 0x07, 0x0E, 0x16, 0x17, 0x1E, 0x1F, 0x27, 0x2F, 0x37, 0x3F,
 # Two-byte map 0F xx (no mandatory prefix unless listed in _OP2P)
 _OP2 = {
     0x05: ("syscall", ""), 0x06: ("clts", ""), 0x07: ("sysret", ""), 0x08: ("invd", ""),
-    0x09: ("wbinvd", ""), 0x0B: ("ud2", ""), 0x0D: ("prefetchw", "M"),
+    0x09: ("wbinvd", ""), 0x0B: ("ud2", ""), 0x0D: ("prefetchw", "M"), 0x0E: ("femms", ""),
     0x18: ("prefetch", "M"), 0x19: ("nop", "Ev"), 0x1A: ("nop", "Ev"), 0x1B: ("nop", "Ev"),
     0x1C: ("nop", "Ev"), 0x1D: ("nop", "Ev"), 0x1E: ("nop", "Ev"), 0x1F: ("nop", "Ev"),
     0x20: ("mov", "Rq,Cq"), 0x21: ("mov", "Rq,Dq"), 0x22: ("mov", "Cq,Rq"), 0x23: ("mov", "Dq,Rq"),
@@ -728,8 +728,12 @@ _X87_MEM = {
 }
 _X87_MEMSIZE = {0xD8: 4, 0xD9: 4, 0xDA: 4, 0xDB: 4, 0xDC: 8, 0xDD: 8, 0xDE: 2, 0xDF: 2}
 _X87_REG = {0xD9E0: "fchs", 0xD9E1: "fabs", 0xD9E4: "ftst", 0xD9E5: "fxam", 0xD9E8: "fld1",
-            0xD9EE: "fldz", 0xD9F0: "f2xm1", 0xD9FA: "fsqrt", 0xD9FC: "frndint", 0xD9FE: "fsin",
-            0xD9FF: "fcos", 0xDBE2: "fnclex", 0xDBE3: "fninit", 0xDFE0: "fnstsw ax", 0xD9D0: "fnop"}
+            0xD9E9: "fldl2t", 0xD9EA: "fldl2e", 0xD9EB: "fldpi", 0xD9EC: "fldlg2", 0xD9ED: "fldln2",
+            0xD9EE: "fldz", 0xD9F0: "f2xm1", 0xD9F1: "fyl2x", 0xD9F2: "fptan", 0xD9F3: "fpatan",
+            0xD9F4: "fxtract", 0xD9F5: "fprem1", 0xD9F6: "fdecstp", 0xD9F7: "fincstp", 0xD9F8: "fprem",
+            0xD9F9: "fyl2xp1", 0xD9FA: "fsqrt", 0xD9FB: "fsincos", 0xD9FC: "frndint", 0xD9FD: "fscale",
+            0xD9FE: "fsin", 0xD9FF: "fcos", 0xDBE2: "fnclex", 0xDBE3: "fninit", 0xDFE0: "fnstsw ax",
+            0xD9D0: "fnop", 0xDED9: "fcompp"}
 
 
 class Insn:
@@ -751,6 +755,15 @@ class Insn:
         return f"{self.mnemonic:<7} {self.operands}".rstrip() if self.operands else self.mnemonic
 
 
+def _imm_value(text: str):
+    """Immediate printed by the disassembler (28h, 0FFh, 8) -> int, None if not one."""
+    t = text.strip()
+    try:
+        return int(t[:-1], 16) if t.endswith("h") else int(t)
+    except ValueError:
+        return None
+
+
 def _imm_text(v: int) -> str:
     """WinDbg style hex immediate: 28h, 0FFh."""
     s = f"{v:X}"
@@ -758,21 +771,22 @@ def _imm_text(v: int) -> str:
 
 
 class X64Disassembler:
-    """Decodes x86-64 (long mode) instructions. Covers the general purpose, system,
+    """Decodes x86-64 (long mode) instructions - and, with mode32, 32-bit protected
+    mode code (WoW64 processes, x86 images). Covers the general purpose, system,
     x87, MMX/SSE1-4.2, AES/SHA, AVX/AVX2/FMA/BMI (VEX) instruction sets; EVEX
     (AVX-512) is decoded for length with a generic mnemonic."""
 
-    def decode(self, code: bytes, address: int) -> Insn:
+    def decode(self, code: bytes, address: int, mode32: bool = False) -> Insn:
         try:
-            return _Decoder(code, address).run()
+            return _Decoder(code, address, mode32).run()
         except (IndexError, _Invalid):
             return Insn(address, 1, "???", "", code[:1])
 
-    def decode_all(self, code: bytes, address: int, count: int | None = None):
+    def decode_all(self, code: bytes, address: int, count: int | None = None, mode32: bool = False):
         off = 0
         out = []
         while off < len(code) and (count is None or len(out) < count):
-            ins = self.decode(code[off:off + 15], address + off)
+            ins = self.decode(code[off:off + 15], address + off, mode32)
             out.append(ins)
             off += ins.length
         return out
@@ -782,9 +796,16 @@ class _Invalid(Exception):
     pass
 
 
+# one-byte opcodes of 32-bit mode that long mode dropped
+_OP1_32 = {0x06: ("push", "es"), 0x07: ("pop", "es"), 0x0E: ("push", "cs"), 0x16: ("push", "ss"),
+           0x17: ("pop", "ss"), 0x1E: ("push", "ds"), 0x1F: ("pop", "ds"), 0x27: ("daa", ""),
+           0x2F: ("das", ""), 0x37: ("aaa", ""), 0x3F: ("aas", ""), 0xCE: ("into", ""), 0xD6: ("salc", "")}
+
+
 class _Decoder:
-    def __init__(self, code, address):
+    def __init__(self, code, address, mode32=False):
         self.c = code
+        self.mode32 = mode32
         self.addr = address
         self.p = 0
         self.rex = 0
@@ -850,13 +871,15 @@ class _Decoder:
                 self.mandatory = b
                 break
         b = self.c[self.p]
-        if 0x40 <= b <= 0x4F:
+        if 0x40 <= b <= 0x4F and not self.mode32:
             self.rex = b
             self.p += 1
             b = self.c[self.p]
         self.p += 1
         if b in (0xC4, 0xC5, 0x62) and not self.rex:
-            return self._vex(b)
+            # 32-bit mode: VEX / EVEX only when the next byte has mod == 3 (else LES / LDS / BOUND)
+            if not self.mode32 or (self.p < len(self.c) and self.c[self.p] >> 6 == 3):
+                return self._vex(b)
         if b == 0x0F:
             return self._two_byte()
         return self._one_byte(b)
@@ -864,16 +887,22 @@ class _Decoder:
     # -- helpers -- #
     @property
     def rex_w(self):
-        return bool(self.rex & 8)
+        return bool(self.rex & 8) and not self.mode32
 
     def opsize(self, d64=False):
         if self.rex_w:
             return 8
         if self.opsize16:
             return 2
-        return 8 if d64 else 4
+        return 8 if d64 and not self.mode32 else 4
 
     def reg_name(self, n, size):
+        if self.mode32:
+            n &= 7
+            if size == 8:
+                size = 4
+            if size == 1:
+                return _GPR8_LEGACY[n]
         if size == 8:
             return _GPR64[n]
         if size == 4:
@@ -900,7 +929,19 @@ class _Decoder:
         return self.modrm[2] | (8 if self.rex & 1 else 0)
 
     def _mem_operand(self, mod, rm):
-        areg = _GPR32 if self.addr32 else _GPR64
+        if self.mode32 and self.addr32:          # 0x67 in 32-bit mode: 16-bit addressing
+            base, index = (("bx", "si"), ("bx", "di"), ("bp", "si"), ("bp", "di"),
+                           ("si", None), ("di", None), ("bp", None), ("bx", None))[rm]
+            disp = 0
+            if mod == 0 and rm == 6:
+                base, disp = None, self.ux(2)
+            elif mod == 1:
+                disp = self.sx(1)
+            elif mod == 2:
+                disp = self.sx(2)
+            self.mem = (base, index, 1, disp, False)
+            return
+        areg = _GPR32 if (self.addr32 or self.mode32) else _GPR64
         base = index = None
         scale = 1
         disp = 0
@@ -916,6 +957,8 @@ class _Decoder:
                 disp = self.sx(4)
             else:
                 base = areg[b]
+        elif rm == 5 and mod == 0 and self.mode32:
+            disp = self.ux(4)             # absolute address
         elif rm == 5 and mod == 0:
             rip = True
             self.rip_disp_at = self.p
@@ -943,7 +986,7 @@ class _Decoder:
                 if s:
                     s += ("-" if disp < 0 else "+") + _imm_text(abs(disp))
                 else:
-                    s = _imm_text(disp & 0xFFFFFFFFFFFFFFFF)
+                    s = _imm_text(disp & (0xFFFFFFFF if self.mode32 else 0xFFFFFFFFFFFFFFFF))
             inner = s
         seg = f"{self.seg}:" if self.seg else ""
         prefix = f"{_MEMSIZE[size]} ptr " if size in _MEMSIZE else ""
@@ -997,7 +1040,7 @@ class _Decoder:
         if kind == "G":
             return self.reg_name(self.reg_field(), self.size_of(sz))
         if kind == "R":
-            return _GPR64[self.rm_field()]
+            return (_GPR32 if self.mode32 else _GPR64)[self.rm_field() & (7 if self.mode32 else 15)]
         if kind == "C":
             return f"cr{self.reg_field()}"
         if kind == "D":
@@ -1015,7 +1058,7 @@ class _Decoder:
             if sz == "b":
                 v = self.ux(1)
             elif sz == "b64":       # push imm8: sign-extended to the stack width
-                v = self.sx(1) & 0xFFFFFFFFFFFFFFFF
+                v = self.sx(1) & (0xFFFFFFFF if self.mode32 else 0xFFFFFFFFFFFFFFFF)
             elif sz == "bs":        # imm8 sign-extended to the operand size (83 /x, 6B)
                 v = self.sx(1) & ((1 << (self.opsize() * 8)) - 1)
             elif sz == "w":
@@ -1037,7 +1080,7 @@ class _Decoder:
             self.target = ("rel", rel)
             return None   # resolved later
         if kind == "O":
-            moff = self.ux(4 if self.addr32 else 8)
+            moff = self.ux((2 if self.addr32 else 4) if self.mode32 else (4 if self.addr32 else 8))
             size = 1 if sz == "b" else self.opsize()
             seg = f"{self.seg}:" if self.seg else ""
             return f"{_MEMSIZE[size]} ptr {seg}[{_imm_text(moff)}]"
@@ -1085,9 +1128,13 @@ class _Decoder:
         for o in ops:
             if o is None:     # relative branch target
                 rel = self.target[1]
-                dest = (end + rel) & 0xFFFFFFFFFFFFFFFF
+                if self.mode32:
+                    dest = (end + rel) & 0xFFFFFFFF
+                    text_ops.append(f"{dest:08x}")
+                else:
+                    dest = (end + rel) & 0xFFFFFFFFFFFFFFFF
+                    text_ops.append(f"{dest:016x}")
                 self.target = dest
-                text_ops.append(f"{dest:016x}")
             elif isinstance(o, tuple) and o[0] == "MEM":
                 prefix, seg, inner = o[1]
                 if inner is None:
@@ -1104,11 +1151,11 @@ class _Decoder:
         pre = ""
         if self.lock:
             pre = "lock "
-        if self.rep and mnemonic in ("movs", "stos", "lods", "ins", "outs", "movsb", "movsw", "movsd",
+        if self.rep and not ops and mnemonic in ("movs", "stos", "lods", "ins", "outs", "movsb", "movsw", "movsd",
                                      "movsq", "stosb", "stosw", "stosd", "stosq", "lodsb", "lodsw",
                                      "lodsd", "lodsq", "insb", "outsb"):
             pre += "rep "
-        elif self.rep and mnemonic in ("cmps", "scas", "cmpsb", "cmpsw", "cmpsd", "cmpsq", "scasb",
+        elif self.rep and not ops and mnemonic in ("cmps", "scas", "cmpsb", "cmpsw", "cmpsd", "cmpsq", "scasb",
                                        "scasw", "scasd", "scasq"):
             pre += "repe " if self.rep == 0xF3 else "repne "
         return Insn(self.addr, length, pre + mnemonic, ",".join(text_ops), bytes(self.c[:length]),
@@ -1117,7 +1164,11 @@ class _Decoder:
     # -- one-byte map -- #
     def _one_byte(self, op):
         self.op = op
-        if op in _INVALID64:
+        if self.mode32:
+            r = self._one_byte32(op)
+            if r is not None:
+                return r
+        elif op in _INVALID64:
             raise _Invalid
         if op in _GRP:
             names, spec = _GRP[op]
@@ -1136,7 +1187,7 @@ class _Decoder:
                 r = self.modrm[1]
                 if r in (2, 4):
                     kind = "call" if r == 2 else "jmp"
-                    return self.finish(name, [self.rm_operand(8)], kind)
+                    return self.finish(name, [self.rm_operand(4 if self.mode32 else 8)], kind)
                 if r in (3, 5):
                     if self.modrm[0] == 3:
                         raise _Invalid
@@ -1151,6 +1202,15 @@ class _Decoder:
             raise _Invalid
         name, spec = _OP1[op]
         kind = None
+        if op == 0x9B and self.p < len(self.c) and self.c[self.p] in (0xD9, 0xDB, 0xDD, 0xDF):
+            nxt = _Decoder(self.c[self.p:], self.addr + self.p, self.mode32)
+            try:
+                ins = nxt.run()
+            except (IndexError, _Invalid):
+                ins = None
+            if ins is not None and ins.mnemonic in ("fnstsw", "fnstcw", "fnstenv", "fnsave", "fnclex", "fninit"):
+                self.p += ins.length
+                return self.finish("f" + ins.mnemonic[2:], [ins.operands] if ins.operands else [])
         if op == 0x90:
             if self.rex & 1:
                 return self.finish("xchg", ["r8", "rax"] if self.rex_w else ["r8d", "eax"])
@@ -1164,7 +1224,7 @@ class _Decoder:
             name = {2: "cwd", 4: "cdq", 8: "cqo"}[self.opsize()]
             spec = ""
         elif spec == "f64":
-            name = name + ("" if self.opsize16 else "q")
+            name = name + ("" if self.opsize16 else ("d" if self.mode32 else "q"))
             spec = ""
         elif spec == "iret":
             name = {2: "iret", 4: "iretd", 8: "iretq"}[self.opsize()]
@@ -1178,6 +1238,8 @@ class _Decoder:
             spec = ""
         if op == 0x63 and not self.rex_w:
             spec = "Gv,Ed"
+        if op == 0xE3 and self.mode32:
+            name = "jcxz" if self.addr32 else "jecxz"
         if name in ("call",):
             kind = "call"
         elif name == "jmp":
@@ -1192,6 +1254,37 @@ class _Decoder:
             spec = "Zv64"
         ops = self.operands(spec.replace("Iz64", "Iz64").replace("Ib64", "Ib64"))
         return self.finish(name, ops, kind)
+
+    def _one_byte32(self, op):
+        """Opcodes whose meaning differs in 32-bit mode; None: same as long mode."""
+        if 0x40 <= op <= 0x4F:
+            return self.finish("inc" if op < 0x48 else "dec", [self.reg_name(op & 7, 2 if self.opsize16 else 4)])
+        if op in _OP1_32:
+            name, reg = _OP1_32[op]
+            return self.finish(name, [reg] if reg else [])
+        if op in (0x60, 0x61):
+            return self.finish(("pusha" if op == 0x60 else "popa") + ("" if self.opsize16 else "d"), [])
+        if op == 0x82:
+            self.read_modrm()
+            return self.finish(["add", "or", "adc", "sbb", "and", "sub", "xor", "cmp"][self.modrm[1]],
+                               self.operands("Eb,Ib"))
+        if op in (0x62, 0xC4, 0xC5):            # BOUND / LES / LDS (mod != 3, checked in run)
+            self.read_modrm()
+            name = {0x62: "bound", 0xC4: "les", 0xC5: "lds"}[op]
+            return self.finish(name, [self.reg_name(self.modrm[1], self.opsize()),
+                                      self.rm_operand(8 if op == 0x62 else 6)])
+        if op == 0x63:
+            return self.finish("arpl", self.operands("Ew,Gw"))
+        if op in (0x9A, 0xEA):
+            off = self.ux(2 if self.opsize16 else 4)
+            sel = self.ux(2)
+            return self.finish("call" if op == 0x9A else "jmp", [f"{sel:04x}:{off:08x}"],
+                               "call" if op == 0x9A else "jmp")
+        if op in (0xD4, 0xD5):
+            imm = self.ux(1)
+            name = "aam" if op == 0xD4 else "aad"
+            return self.finish(name, [] if imm == 10 else [_imm_text(imm)])
+        return None
 
     def _x87(self, op):
         mod, reg, rm = self.read_modrm()
@@ -1226,7 +1319,7 @@ class _Decoder:
             0xDD: ["ffree", None, "fst", "fstp", "fucom", "fucomp", None, None],
             0xDA: ["fcmovb", "fcmove", "fcmovbe", "fcmovu", None, "fucompp", None, None],
             0xDB: ["fcmovnb", "fcmovne", "fcmovnbe", "fcmovnu", None, "fucomi", "fcomi", None],
-            0xDF: [None, None, None, None, None, "fucomip", "fcomip", None],
+            0xDF: ["ffreep", None, None, None, None, "fucomip", "fcomip", None],
         }
         name = tables.get(op, [None] * 8)[reg]
         if name is None:
@@ -1456,6 +1549,9 @@ class _Decoder:
             vvvv = (~p1 >> 3) & 0xF
             pp = p1 & 3
             L = (p2 >> 5) & 3          # 0 xmm, 1 ymm, 2 zmm
+        if self.mode32:                 # no R/X/B extension, vvvv bit 3 ignored
+            self.rex = 0x40
+            vvvv &= 7
         self.vex = {"vvvv": vvvv, "L": L, "pp": pp, "map": mmmmm, "W": W, "evex": b == 0x62}
         self.mandatory = {0: None, 1: 0x66, 2: 0xF3, 3: 0xF2}[pp]
         self.rep = None
@@ -1678,6 +1774,9 @@ class Pdb:
             for i in range(len(sh) // 40):
                 self.sections.append(struct.unpack_from("<I", sh, i * 40 + 12)[0])
         self.omap = len(dbg) > 4 and dbg[4] != 0xFFFF and len(self.msf.stream(dbg[4])) > 0
+        # x86 stack frames: FPO_DATA records (dbg[0]) and FrameData program strings (dbg[9])
+        self._fpo_streams = (dbg[0] if dbg else 0xFFFF, dbg[9] if len(dbg) > 9 else 0xFFFF)
+        self._frame_data = None
 
     def rva(self, segment: int, offset: int):
         if 1 <= segment <= len(self.sections):
@@ -1698,6 +1797,8 @@ class Pdb:
             if kind == 0x110E:                         # S_PUB32
                 _fl, o, seg = struct.unpack_from("<IIH", rec, body)
                 name, _ = _cstr(rec, body + 10)
+                if self.machine == 0x14C:
+                    name = undecorate_x86(name)
                 r = self.rva(seg, o)
                 if r is not None:
                     syms.setdefault(name, [r, 0])
@@ -1736,6 +1837,49 @@ class Pdb:
                     continue
                 return name, rva - srva
             return name, rva - srva
+        return None
+
+    # -- x86 frame data (FPO) -- #
+    def _load_frame_data(self):
+        if self._frame_data is not None:
+            return
+        self._frame_data, self._fpo = [], []
+        old, new = self._fpo_streams
+        if new != 0xFFFF:
+            d = self.msf.stream(new)
+            names = self._names()
+            o = len(d) % 32                    # optional relocation header
+            for i in range((len(d) - o) // 32):
+                start, size, locals_, params, _max, prog, prolog, saved, _fl = \
+                    struct.unpack_from("<IIIIIIHHI", d, o + 32 * i)
+                end = names.find(b"\0", prog)
+                text = names[prog:end].decode("ascii", "replace") if 0 <= prog < end else ""
+                self._frame_data.append((start, size, locals_, params, saved, prolog, text))
+            self._frame_data.sort()
+        if old != 0xFFFF:
+            d = self.msf.stream(old)
+            for i in range(len(d) // 16):
+                start, size, locals_, params, bits = struct.unpack_from("<IIIHH", d, 16 * i)
+                self._fpo.append((start, size, 4 * locals_, 4 * params, 4 * (bits >> 8 & 7), bits & 0xFF,
+                                  bool(bits >> 12 & 1)))
+            self._fpo.sort()
+
+    def frame_data(self, rva: int):
+        """x86: how to find the caller of the code at rva. The FrameData record covering it
+        (the innermost one: a function has a record per prologue step) -> dict with its
+        program string, else the old FPO_DATA record, else None."""
+        self._load_frame_data()
+        for table, fpo in ((self._frame_data, False), (self._fpo, True)):
+            i = bisect.bisect_right(table, (rva, 0xFFFFFFFF)) - 1
+            for j in range(i, max(i - 64, -1), -1):
+                r = table[j]
+                if r[0] <= rva < r[0] + r[1]:
+                    d = {"start": r[0], "locals": r[2], "params": r[3], "saved": r[4], "prolog": r[5]}
+                    if fpo:
+                        d.update(program=None, use_bp=r[6])
+                    else:
+                        d.update(program=r[6], use_bp=r[6].startswith("$T0 $ebp ="))
+                    return d
         return None
 
     # -- module streams: procedures, locals, lines -- #
@@ -1868,7 +2012,12 @@ class Pdb:
             body = off + 4
             if kind == 0x1012:                      # S_FRAMEPROC
                 flags = struct.unpack_from("<I", data, body + 26)[0]
-                frame_base = {1: "rsp", 2: "rbp", 3: "r13"}.get((flags >> 14) & 3, "rsp")
+                bases = {1: "vframe", 2: "rbp", 3: "rbx"} if self.machine == 0x14C else {1: "rsp", 2: "rbp", 3: "r13"}
+                frame_base = bases.get((flags >> 14) & 3, "rsp")
+            elif kind == 0x110B:                    # S_BPREL32 (x86 /Od): ebp-relative, params above
+                o, ti = struct.unpack_from("<iI", data, body)
+                name, _ = _cstr(data, body + 8)
+                out.append({"name": name, "type": ti, "param": o > 0 and depth == 0, "where": ("regrel", "rbp", o)})
             elif kind == 0x1111:                    # S_REGREL32 (/Od: parameters come first)
                 o, ti, reg = struct.unpack_from("<iIH", data, body)
                 name, _ = _cstr(data, body + 10)
@@ -2257,9 +2406,10 @@ class SymbolStore:
     def image(self, name: str, timestamp: int, size: int, checksum: int = 0, file_size: int = 0,
               path: str = ""):
         """Image file of a module (name, TimeDateStamp, SizeOfImage): local cache, then the
-        symbol server - used when the PE header of a module is not in the dump. Without a
-        TimeDateStamp, a local copy (search path, cache, or the same path on this machine)
-        is used when its SizeOfImage, CheckSum and file size all match."""
+        symbol server - used when the PE header of a module is not in the dump. A local copy
+        (search path, cache, or the same path on this machine) is used when its
+        TimeDateStamp and SizeOfImage match - without a TimeDateStamp, when its
+        SizeOfImage, CheckSum and file size all match."""
         if not timestamp:
             return self._local_image(name, size, checksum, file_size, path)
         key = f"{timestamp:08X}{size:X}"
@@ -2271,6 +2421,9 @@ class SymbolStore:
                     return PeFile(f.read_bytes())
                 except PdbError:
                     pass
+        local = self._local_image(name, size, 0, 0, path, timestamp)
+        if local is not None:
+            return local
         if not self.download or not size:
             return self._local_image(name, size, checksum, file_size, path)
         url = f"{MS_SYMBOL_SERVER}/{name}/{key}/{name}"
@@ -2288,14 +2441,16 @@ class SymbolStore:
         cached.write_bytes(data)
         return PeFile(data)
 
-    def _local_image(self, name, size, checksum, file_size, path=""):
-        if not size or not (checksum or file_size):
+    def _local_image(self, name, size, checksum, file_size, path="", timestamp=0):
+        if not size or not (checksum or file_size or timestamp):
             return None              # SizeOfImage alone would be too weak an identification
         cand = []
         for root in [Path(r) for r in self.paths] + [self.cache]:
             cand.append(root / name)
             if (root / name).is_dir():
                 cand += sorted((root / name).glob(f"*/{name}"))
+        if timestamp and len(path) > 2 and path[1] == ":":
+            cand.append(Path(path))             # a program of this machine, at the same path
         low = path.lower()
         for prefix in ("\\windows\\", "\\systemroot\\"):
             if low.startswith(prefix):
@@ -2309,7 +2464,8 @@ class SymbolStore:
                 pe = PeFile(c.read_bytes())
             except (OSError, PdbError, struct.error):
                 continue
-            if pe.size_of_image == size and (not checksum or pe.checksum == checksum):
+            if pe.size_of_image == size and (pe.timestamp == timestamp if timestamp else
+                                             not checksum or pe.checksum == checksum):
                 return pe
         return None
 
@@ -2591,14 +2747,22 @@ class NativeEngine:
             ep = flink - links
             pid = self._q(ep + o_pid)
             name = self._kread(ep + o_name, 15).split(b"\0", 1)[0].decode("ascii", "replace")
+            wow = self._q(ep + o_wow[0]) if o_wow else 0
             out[pid] = {
                 "pid": pid, "ppid": self._q(ep + o_ppid), "name": name, "name_long": name,
                 "eprocess": ep, "peb": self._q(ep + o_peb), "dtb": self._q(ep + o_dtb),
-                "wow64": bool(self._q(ep + o_wow[0])) if o_wow else False,
+                "wow64": bool(wow), "peb32": self._peb32(wow),
                 "session": 0, "integrity": "?", "sid": "", "system": "windows-x64",
             }
             flink = self._q(flink)
         return out
+
+    def _peb32(self, wow):
+        """PEB32 of a WoW64 process from EPROCESS.WoW64Process: the PEB32 itself up to
+        Windows 8, then an _EWOW64PROCESS (kernel memory) whose first field is it."""
+        if not wow:
+            return 0
+        return wow if wow < 1 << 32 else self._q(wow) & 0xFFFFFFFF
 
     def pids(self):
         if self._procs is None:
@@ -2630,6 +2794,29 @@ class NativeEngine:
             flink = struct.unpack_from("<Q", ent, 0)[0]
         return mods
 
+    def _ldr32(self, head, dtb):
+        """32-bit loader list of a WoW64 process (PEB32.Ldr -> LDR_DATA_TABLE_ENTRY32)."""
+        mods = []
+        raw = self.dump.read_virtual(dtb, head, 4)
+        flink = struct.unpack("<I", raw)[0] if len(raw) == 4 else 0
+        seen = set()
+        while flink and flink != head and flink not in seen and len(mods) < 4096:
+            seen.add(flink)
+            ent = self.dump.read_virtual(dtb, flink, 0x48)
+            if len(ent) < 0x34:
+                break
+            base, entry, size = struct.unpack_from("<III", ent, 0x18)
+            fl, _a, fbuf = struct.unpack_from("<HHI", ent, 0x24)
+            ln, _b, buf = struct.unpack_from("<HHI", ent, 0x2C)
+            ts = struct.unpack_from("<I", ent, 0x44)[0] if len(ent) >= 0x48 else 0
+            name = self.dump.read_virtual(dtb, buf, ln).decode("utf-16-le", "replace") if ln else "?"
+            path = self.dump.read_virtual(dtb, fbuf, fl).decode("utf-16-le", "replace") if fl else ""
+            if base:
+                mods.append({"base": base, "size": size, "entry": entry, "wow64": True,
+                             "name": name, "path": path, "timestamp": ts})
+            flink = struct.unpack_from("<I", ent, 0)[0]
+        return mods
+
     def kernel_modules(self):
         if self._kmods is None:
             self._kmods = self._ldr(self.dump.ps_loaded_module_list, self.kdtb, ts_off=0x9C)
@@ -2647,6 +2834,11 @@ class NativeEngine:
                 ldr = self._q(p["peb"] + 0x18, p["dtb"])
                 if ldr:
                     mods = self._ldr(ldr + 0x10, p["dtb"])
+            if p.get("peb32"):                   # WoW64: the 32-bit modules too
+                raw = self.dump.read_virtual(p["dtb"], p["peb32"] + 0x0C, 4)
+                ldr = struct.unpack("<I", raw)[0] if len(raw) == 4 else 0
+                if ldr:
+                    mods += self._ldr32(ldr + 0x0C, p["dtb"])
             self._umods[pid] = mods
         return list(self._umods[pid])
 
@@ -2775,6 +2967,14 @@ _CTX_OFF = {"rax": 0x78, "rcx": 0x80, "rdx": 0x88, "rbx": 0x90, "rsp": 0x98, "rb
             "rsi": 0xA8, "rdi": 0xB0, "r8": 0xB8, "r9": 0xC0, "r10": 0xC8, "r11": 0xD0,
             "r12": 0xD8, "r13": 0xE0, "r14": 0xE8, "r15": 0xF0, "rip": 0xF8}
 CONTEXT_SIZE = 0x4D0
+# x86 CONTEXT (WOW64_CONTEXT) offsets; x86 registers keep the 64-bit names (rip = eip...)
+_CTX32_OFF = {"rdi": 0x9C, "rsi": 0xA0, "rbx": 0xA4, "rdx": 0xA8, "rcx": 0xAC, "rax": 0xB0,
+              "rbp": 0xB4, "rip": 0xB8, "rsp": 0xC4}
+CONTEXT32_SIZE = 0x2CC
+_X86_REGS = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"]
+_X86_NAMES = {"rax": "eax", "rbx": "ebx", "rcx": "ecx", "rdx": "edx", "rsi": "esi", "rdi": "edi",
+              "rip": "eip", "rsp": "esp", "rbp": "ebp", "efl": "efl"}
+_TEB64_WOW64_CPURESERVED = 0x1488       # TEB64.TlsSlots[WOW64_TLS_CPURESERVED]
 
 
 # --------------------------------------------------------------------------- #
@@ -2784,8 +2984,10 @@ CONTEXT_SIZE = 0x4D0
 
 class MinidumpEngine:
     """Same interface as the other engines, for one process captured in a user-mode
-    minidump (x64). Any pid maps to that process; reads come from the dump's memory
-    ranges (full-memory dumps hold everything, small ones only the stacks)."""
+    minidump: x64 (WoW64 processes included: 64-bit thread contexts, 32-bit and 64-bit
+    modules) or x86 (written by a 32-bit tool: x86 contexts). Any pid maps to that
+    process; reads come from the dump's memory ranges (full-memory dumps hold
+    everything, small ones only the stacks)."""
 
     user_mode = True
 
@@ -2802,8 +3004,10 @@ class MinidumpEngine:
             t, size, rva = struct.unpack_from("<III", self.m, dir_rva + 12 * i)
             self.streams.setdefault(t, (rva, size))
         si = self._stream(7)
-        if si is None or struct.unpack_from("<H", si, 0)[0] != 9:
-            raise self.Err("minidump non x64 (seuls les minidumps AMD64 sont pris en charge)")
+        arch = struct.unpack_from("<H", si, 0)[0] if si else None
+        if arch not in (9, 0):
+            raise self.Err("architecture du minidump non prise en charge (AMD64 et x86 seulement)")
+        self.x86 = arch == 0
         self.build = struct.unpack_from("<I", si, 16)[0]
         self.processors = si[6]
         misc = self._stream(15)
@@ -2814,11 +3018,20 @@ class MinidumpEngine:
         self._mods = self._modules()
         self._memory()
         self._ranges.sort()
+        # drop the ranges another one covers (a thread's stack inside the full memory list),
+        # so that the range found by start also holds the bytes after it
+        kept, end = [], 0
+        for r in self._ranges:
+            if r[0] + r[1] > end:
+                kept.append(r)
+                end = r[0] + r[1]
+        self._ranges = kept
         self._starts = [r[0] for r in self._ranges]
         name = self._mods[0]["name"] if self._mods else "?"
+        wow64 = any(m["name"].lower() == "wow64cpu.dll" for m in self._mods)
         self._proc = {"pid": self.pid, "ppid": 0, "name": name, "name_long": name, "eprocess": 0,
-                      "peb": 0, "dtb": 0, "wow64": False, "session": 0, "integrity": "?", "sid": "",
-                      "system": f"windows-x64 build {self.build}"}
+                      "peb": 0, "dtb": 0, "wow64": wow64, "session": 0, "integrity": "?", "sid": "",
+                      "system": f"windows-{'x86' if self.x86 else 'x64'} build {self.build}"}
 
     def _stream(self, t):
         loc = self.streams.get(t)
@@ -2961,6 +3174,17 @@ def undecorate(name: str) -> str:
     return "::".join(list(reversed(scope)) + [head])
 
 
+def undecorate_x86(name: str) -> str:
+    """Public name of an x86 PDB without its C decoration, as WinDbg shows it:
+    _f (cdecl), _f@8 (stdcall), @f@8 (fastcall) -> f. C++ names (?...) are kept."""
+    if name[:1] not in ("_", "@"):
+        return name
+    head, sep, tail = name[1:].rpartition("@")
+    if sep and head and tail.isdigit():
+        return head
+    return name[1:] if name[0] == "_" else name
+
+
 def parse_context(raw: bytes) -> dict:
     """x64 CONTEXT record -> register dict."""
     if len(raw) < 0x100:
@@ -2969,6 +3193,29 @@ def parse_context(raw: bytes) -> dict:
     regs["efl"] = struct.unpack_from("<I", raw, 0x44)[0]
     regs["cs"], regs["ds"], regs["es"], regs["fs"], regs["gs"], regs["ss"] = struct.unpack_from("<6H", raw, 0x38)
     return regs
+
+
+def parse_context32(raw: bytes) -> dict:
+    """x86 CONTEXT record (32-bit minidump, WOW64_CONTEXT) -> register dict, with the
+    64-bit names (rip = eip, rsp = esp...) and cs = 0x23."""
+    if len(raw) < 0xCC:
+        raise DbgError("CONTEXT x86 illisible")
+    regs = {r: 0 for r in _REGS}
+    regs.update({r: struct.unpack_from("<I", raw, o)[0] for r, o in _CTX32_OFF.items()})
+    regs["efl"] = struct.unpack_from("<I", raw, 0xC0)[0]
+    regs["gs"], regs["fs"], regs["es"], regs["ds"] = (v & 0xFFFF for v in struct.unpack_from("<4I", raw, 0x8C))
+    regs["cs"] = struct.unpack_from("<I", raw, 0xBC)[0] & 0xFFFF
+    regs["ss"] = struct.unpack_from("<I", raw, 0xC8)[0] & 0xFFFF
+    return regs
+
+
+def is_context32(raw: bytes) -> bool:
+    """An x86 CONTEXT record (CONTEXT_i386 in ContextFlags at +0) rather than an x64 one."""
+    return len(raw) < CONTEXT_SIZE and len(raw) >= 0xCC and bool(struct.unpack_from("<I", raw, 0)[0] & 0x10000)
+
+
+def parse_any_context(raw: bytes) -> dict:
+    return parse_context32(raw) if is_context32(raw) else parse_context(raw)
 
 
 def build_context(regs: dict) -> bytes:
@@ -2987,7 +3234,7 @@ def build_context(regs: dict) -> bytes:
 
 class Module:
     __slots__ = ("name", "base", "size", "path", "pdata", "exports", "pdb", "pdb_tried", "timestamp", "image",
-                 "checksum", "file_size", "from_vad")
+                 "checksum", "file_size", "from_vad", "machine")
 
     def __init__(self, name, base, size, path="", timestamp=0, checksum=0, file_size=0, from_vad=False):
         self.name = name
@@ -3003,6 +3250,7 @@ class Module:
         self.checksum = checksum   # PE CheckSum and file size (from the kernel's image section),
         self.file_size = file_size  # used to recognize a local copy of the image file
         self.from_vad = from_vad   # rebuilt from the VADs (loader list not in memory)
+        self.machine = None        # PE machine, read on demand (0x14C: 32-bit image)
 
     @property
     def short(self):
@@ -3014,9 +3262,9 @@ class Module:
 
 
 class Frame:
-    __slots__ = ("index", "rip", "rsp", "regs", "known", "module", "symbol", "line", "user", "note")
+    __slots__ = ("index", "rip", "rsp", "regs", "known", "module", "symbol", "line", "user", "note", "x86")
 
-    def __init__(self, index, regs, known):
+    def __init__(self, index, regs, known, x86=False):
         self.index = index
         self.regs = regs
         self.known = known
@@ -3027,6 +3275,47 @@ class Frame:
         self.line = None
         self.user = self.rip < KERNEL_SPACE
         self.note = None
+        self.x86 = x86             # 32-bit code (WoW64 / x86 process)
+
+
+def _eval_fpo_program(program, env, read32):
+    """Evaluate an x86 FPO program string (PDB FrameData, as WinDbg / DIA / Breakpad):
+    postfix tokens, + - * / % @ (align down), ^ (read a dword), = (assign). Registers are
+    $eip $esp $ebp $ebx $esi $edi or CodeView numbers ($20 = ebx...), $T0.. are
+    temporaries; .raSearch, .cbLocals... come from env. -> the variables afterwards,
+    with the set of assigned names under "="."""
+    env = dict(env)
+    assigned = set()
+    stack = []
+
+    def name(t):
+        if t[:1] == "$" and t[1:].isdigit():
+            return "$" + _CV_REG.get(int(t[1:]), t[1:])
+        return t
+
+    def val(t):
+        if isinstance(t, int):
+            return t
+        if t.lstrip("-").isdigit():
+            return int(t) & 0xFFFFFFFF
+        return env[name(t)]
+    ops = {"+": lambda a, b: a + b, "-": lambda a, b: a - b, "*": lambda a, b: a * b,
+           "/": lambda a, b: a // b, "%": lambda a, b: a % b, "@": lambda a, b: a & ~(b - 1)}
+    for t in program.split():
+        if t in ops:
+            b, a = val(stack.pop()), val(stack.pop())
+            stack.append(ops[t](a, b) & 0xFFFFFFFF)
+        elif t == "^":
+            stack.append(read32(val(stack.pop())))
+        elif t == "=":
+            v = val(stack.pop())
+            n = name(stack.pop())
+            env[n] = v
+            assigned.add(n)
+        else:
+            stack.append(t)
+    env["="] = assigned
+    return env
 
 
 class KernelDebugger:
@@ -3048,6 +3337,7 @@ class KernelDebugger:
         self.ctx = None
         self.ctx_label = None
         self.thread = None
+        self.teb = None                # TEB of the current context's thread (WoW64: 32-bit context)
         self.pid = 4
         self.frames = None
         self.frame_index = 0
@@ -3132,18 +3422,53 @@ class KernelDebugger:
         if pid not in self._umods:
             self._umods[pid] = []          # re-entrancy guard (the VAD fallback needs the nt PDB)
             mods = []
+            x86 = getattr(self.e, "x86", False)
             try:
                 for m in self.e.modules(pid):
                     if m["base"] < KERNEL_SPACE:
-                        mods.append(Module(m["name"], m["base"], m["size"], m.get("path", ""), m.get("timestamp", 0),
+                        name = m["name"]
+                        if name.startswith("_64-"):          # MemProcFS: 64-bit ntdll of a WoW64 process
+                            name = name[4:]
+                        mods.append(Module(name, m["base"], m["size"], m.get("path", ""), m.get("timestamp", 0),
                                            m.get("checksum", 0)))
+                        if x86 or m.get("wow64"):
+                            mods[-1].machine = 0x14C
             except Exception:
                 pass
             if not mods:
                 mods = self._vad_modules(pid)
+            elif any(m.name in ("", "?") for m in mods):
+                self._complete_from_vads(mods, pid)   # loader strings paged out
             mods.sort(key=lambda m: m.base)
             self._umods[pid] = mods
         return self._umods[pid]
+
+    def _complete_from_vads(self, mods, pid):
+        """Fill what the loader list could not give (name and path paged out, no
+        TimeDateStamp from MemProcFS) from the image sections the VADs point to: kernel
+        memory, always in a kernel dump. Enough to fetch an image whose header is paged
+        out, and its PDB."""
+        if self.user_target:
+            return
+        if not hasattr(self, "_vad_info"):
+            self._vad_info = {}
+        if pid not in self._vad_info:
+            self._vad_info[pid] = {}
+            try:
+                self._vad_info[pid] = {v.base: v for v in self._vad_modules(pid)}
+            except Exception:
+                pass
+        info = self._vad_info[pid]
+        for m in mods:
+            v = info.get(m.base)
+            if v is None:
+                continue
+            if m.name in ("", "?"):
+                m.name, m.path = v.name, m.path or v.path
+            m.path = m.path or v.path
+            m.timestamp = m.timestamp or v.timestamp
+            m.checksum = m.checksum or v.checksum
+            m.file_size = m.file_size or v.file_size
 
     def _vad_modules(self, pid):
         """Images mapped in a process, rebuilt from its VADs (kernel memory) when the PEB /
@@ -3223,8 +3548,22 @@ class KernelDebugger:
         """Image metadata (headers, .pdata, unwind info, exports, CodeView record) at an RVA:
         from memory, else from the image file the symbol server holds for this module."""
         data = self.read(mod.base + rva, size, pid)
+        # vmm.dll fills the pages it cannot read with zeros: zeros are data only if the
+        # pages around them are not all zeros (no header / metadata page is)
         if len(data) >= size:
-            return data
+            lo = (mod.base + rva) & ~0xFFF
+            if size < 4 or any(data) or any(self.read(lo, ((mod.base + rva + size + 0xFFF) & ~0xFFF) - lo, pid)):
+                return data
+        if mod.image is None and not mod.timestamp:
+            # identify the image: TimeDateStamp of the header in memory, else from the
+            # image section the VADs point to (header paged out, or no loader data)
+            mz = self.read(mod.base, 0x40, pid)
+            pe = struct.unpack_from("<I", mz, 0x3C)[0] if len(mz) == 0x40 and mz[:2] == b"MZ" else 0
+            nt = self.read(mod.base + pe, 12, pid) if 0 < pe < 0x1000 else b""
+            if nt[:4] == b"PE\0\0":
+                mod.timestamp = struct.unpack_from("<I", nt, 8)[0]
+            elif not mod.from_vad and mod.base < KERNEL_SPACE:
+                self._complete_from_vads([mod], self.pid if pid is None else pid)
         if mod.image is None:
             name = mod.name.rsplit("\\", 1)[-1]
             mod.image = self.syms.image(name, mod.timestamp, mod.size, mod.checksum, mod.file_size,
@@ -3232,6 +3571,30 @@ class KernelDebugger:
         if mod.image:
             return mod.image.read(rva, size)
         return data
+
+    def _data_dir(self, mod, index, pid=None):
+        """(rva, size) of a data directory of a module's image, PE32 or PE32+."""
+        pe = struct.unpack("<I", self.meta(mod, 0x3C, 4, pid))[0]
+        magic = struct.unpack("<H", self.meta(mod, pe + 24, 2, pid))[0]
+        return struct.unpack("<II", self.meta(mod, pe + 24 + (112 if magic == 0x20B else 96) + 8 * index, 8, pid))
+
+    def is_x86(self, mod, pid=None):
+        """32-bit image (x86 code of a WoW64 process)?"""
+        if mod.machine is None:
+            try:
+                pe = struct.unpack("<I", self.meta(mod, 0x3C, 4, pid))[0]
+                mod.machine = struct.unpack("<H", self.meta(mod, pe + 4, 2, pid))[0]
+            except (struct.error, DbgError):
+                mod.machine = 0
+        return mod.machine == 0x14C
+
+    def code_is_x86(self, addr, pid=None):
+        """Is the code at addr 32-bit (for the disassembler)?"""
+        m = self.module_at(addr, pid)
+        if m is not None and (self.is_x86(m, pid) or m.machine):
+            return m.machine == 0x14C
+        # image header not in memory: the current context says (and an x86 dump)
+        return getattr(self.e, "x86", False) or bool(self.ctx and self.ctx.get("cs") == 0x23 and addr < 1 << 32)
 
     def pdb(self, mod, pid=None):
         if not mod.pdb_tried:
@@ -3282,8 +3645,7 @@ class KernelDebugger:
             p = self.pid
             try:
                 rd = lambda r, n: self.meta(mod, r, n, p)
-                pe = struct.unpack("<I", rd(0x3C, 4))[0]
-                rva, size = struct.unpack("<II", rd(pe + 24 + 112, 8))
+                rva, size = self._data_dir(mod, 0, p)
                 if rva and size:
                     ed = rd(rva, 40)
                     (_c, _t, _ma, _mi, _nm, _base, nfunc, nnames, afunc, aname, aord) = struct.unpack("<IIHHIIIIIII", ed)
@@ -3469,9 +3831,8 @@ class KernelDebugger:
             mod.pdata = []
             p = pid
             try:
-                pe = struct.unpack("<I", self.meta(mod, 0x3C, 4, p))[0]
-                rva, size = struct.unpack("<II", self.meta(mod, pe + 24 + 112 + 3 * 8, 8, p))
-                if rva and size:
+                rva, size = self._data_dir(mod, 3, p)
+                if rva and size and not self.is_x86(mod, p):
                     raw = self.meta(mod, rva, size, p)
                     n = len(raw) // 12
                     mod.pdata = [struct.unpack_from("<III", raw, 12 * i) for i in range(n)]
@@ -3609,25 +3970,34 @@ class KernelDebugger:
         regs["rsp"] += 8
         return regs, known - _VOLATILE, False
 
-    def stack(self, regs, known, pid=None, thread=None, max_frames=64, symbols=True, stop_at_user=False):
+    def _new_frame(self, idx, regs, known, pid, symbols, x86=False):
+        f = Frame(idx, regs, known, x86)
+        f.module = self.module_at(f.rip, pid)
+        if symbols:
+            f.symbol, f.line = self.symbolize(f.rip, pid, with_line=True)
+            if idx and f.module is not None:
+                # a return address points after the call: the source line is the call's
+                p = self.pdb(f.module, pid)
+                f.line = p.line_at(f.rip - f.module.base - 1) if p is not None else None
+        else:
+            f.symbol = self._syscall_hint(f)
+        return f
+
+    def stack(self, regs, known, pid=None, thread=None, max_frames=64, symbols=True, stop_at_user=False, teb=None):
         """Walk the stack from a register context. Crosses kernel -> user mode through
-        trap/machine frames, or through the thread's KTRAP_FRAME at the system call."""
+        trap/machine frames, or through the thread's KTRAP_FRAME at the system call; in a
+        WoW64 thread, goes on with its 32-bit code (x86 frames)."""
         pid = self.pid if pid is None else pid
         frames = []
         regs = dict(regs)
         known = set(known)
         crossed_user = False
+        x86_from = None
         for idx in range(max_frames):
-            f = Frame(idx, regs, known)
-            f.module = self.module_at(f.rip, pid)
-            if symbols:
-                f.symbol, f.line = self.symbolize(f.rip, pid, with_line=True)
-                if idx and f.module is not None:
-                    # a return address points after the call: the source line is the call's
-                    p = self.pdb(f.module, pid)
-                    f.line = p.line_at(f.rip - f.module.base - 1) if p is not None else None
-            else:
-                f.symbol = self._syscall_hint(f)
+            if regs["rip"] < KERNEL_SPACE and self._x86_context(regs, pid):
+                x86_from = idx           # the thread is running 32-bit code: x86 frames from here
+                break
+            f = self._new_frame(idx, regs, known, pid, symbols)
             frames.append(f)
             if stop_at_user and f.rip < KERNEL_SPACE:
                 break
@@ -3670,10 +4040,460 @@ class KernelDebugger:
                 f.note = f.note or "user"
                 crossed_user = True
             regs, known = nregs, nknown | {"rip", "rsp"}
+        if x86_from is not None:
+            frames += self.stack_x86(regs, known, pid, x86_from, 1 if stop_at_user else max_frames - x86_from, symbols)
+        elif not stop_at_user and any(f.module is not None and f.module.name.lower() == "wow64cpu.dll" for f in frames):
+            self._insert_wow64_frames(frames, pid, thread, teb, max_frames, symbols)
         last = frames[-1] if frames else None
-        if last is not None and last.rip < KERNEL_SPACE and len(self.read(last.rsp, 8, pid)) < 8:
+        if last is not None and last.rip < KERNEL_SPACE and len(self.read(last.rsp, 4, pid)) < 4:
             last.note = "nostack"            # the walk stops here: user stack not in memory
         return frames
+
+    # -- WoW64 / x86 unwinding -- #
+    def _x86_context(self, regs, pid):
+        """Does this user-mode context run 32-bit code? cs says so (0x23 / 0x33), else
+        the image the instruction pointer is in."""
+        cs = regs.get("cs")
+        if cs in (0x23, 0x33):
+            return cs == 0x23
+        m = self.module_at(regs["rip"], pid)
+        return m is not None and self.is_x86(m, pid)
+
+    def wow64_context(self, teb, pid):
+        """32-bit registers of a WoW64 thread, saved by wow64cpu when its x86 code left for
+        the 64-bit layer (system call, exception...): the WOW64_CONTEXT of the CPU area
+        that TEB64.TlsSlots[WOW64_TLS_CPURESERVED] points to (after Flags + Machine)."""
+        try:
+            cpu = self.q(teb + _TEB64_WOW64_CPURESERVED, pid)
+        except DbgError:
+            return None
+        raw = self.read(cpu + 4, 0xCC, pid) if 0x10000 <= cpu < KERNEL_SPACE else b""
+        if len(raw) < 0xCC or not is_context32(raw):
+            return None
+        regs = parse_context32(raw)
+        return regs if regs["cs"] == 0x23 and regs["rip"] >= 0x10000 else None
+
+    def _teb_of(self, thread, rsp):
+        if thread is not None:
+            try:
+                return self.thread_info(thread)["teb"]
+            except DbgError:
+                return None
+        for t in getattr(self.e, "threads", None) or []:     # user-mode minidump: by its 64-bit stack
+            lo, size = t["stack"]
+            if lo <= rsp < lo + size:
+                return t["teb"]
+        return None
+
+    def _insert_wow64_frames(self, frames, pid, thread, teb, max_frames, symbols):
+        """A WoW64 thread in its 64-bit layer: its x86 code called wow64cpu (system call,
+        exception...) from inside the CPU simulation loop. The 32-bit frames go between the
+        wow64cpu entry and that loop (the outermost wow64cpu frame, BTCpuSimulate)."""
+        teb = teb or self._teb_of(thread, frames[0].rsp)
+        ctx = self.wow64_context(teb, pid) if teb else None
+        at = max(i for i, f in enumerate(frames) if f.module is not None and f.module.name.lower() == "wow64cpu.dll")
+        if ctx is None:
+            if at and not frames[at - 1].note:
+                frames[at - 1].note = "nowow64"      # TEB / CPU area not in the source
+            return
+        frames[at:at] = self.stack_x86(ctx, set(_X86_REGS) | {"rip"}, pid, at, max_frames, symbols)
+        for i, f in enumerate(frames):
+            f.index = i
+
+    def stack_x86(self, regs, known, pid, first_index=0, max_frames=64, symbols=True):
+        """x86 frames from a 32-bit context (registers under their 64-bit names)."""
+        regs = {r: regs.get(r, 0) & 0xFFFFFFFF for r in _X86_REGS + ["rip"]}
+        regs["cs"] = 0x23
+        known = {r for r in known if r in regs}
+        frames = []
+        callee_params = 0
+        for n in range(max_frames):
+            f = self._new_frame(first_index + n, regs, known, pid, symbols, x86=True)
+            frames.append(f)
+            try:
+                nxt = self.unwind_step_x86(regs, known, pid, callee_params, first=n == 0)
+            except DbgError:
+                nxt = None
+            if nxt is None:
+                break
+            nregs, nknown, callee_params, scanned = nxt
+            if nregs["rip"] < 0x10000 or nregs["rsp"] <= regs["rsp"]:
+                break
+            if scanned:
+                f.note = "scan"
+            regs, known = nregs, nknown | {"rip", "rsp"}
+        return frames
+
+    def _ra_plausible(self, addr, pid):
+        """Could addr be a return address into 32-bit code?"""
+        if not 0x10000 <= addr < 1 << 32:
+            return False
+        m = self.module_at(addr, pid)
+        return m is not None and (self.is_x86(m, pid) or not m.machine)     # header unreadable: maybe
+
+    def _x86_function_start(self, mod, rva, pid):
+        p = self.pdb(mod, pid)
+        s = p.symbol_at(rva) if p is not None else None
+        if s is not None:
+            return rva - s[1]
+        exp = self._exports(mod)
+        i = bisect.bisect_right([e[0] for e in exp], rva) - 1
+        return exp[i][0] if i >= 0 else None
+
+    def unwind_step_x86(self, regs, known, pid, callee_params=0, first=False):
+        """One x86 frame up -> (regs, known, parameter bytes of the function left, found by
+        a plain stack scan) or None. As WinDbg: the FrameData program string (or old FPO
+        record) of the module's PDB for the code at eip. Without one, the code itself:
+        the stack depth of the function at eip (from its start, else from the call that a
+        return address on the stack comes from - checked to land exactly on that slot);
+        then the ebp chain, then the first return address on the stack."""
+        eip, esp, ebp = regs["rip"], regs["rsp"], regs["rbp"]
+        mod = self.module_at(eip, pid)
+        if mod is None:
+            return None
+        rva = eip - mod.base
+        p = self.pdb(mod, pid)
+        fd = p.frame_data(rva) if p is not None else None
+        rd = lambda a: self.u32(a & 0xFFFFFFFF, pid)
+        nknown = set(known) - {"rax", "rcx", "rdx"}
+        if fd is not None and not (first and fd["use_bp"] and rva - fd["start"] < fd["prolog"]):
+            program = fd["program"]
+            if not program:                                   # FPO_DATA record: Breakpad's equivalents
+                program = ("$T0 $ebp = $eip $T0 4 + ^ = $ebp $T0 ^ = $esp $T0 8 + = " if fd["use_bp"] else
+                           "$eip .raSearchStart ^ = $esp .raSearchStart 4 + = ")
+            search = esp + callee_params + fd["locals"] + fd["saved"]
+            if ".raSearch" in program:
+                # the stack may have been aligned (up to a quadword): look a few slots above
+                for k in range(4):
+                    try:
+                        if self._ra_plausible(rd(search + 4 * k), pid):
+                            search += 4 * k
+                            break
+                    except DbgError:
+                        break
+            env = {"$eip": eip, "$esp": esp, "$ebp": ebp, ".raSearch": search, ".raSearchStart": search,
+                   ".cbLocals": fd["locals"], ".cbSavedRegs": fd["saved"], ".cbParams": fd["params"],
+                   ".cbCalleeParams": callee_params}
+            for r in ("rbx", "rsi", "rdi"):
+                if r in known:
+                    env["$" + _X86_NAMES[r]] = regs[r]
+            try:
+                out = _eval_fpo_program(program, env, rd)
+            except (KeyError, IndexError, ValueError, ZeroDivisionError, DbgError):
+                out = None
+            if out is not None and {"$eip", "$esp"} <= out["="] and self._ra_plausible(out["$eip"], pid):
+                nregs = dict(regs)
+                nregs["rip"], nregs["rsp"] = out["$eip"], out["$esp"]
+                for r in ("rbp", "rbx", "rsi", "rdi"):
+                    if "$" + _X86_NAMES[r] in out["="]:
+                        nregs[r] = out["$" + _X86_NAMES[r]]
+                        nknown.add(r)
+                return nregs, nknown, fd["params"], False
+        nregs = dict(regs)
+        if first and self._code32(eip, 1, pid) in (b"\xc3", b"\xc2"):     # at a ret: no frame left
+            nregs["rip"], nregs["rsp"] = rd(esp), esp + 4
+            return nregs, nknown, 0, False
+        # the code: where the function at eip keeps its return address. At a return
+        # address, the stack is as it was at the call just before it.
+        site = None if first else self._call_before(eip, pid)          # () / None: no call site known
+        point = site[0] if site else eip
+        stack = self.read(esp, 0x2000, pid)
+        # ebp chain: [ebp] = the caller's ebp, [ebp+4] = the return address. The return
+        # address of the function at eip cannot be above it: at ebp+4 if the function
+        # has an ebp frame, below its caller's frame if not (FPO)
+        chain = None
+        if 0x10000 <= ebp < 1 << 32 and ebp >= esp:
+            try:
+                ra = rd(ebp + 4)
+                if self._ra_plausible(ra, pid) and self._call_before(ra, pid) != ():
+                    chain = ebp + 4
+            except DbgError:
+                pass
+        start = self._x86_function_start(mod, rva, pid)
+        found = self._x86_frame_at(start, point, regs, stack, pid, limit=chain) if start is not None else None
+        if found is None:
+            seen = set()
+            for k in range(len(stack) // 4):
+                if chain is not None and esp + 4 * k > chain:
+                    break
+                v = struct.unpack_from("<I", stack, 4 * k)[0]
+                c = self._call_before(v, pid) if v not in seen and self._ra_plausible(v, pid) else None
+                seen.add(v)
+                if c and c[1] is not None:
+                    found = self._x86_frame_at(c[1], point, regs, stack, pid, slot=esp + 4 * k)
+                    if found:
+                        break
+        if found is None:
+            # called through a pointer: the function starts after the int 3 padding
+            # that precedes it (MSVC), the nearest start whose layout fits
+            for st in self._x86_starts_before(point, mod, pid):
+                found = self._x86_frame_at(st, point, regs, stack, pid, limit=chain)
+                if found:
+                    break
+        if found is not None:
+            slot, saved = found
+            for r, below in saved.items():
+                nregs[r] = rd(slot - below)
+                nknown.add(r)
+            nregs["rip"], nregs["rsp"] = rd(slot), slot + 4
+            return nregs, nknown, 0, False
+        if chain is not None:
+            nregs["rip"], nregs["rsp"], nregs["rbp"] = rd(chain), chain + 4, rd(chain - 4)
+            return nregs, nknown, 0, False
+        # last resort (as Breakpad): the first return address above esp
+        for k in range(min(len(stack) // 4, 512)):
+            v = struct.unpack_from("<I", stack, 4 * k)[0]
+            if self._ra_plausible(v, pid) and self._call_before(v, pid):
+                nregs["rip"], nregs["rsp"] = v, esp + 4 * k + 4
+                return nregs, nknown - {"rbp", "rbx", "rsi", "rdi"}, 0, True
+        return None
+
+    # -- x86 code without unwind data: the stack depth from the code -- #
+    def _code32(self, addr, size, pid):
+        m = self.module_at(addr, pid)
+        if m is not None:
+            return self.meta(m, addr - m.base, size, pid)
+        return self.read(addr, size, pid)
+
+    def _decode32(self, addr, pid):
+        code = self._code32(addr, 16, pid)
+        if not code:
+            return None
+        try:
+            return self.dis.decode(code, addr, mode32=True)
+        except Exception:
+            return None
+
+    def _call_target32(self, ins, pid):
+        """Target of a call / jmp: direct, or through a pointer at a fixed address (IAT)."""
+        if ins.target is not None:
+            return ins.target
+        ops = ins.operands
+        if ops.startswith("dword ptr [") and ops.endswith("h]"):
+            try:
+                return self.u32(int(ops[11:-2], 16), pid)
+            except (ValueError, DbgError):
+                return None
+        return None
+
+    def _call_before(self, ra, pid):
+        """Is ra a return address, i.e. right after a call? -> (call address, target or
+        None for a call through a register / object), () if not, None if the code there
+        is not in memory (nor its image file)."""
+        cache = self.__dict__.setdefault("_call_cache", {})
+        key = (pid, ra)
+        if key not in cache:
+            cache[key] = None
+            code = self._code32(ra - 7, 7, pid) if ra >= 7 else b""
+            if len(code) == 7 and any(code):
+                cache[key] = ()
+                for n in (5, 6, 2, 3, 7, 4):
+                    try:
+                        ins = self.dis.decode(code[7 - n:], ra - n, mode32=True)
+                    except Exception:
+                        continue
+                    if ins.length == n and ins.kind == "call":
+                        cache[key] = (ra - n, self._call_target32(ins, pid))
+                        break
+        return cache[key]
+
+    def _x86_resolve(self, target, pid):
+        """Follow jump thunks (incremental linking, import stubs) to the function itself."""
+        for _ in range(4):
+            ins = self._decode32(target, pid)
+            if ins is None or ins.kind != "jmp":
+                break
+            t = self._call_target32(ins, pid)
+            if t is None:
+                break
+            target = t
+        return target
+
+    def _x86_callee_pops(self, target, pid):
+        """Bytes a function removes from the stack on return (ret N: stdcall, thiscall);
+        "chkstk" for the stack probe that allocates eax bytes; None if unknown."""
+        cache = self.__dict__.setdefault("_pops_cache", {})
+        key = (pid, target)
+        if key not in cache:
+            cache[key] = None
+            t = self._x86_resolve(target, pid)
+            code = self._code32(t, 0x1000, pid)
+            if code[:5] == b"\x51\x8d\x4c\x24\x04":           # push ecx ; lea ecx,[esp+4]
+                cache[key] = "chkstk"
+            else:
+                o = 0
+                while o < len(code) - 1:
+                    try:
+                        ins = self.dis.decode(code[o:o + 16], t + o, mode32=True)
+                    except Exception:
+                        break
+                    if ins.mnemonic == "???":
+                        break
+                    if ins.kind == "ret":
+                        cache[key] = _imm_value(ins.operands) if ins.operands else 0
+                        break
+                    o += ins.length
+        return cache[key]
+
+    def _x86_layout(self, start, point, pid):
+        """Stack layout, at `point`, of the x86 function entered at `start`, from its code:
+        follows push / pop / sub esp / ebp frame / calls (and their ret N) along the paths
+        from the entry. -> (depth, ebp_depth, saved) - depth: bytes pushed or allocated
+        since the entry (its return address is at esp + depth; None after an and esp
+        alignment), ebp_depth: depth when ebp = esp was set (None without a frame),
+        saved: {register: bytes below the return address} - or None if point is not
+        reached."""
+        cache = self.__dict__.setdefault("_layout_cache", {})
+        key = (pid, start, point)
+        if key in cache:
+            return cache[key]
+        cache[key] = None
+        start = self._x86_resolve(start, pid)
+        if not 0 <= point - start < 0x40000:
+            return None
+        code = self._code32(start, point - start + 0x2000, pid)
+        regs32 = ("ebp", "ebx", "esi", "edi")
+        work = [(start, 0, None, {})]
+        seen = set()
+        steps = 0
+        while work and steps < 8000:
+            a, depth, ebpd, saved = work.pop()
+            pushed = 0                        # bytes pushed since the last call: its arguments
+            last = None
+            while True:
+                if a == point:
+                    cache[key] = (depth, ebpd, saved)
+                    return cache[key]
+                o = a - start
+                if a in seen or not 0 <= o < len(code) - 1:
+                    break
+                seen.add(a)
+                steps += 1
+                try:
+                    ins = self.dis.decode(code[o:o + 16], a, mode32=True)
+                except Exception:
+                    break
+                m, ops = ins.mnemonic, ins.operands
+                nxt = a + ins.length
+                if m in ("???", "ud2", "hlt") or m == "int" and ops != "3":
+                    break
+                dst = ops.split(",", 1)[0]
+                if m == "push":
+                    size = 2 if ops.startswith("word ptr") or ops in ("ax", "bx", "cx", "dx", "si", "di", "bp") else 4
+                    if depth is not None:
+                        depth += size
+                        if ops in regs32 and ops not in saved:
+                            saved = dict(saved, **{_CV_REG_64[ops]: depth})
+                    pushed += size
+                elif m == "pop":
+                    if depth is not None:
+                        saved = {r: d for r, d in saved.items() if d < depth}
+                        depth -= 4
+                    if ops == "ebp":
+                        ebpd = None
+                elif m in ("pushad", "pushfd", "popad", "popfd"):
+                    if depth is not None:
+                        depth += {"pushad": 32, "pushfd": 4, "popad": -32, "popfd": -4}[m]
+                elif m == "enter":
+                    if depth is not None:
+                        depth += 4
+                        saved = dict(saved, rbp=depth) if "rbp" not in saved else saved
+                        ebpd = depth
+                        v = _imm_value(ops.split(",")[0])
+                        depth = None if v is None else depth + v
+                elif m == "leave":
+                    depth = None if ebpd is None else ebpd - 4
+                    ebpd = None
+                elif m == "mov" and ops == "ebp,esp":
+                    ebpd = depth
+                elif m == "mov" and ops == "esp,ebp":
+                    depth = ebpd
+                elif m in ("sub", "add") and dst == "esp" and depth is not None:
+                    v = _imm_value(ops.split(",", 1)[1])
+                    depth = None if v is None else depth + (v if m == "sub" else -v)
+                    pushed = 0
+                elif m == "lea" and dst == "esp":
+                    inner = ops.split(",", 1)[1].strip("[]")       # esp+10h, ebp-8, esp
+                    base, sign = inner[:3], inner[3:4]
+                    disp = _imm_value(inner[4:]) if sign in ("+", "-") else (0 if not sign else None)
+                    if disp is not None and sign == "-":
+                        disp = -disp
+                    if disp is not None and base == "esp" and depth is not None:
+                        depth -= disp
+                    elif disp is not None and base == "ebp" and ebpd is not None:
+                        depth = ebpd - disp
+                    else:
+                        depth = None
+                elif dst == "esp" and m not in ("cmp", "test"):
+                    depth = None                  # and esp,-16 (alignment), mov esp,... : unknown
+                elif m == "ret":
+                    break
+                elif ins.kind == "call":
+                    t = self._call_target32(ins, pid)
+                    pops = self._x86_callee_pops(t, pid) if t is not None else None
+                    if pops == "chkstk":
+                        pops = -(last[1] if last and last[0] == "eax" else 0)
+                    elif pops is None:
+                        # unknown callee: cdecl if the caller cleans up right after
+                        try:
+                            after = self.dis.decode(code[nxt - start:nxt - start + 16], nxt, mode32=True)
+                        except Exception:
+                            after = None
+                        cdecl = after is not None and after.mnemonic == "add" and after.operands.startswith("esp,")
+                        pops = 0 if cdecl else pushed
+                    if depth is not None:
+                        depth -= pops
+                    pushed = 0
+                elif ins.kind == "jcc" and ins.target is not None:
+                    work.append((ins.target, depth, ebpd, saved))
+                elif ins.kind == "jmp":
+                    if ins.target is None:
+                        break                     # jump table, tail call through a pointer
+                    nxt = ins.target
+                last = (dst, _imm_value(ops.split(",", 1)[1])) if m == "mov" and "," in ops else None
+                a = nxt
+        return None
+
+    def _x86_starts_before(self, point, mod, pid, span=0x4000, limit=24):
+        """Possible function starts before point: just after a run of int 3 padding."""
+        lo = max(mod.base, point - span)
+        code = self._code32(lo, point - lo + 1, pid)
+        out = []
+        for i in range(len(code) - 1, 0, -1):
+            if code[i - 1] == 0xCC and code[i] != 0xCC:
+                out.append(lo + i)
+                if len(out) >= limit:
+                    break
+        return out
+
+    def _x86_frame_at(self, start, point, regs, stack, pid, slot=None, limit=None):
+        """Return address slot of the frame at `point` if the function entered at
+        `start` is the one running there: its stack layout from the code must put the
+        return address on a slot that holds one (and on `slot`, when a scan proposes it).
+        -> (slot, saved registers) or None."""
+        try:
+            lay = self._x86_layout(start, point, pid)
+        except (DbgError, ValueError, TypeError, IndexError, struct.error):
+            lay = None                        # code that does not decode: no layout
+        if lay is None:
+            return None
+        depth, ebpd, saved = lay
+        esp, ebp = regs["rsp"], regs["rbp"]
+        if depth is not None:
+            at = esp + depth
+        elif ebpd is not None and "rbp" in regs:
+            at = ebp + ebpd                 # ebp = entry esp - ebp_depth
+        else:
+            return None
+        if slot is not None and at != slot or limit is not None and at > limit:
+            return None
+        o = at - esp
+        if not 0 <= o <= len(stack) - 4:
+            return None
+        ra = struct.unpack_from("<I", stack, o)[0]
+        if not self._ra_plausible(ra, pid) or self._call_before(ra, pid) == ():
+            return None
+        return at, dict(saved)
 
     def _on_thread_stack(self, thread, rsp):
         """Is rsp inside the kernel stack of this thread (so its trap frame applies)?"""
@@ -3899,7 +4719,7 @@ class BugcheckAnalyzer:
         name = e.process(e.pid)["name"]
         if exc is None or not exc["code"]:
             w(f"Aucune exception dans ce minidump ({name}, pid {e.pid}) : analyse du thread courant.")
-            regs, label = kd.ctx or parse_context(e.threads[0]["context"]), kd.ctx_label or "thread 0"
+            regs, label = kd.ctx or parse_any_context(e.threads[0]["context"]), kd.ctx_label or "thread 0"
             return out + self._context_report(regs, set(regs), label, None, None, None, 0)
         code = exc["code"]
         w(f"PROCESS_NAME : {name}  (pid {e.pid})")
@@ -3910,11 +4730,11 @@ class BugcheckAnalyzer:
             w(f"  accès en {op} à l'adresse {exc['params'][1]:#018x}")
         elif exc["params"]:
             w("  paramètres : " + " ".join(f"{x:#x}" for x in exc["params"]))
-        regs = parse_context(exc["context"]) if len(exc["context"]) >= 0x100 else None
+        regs = parse_any_context(exc["context"]) if len(exc["context"]) >= 0xCC else None
         label = f"contexte de l'exception (thread {exc['tid']:#x})"
         if regs is None:
             idx = next((i for i, t in enumerate(e.threads) if t["tid"] == exc["tid"]), 0)
-            regs, label = parse_context(e.threads[idx]["context"]), f"thread {idx}"
+            regs, label = parse_any_context(e.threads[idx]["context"]), f"thread {idx}"
         out += self._context_report(regs, set(regs), label, None, exc["address"], code, 0)
         sym = next((x.split(" : ", 1)[1] for x in out if x.startswith("SYMBOL_NAME : ")), None)
         if sym:
@@ -3948,7 +4768,7 @@ class BugcheckAnalyzer:
             w(f"FAULTING_IP : {sym}")
             code_bytes = kd.read(ip, 16, pid)
             if code_bytes:
-                ins = kd.dis.decode(code_bytes, ip)
+                ins = kd.dis.decode(code_bytes, ip, mode32=kd.code_is_x86(ip, pid))
                 w(f"  {ip:016x} {ins.raw.hex():<20} {ins.text}")
             if line:
                 w(f"  source : {line[0]} @ {line[1]}")
@@ -3959,10 +4779,9 @@ class BugcheckAnalyzer:
             ret = frames[i + 1].rip if i + 1 < len(frames) else 0
             w(f"  {f.index:02x}  {f.rsp:016x}  {ret:016x}  {f.symbol}"
               + (f"  [{f.line[0].rsplit(chr(92), 1)[-1]} @ {f.line[1]}]" if f.line else ""))
-            if f.note == "user" and i + 1 < len(frames):
-                w("       --- passage en mode utilisateur ---")
-            elif f.note == "nostack":
-                w("       " + "(suite de la pile user-mode absente : la source ne contient pas la mémoire utilisateur)")
+            sep = frame_transition(frames, i)
+            if sep:
+                w("       " + sep)
         # faulting module: the faulting IP's module, else the first frame outside nt/hal
         culprit = None
         if ip is not None:
@@ -3986,6 +4805,31 @@ class BugcheckAnalyzer:
 
 def kd_parse_context(raw):
     return parse_context(raw)
+
+
+def frame_transition(frames, i):
+    """Line to print after frame i of a stack: kernel -> user mode, trap, 64-bit WoW64
+    layer <-> 32-bit code, or the user stack missing from the source; None otherwise."""
+    f = frames[i]
+    nxt = frames[i + 1] if i + 1 < len(frames) else None
+    if f.note == "nostack":
+        return "(suite de la pile user-mode absente : la source ne contient pas la mémoire utilisateur)"
+    if nxt is None:
+        return None
+    if f.note == "user":
+        return "--- passage en mode utilisateur" + (" (code 32 bits, WoW64) ---" if nxt.x86 else " ---")
+    if f.note == "trap":
+        return "--- trap / interruption ---"
+    if f.note == "nowow64":
+        return ("--- code 32 bits (WoW64) : contexte et pile 32 bits absents de la source (TEB non capturé) ;"
+                " il faut un dump avec la mémoire du processus (minidump complet, dump noyau + user) ---")
+    if f.note == "scan":
+        return "--- frame suivante trouvée en balayant la pile (incertaine) ---"
+    if nxt.x86 and not f.x86:
+        return "--- code 32 bits (WoW64) ---"
+    if f.x86 and not nxt.x86:
+        return "--- couche WoW64 (code 64 bits) ---"
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -4178,16 +5022,16 @@ class DebugCommands:
         kd = self.kd
         t = kd.e.threads[i]
         exc = kd.e.exception
-        raw = exc["context"] if exc and exc["tid"] == t["tid"] and len(exc["context"]) >= 0x100 else t["context"]
-        regs = parse_context(raw)
+        raw = exc["context"] if exc and exc["tid"] == t["tid"] and len(exc["context"]) >= 0xCC else t["context"]
+        regs = parse_any_context(raw)
         kd.cpu = i
         label = f"thread {i} (tid {t['tid']:#x})" + (" - contexte de l'exception" if raw is not t["context"] else "")
         if quiet:
-            kd.ctx, kd.ctx_known, kd.ctx_label, kd.thread = regs, set(regs), label, None
+            kd.ctx, kd.ctx_known, kd.ctx_label, kd.thread, kd.teb = regs, set(regs), label, None, t["teb"]
             kd.frames, kd.frame_index = None, 0
             self.pid = kd.pid = kd.e.pid
         else:
-            self._set_context(regs, set(regs), label, None, kd.e.pid)
+            self._set_context(regs, set(regs), label, None, kd.e.pid, teb=t["teb"])
 
     def _ensure_context(self):
         kd = self.kd
@@ -4209,10 +5053,11 @@ class DebugCommands:
                 kd.thread = None
         return kd.ctx
 
-    def _set_context(self, regs, known, label, thread=None, pid=None):
+    def _set_context(self, regs, known, label, thread=None, pid=None, teb=None):
         kd = self.kd
         kd.ctx, kd.ctx_known, kd.ctx_label = regs, set(known), label
         kd.thread = thread
+        kd.teb = teb
         kd.frames = None
         kd.frame_index = 0
         if pid is not None:
@@ -4223,7 +5068,7 @@ class DebugCommands:
         kd = self.kd
         self._ensure_context()
         if kd.frames is None:
-            kd.frames = kd.stack(kd.ctx, kd.ctx_known, pid=self.pid, thread=kd.thread)
+            kd.frames = kd.stack(kd.ctx, kd.ctx_known, pid=self.pid, thread=kd.thread, teb=kd.teb)
         return kd.frames
 
     # -- expressions: registers, module!symbol, hex (WinDbg style), + and - -- #
@@ -4243,11 +5088,14 @@ class DebugCommands:
 
     def _eval_term(self, t: str) -> int:
         low = t.lower().lstrip("@")
-        if self.kd is not None and low in _CTX_REGS + ["efl"]:
+        reg32 = {v: k for k, v in _X86_NAMES.items() if k != "efl"}
+        if self.kd is not None and (low in _CTX_REGS + ["efl"] or low in reg32):
             self._ensure_context()
             regs = self.kd.ctx
             if self.kd.frames and self.kd.frame_index:
                 regs = self.kd.frames[self.kd.frame_index].regs
+            if low in reg32:
+                return regs.get(reg32[low], 0) & 0xFFFFFFFF
             return regs.get(low, 0)
         if "!" in t:
             mod, sym = t.split("!", 1)
@@ -4274,8 +5122,12 @@ class DebugCommands:
         at the caller's Child-SP) - what WinDbg's kb shows as "Args to Child". Valid only
         where the function spilled RCX/RDX/R8/R9 there (always with /Od, often not when
         optimized: the slots are then scratch space)."""
-        if i + 1 >= len(frames) or frames[i].note in ("user", "trap"):
+        if i + 1 >= len(frames) or frames[i].note in ("user", "trap") or frames[i].x86 != frames[i + 1].x86:
             return None
+        if frames[i].x86:
+            # x86: the first 3 stack parameters (stdcall / cdecl), just above the return address
+            raw = self.kd.read(frames[i + 1].rsp, 12, self.pid)
+            return list(struct.unpack("<3I", raw)) if len(raw) == 12 else None
         raw = self.kd.read(frames[i + 1].rsp, 32, self.pid)
         return list(struct.unpack("<4Q", raw)) if len(raw) == 32 else None
 
@@ -4287,7 +5139,7 @@ class DebugCommands:
         if self.json:
             print(_jdump([{"index": f.index, "rsp": f.rsp, "rip": f.rip, "symbol": f.symbol,
                            "file": f.line[0] if f.line else None, "line": f.line[1] if f.line else None,
-                           "transition": f.note,
+                           "transition": f.note, "x86": f.x86,
                            **({"args_to_child": self._home_args(frames, i)} if args_to_child else {})}
                           for i, f in enumerate(frames[:count])]))
             return
@@ -4301,16 +5153,14 @@ class DebugCommands:
             src = f"  [{f.line[0]} @ {f.line[1]}]" if f.line else ""
             if args_to_child:
                 ha = self._home_args(frames, i)
-                cols = " ".join(f"{a:016x}" for a in ha) if ha else " ".join(["?" * 16] * 4)
-                print(f"{f.index:02x}  {f.rsp:016x}  {ret:016x}  : {cols} : {f.symbol}{src}")
+                width = 8 if f.x86 else 16
+                cols = " ".join(f"{a:0{width}x}" for a in ha) if ha else " ".join(["?" * width] * (3 if f.x86 else 4))
+                print(f"{f.index:02x}  {f.rsp:016x}  {ret:016x}  : {cols:<67} : {f.symbol}{src}")
             else:
                 print(f"{f.index:02x}  {f.rsp:016x}  {ret:016x}  {f.symbol}{src}")
-            if f.note == "user" and i + 1 < len(frames):
-                print("    --- passage en mode utilisateur ---")
-            elif f.note == "trap" and i + 1 < len(frames):
-                print("    --- trap / interruption ---")
-            elif f.note == "nostack":
-                print("    " + "(suite de la pile user-mode absente : la source ne contient pas la mémoire utilisateur)")
+            sep = frame_transition(frames, i)
+            if sep:
+                print("    " + sep)
 
     def _cmd_frame(self, args):
         if not self._need_kd():
@@ -4347,10 +5197,13 @@ class DebugCommands:
             return
         seen = set()
         rows = []
+        # x86 code without frame pointer: VFRAME and esp-relative variables are relative to
+        # esp at the function entry, i.e. the slot of the return address
+        vframe = frames[kd.frame_index + 1].rsp - 4 if f.x86 and kd.frame_index + 1 < len(frames) else None
         for v in variables:
             if v["name"] in seen or v["where"] is None:
                 continue
-            value, addr = self._local_value(pdb, f, v)
+            value, addr = self._local_value(pdb, f, v, vframe)
             if value is None and any(x["name"] == v["name"] and x is not v and x["where"] for x in variables):
                 continue
             seen.add(v["name"])
@@ -4373,6 +5226,9 @@ class DebugCommands:
         frame, the argument registers."""
         f = frames[i]
         ha = self._home_args(frames, i)
+        if f.x86:
+            self._dv_public_x86(f, ha, reason)
+            return
         regs = [f.regs.get(r) if r in f.known else None for r in ("rcx", "rdx", "r8", "r9")] if i == 0 else None
         if self.json:
             print(_jdump({"function": f.symbol, "private_pdb": False, "home_slots": ha, "arg_registers": regs}))
@@ -4393,14 +5249,31 @@ class DebugCommands:
             for r, v in zip(("rcx", "rdx", "r8", "r9"), regs):
                 print(f"    {r:<4}  {v:016x}" if v is not None else f"    {r:<4}  ?")
 
-    def _local_value(self, pdb, f, v):
+    def _dv_public_x86(self, f, args, reason):
+        """dv without a private PDB on 32-bit code: the stack parameters above the return
+        address (stdcall / cdecl; a fastcall / thiscall function gets ecx / edx first)."""
+        if self.json:
+            print(_jdump({"function": f.symbol, "private_pdb": False, "stack_args": args}))
+            return
+        print(f"[!] {reason or 'PDB public pour ' + f.module.short} : pas de noms ni de types de variables "
+              f"locales (il faut le PDB privé, voir .sympath)")
+        print(f"{f.symbol}  (frame {f.index:02x}, code 32 bits)")
+        if not args:
+            print("  paramètres illisibles (pas de frame appelante en mémoire)")
+            return
+        print("  paramètres sur la pile (stdcall / cdecl ; fastcall et thiscall passent les premiers dans ecx / edx) :")
+        for n, a in enumerate(args, 1):
+            sym = self.kd.symbolize(a, self.pid)[0] if a >= 0x10000 and self.kd.module_at(a, self.pid) else ""
+            print(f"    arg{n}  {a:08x}  {sym}")
+
+    def _local_value(self, pdb, f, v, vframe=None):
         kd = self.kd
         where = v["where"]
         size = pdb.type_size(v["type"]) or 8
         if where[0] == "regrel":
-            reg = where[1]
-            base = f.regs.get(reg)
-            if base is None or (reg not in f.known and reg not in ("rsp",)):
+            reg = _CV_REG_64.get(where[1], where[1])
+            base = vframe if reg == "vframe" or f.x86 and reg == "rsp" else f.regs.get(reg)
+            if base is None or (reg not in f.known and reg not in ("rsp", "vframe")):
                 return None, None
             addr = (base + where[2]) & 0xFFFFFFFFFFFFFFFF
             raw = kd.read(addr, min(size, 64), self.pid)
@@ -4421,9 +5294,9 @@ class DebugCommands:
     def _with_string(self, pdb, ti, raw, text):
         """char * / wchar_t * : append the string it points to, as WinDbg does."""
         name = pdb.type_name(ti).replace("const ", "")
-        if text is None or len(raw) < 8 or name not in ("char *", "wchar_t *", "unsigned short *"):
+        if text is None or len(raw) not in (4, 8) or name not in ("char *", "wchar_t *", "unsigned short *"):
             return text
-        ptr = int.from_bytes(raw[:8], "little")
+        ptr = int.from_bytes(raw, "little")
         data = self.kd.read(ptr, 256, self.pid) if ptr >= 0x10000 else b""
         if not data:
             return text
@@ -4454,7 +5327,7 @@ class DebugCommands:
         if kind in ("base", "pointer", "enum", "modifier", "bitfield") and size in (1, 2, 4, 8) and len(raw) >= size:
             v = int.from_bytes(raw[:size], "little", signed=kind == "base" and "unsigned" not in name and "bool" not in name)
             if kind == "pointer":
-                return f"{v & 0xFFFFFFFFFFFFFFFF:#018x}"
+                return f"{v & ((1 << (8 * size)) - 1):#0{2 + 2 * size}x}"
             return f"0n{v}  ({v & ((1 << (8 * size)) - 1):#x})"
         if kind == "array" and name.startswith(("char", "wchar_t")):
             if name.startswith("wchar_t"):
@@ -4519,7 +5392,7 @@ class DebugCommands:
             return
         rows = []
         for i, t in enumerate(threads):
-            rip = parse_context(t["context"])["rip"]
+            rip = parse_any_context(t["context"])["rip"]
             rows.append({"index": i, "tid": t["tid"], "teb": t["teb"], "rip": rip,
                          "symbol": kd.symbolize(rip, kd.e.pid)[0],
                          "start": kd.symbolize(t["start"], kd.e.pid)[0] if t["start"] else None})
@@ -4573,10 +5446,9 @@ class DebugCommands:
         for i, f in enumerate(frames):
             ret = frames[i + 1].rip if i + 1 < len(frames) else 0
             print(f"  {f.rsp:016x}  {ret:016x}  {f.symbol}" + (f"  [{f.line[0]} @ {f.line[1]}]" if f.line else ""))
-            if f.note == "user" and i + 1 < len(frames):
-                print("      --- passage en mode utilisateur ---")
-            elif f.note == "nostack":
-                print("      " + "(suite de la pile user-mode absente : la source ne contient pas la mémoire utilisateur)")
+            sep = frame_transition(frames, i)
+            if sep:
+                print("      " + sep)
 
     def _cmd_cxr(self, args):
         if not self._need_kd():
@@ -4607,16 +5479,24 @@ class DebugCommands:
         kd = self.kd
         self._ensure_context()
         regs, known = kd.ctx, kd.ctx_known
-        if kd.frames and kd.frame_index:
-            f = kd.frames[kd.frame_index]
+        f = kd.frames[kd.frame_index] if kd.frames else None
+        if f is not None and kd.frame_index:
             regs, known = f.regs, f.known
-        names = [a.lower() for a in args] if args else _CTX_REGS + ["efl"]
+        x86 = f.x86 if f is not None else regs["rip"] < KERNEL_SPACE and kd._x86_context(regs, self.pid)
+        full = {v: k for k, v in _X86_NAMES.items()}
+        if args:
+            names = [full.get(a.lower(), a.lower()) for a in args]
+        else:
+            names = ["rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rip", "rsp", "rbp", "efl"] if x86 else _CTX_REGS + ["efl"]
+        label = (lambda n: _X86_NAMES.get(n, n)) if x86 else (lambda n: n)
         if self.json:
-            print(json.dumps({n: hex(regs[n]) for n in names if n in regs}))
+            print(json.dumps({label(n): hex(regs[n]) for n in names if n in regs}))
             return
         items = [(n, regs.get(n)) for n in names]
+        width = 8 if x86 else 16
         for i in range(0, len(items), 3):
-            print("  " + "   ".join(f"{n:>3}={(v if v is not None else 0):016x}" + ("" if n in known or n in ("rip", "rsp", "efl") else "?")
+            print("  " + "   ".join(f"{label(n):>3}={(v if v is not None else 0) & ((1 << 4 * width) - 1):0{width}x}"
+                                    + ("" if n in known or n in ("rip", "rsp", "efl") else "?")
                                     for n, v in items[i:i + 3]))
         print(f"  ({kd.ctx_label}{', frame %02x' % kd.frame_index if kd.frame_index else ''} ; '?' = registre non restauré)")
 
@@ -4644,7 +5524,7 @@ class DebugCommands:
                 addr = kd.ctx["rip"]
         code = self._mem(addr, count * 15 + 16)
         dis = kd.dis if kd else X64Disassembler()
-        insns = dis.decode_all(code, addr, count)
+        insns = dis.decode_all(code, addr, count, mode32=kd is not None and kd.code_is_x86(addr, self.pid))
         self._print_insns(insns)
         self._u_next = insns[-1].address + insns[-1].length if insns else addr
 
@@ -4686,9 +5566,17 @@ class DebugCommands:
         mod, fe = kd.function_entry(addr, self.pid)
         start = addr
         root = None
+        x86 = kd.code_is_x86(addr, self.pid)
         if mod is not None and fe is not None:
             root = kd._chain_root(mod, addr - mod.base, self.pid)
             start = mod.base + root[1]
+        elif x86 and mod is not None:
+            # x86: no .pdata - the function is the symbol's (its start, and the jumps
+            # that stay inside it)
+            begin = kd._x86_function_start(mod, addr - mod.base, self.pid)
+            if begin is not None:
+                start = mod.base + begin
+                root = (begin, begin)
         # flow analysis from the function entry: follow conditional and unconditional
         # jumps that stay inside the same function (same .pdata root), stop at returns
         seen = {}
@@ -4699,13 +5587,15 @@ class DebugCommands:
                 code = kd.read(a, 16, self.pid)
                 if not code:
                     break
-                ins = kd.dis.decode(code, a)
+                ins = kd.dis.decode(code, a, mode32=x86)
                 seen[a] = ins
                 if ins.kind == "ret" or ins.mnemonic in ("int", "ud2", "???") and ins.operands in ("3", ""):
                     break
                 if ins.kind in ("jcc", "jmp") and ins.target is not None and ins.rip_ref is None:
                     same = True
-                    if mod is not None and root is not None:
+                    if mod is not None and root is not None and x86:
+                        same = kd._x86_function_start(mod, ins.target - mod.base, self.pid) == root[1]
+                    elif mod is not None and root is not None:
                         _m2, fe2 = kd.function_entry(ins.target, self.pid)
                         r2 = kd._chain_root(mod, ins.target - mod.base, self.pid) if fe2 else None
                         same = r2 is not None and r2[1] == root[1]
@@ -5198,12 +6088,12 @@ class WineyeOps:
             else:
                 i = next((n for n, t in enumerate(e.threads) if exc and t["tid"] == exc["tid"]), 0)
             t = e.threads[i]
-            raw = exc["context"] if exc and exc["tid"] == t["tid"] and len(exc["context"]) >= 0x100 else t["context"]
-            regs = parse_context(raw)
+            raw = exc["context"] if exc and exc["tid"] == t["tid"] and len(exc["context"]) >= 0xCC else t["context"]
+            regs = parse_any_context(raw)
             kd.pid = e.pid
             return [{"index": f.index, "rsp": f.rsp, "rip": f.rip, "symbol": f.symbol,
                      "file": f.line[0] if f.line else None, "line": f.line[1] if f.line else None,
-                     "transition": f.note} for f in kd.stack(regs, set(regs), pid=e.pid)]
+                     "transition": f.note, "x86": f.x86} for f in kd.stack(regs, set(regs), pid=e.pid, teb=t["teb"])]
         if thread is not None:
             th = self._int(thread)
             regs, known, _label, info = kd.thread_context(th)
@@ -5217,7 +6107,7 @@ class WineyeOps:
         kd.pid = pid
         return [{"index": f.index, "rsp": f.rsp, "rip": f.rip, "symbol": f.symbol,
                  "file": f.line[0] if f.line else None, "line": f.line[1] if f.line else None,
-                 "transition": f.note} for f in kd.stack(regs, known, pid=pid, thread=th)]
+                 "transition": f.note, "x86": f.x86} for f in kd.stack(regs, known, pid=pid, thread=th)]
 
     def analyze(self):
         kd = self._need_kd()
@@ -5795,7 +6685,9 @@ def main(argv=None):
         except (VmmError, struct.error) as e:
             raise SystemExit(f"[!] {e}")
         print(f"[*] minidump user-mode : {args.dump}", file=log)
-        print(f"[*] {vmm.process(vmm.pid)['name']} (pid {vmm.pid}), Windows build {vmm.build}, "
+        proc = vmm.process(vmm.pid)
+        print(f"[*] {proc['name']} (pid {vmm.pid}"
+              + (", x86" if vmm.x86 else ", WoW64" if proc["wow64"] else "") + f"), Windows build {vmm.build}, "
               f"{len(vmm.threads)} threads, {len(vmm.modules(vmm.pid))} modules"
               + (f", exception {vmm.exception['code']:08x}" if vmm.exception else ""), file=log)
     elif args.engine in ("auto", "vmm"):
