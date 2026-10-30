@@ -441,7 +441,7 @@ How it works:
 
 ## HvKdFusion: Hyper-V kernel debugging and memory forensics
 
-x64dbg stops at user mode. **HvKdFusion** ([`hvkdfusion/`](hvkdfusion/README.md), merged from [EGKrb/HvKdFusion](https://github.com/EGKrb/HvKdFusion)) covers the kernel and the whole memory of a machine — a **live Hyper-V VM** or a **memory image** — by tying together LiveCloudKd (`hvlib.dll`/`hvmm.sys`, Hyper-V guest memory), WinDbg/kd, MemProcFS + LeechCore (+ Dokany to mount memory as a drive) and ntoseye, under one Python CLI. It adds **wineye**, a native WinDbg-style REPL (`ps`, `lm`, `!process`, `x nt!...`, `db/dq`, `dt`, `!vad`, `!handle`, `s`) on `vmm.dll`, without WSL or Dokany, with freeze/resume/registers on a live VM.
+x64dbg stops at user mode. **HvKdFusion** ([`hvkdfusion/`](hvkdfusion/README.md), merged from [EGKrb/HvKdFusion](https://github.com/EGKrb/HvKdFusion)) covers the kernel and the whole memory of a machine — a **live Hyper-V VM** or a **memory image** — by tying together LiveCloudKd (`hvlib.dll`/`hvmm.sys`, Hyper-V guest memory), WinDbg/kd, MemProcFS + LeechCore (+ Dokany to mount memory as a drive) and ntoseye, under one Python CLI. It adds **wineye**, a native WinDbg-style REPL (`ps`, `lm`, `!process`, `x nt!...`, `db/dq`, `dt`, `!vad`, `!handle`, `s`) on `vmm.dll`, without WSL or Dokany, with freeze/resume/registers on a live VM — and a crash-dump debugger (`!analyze -v`, kernel-to-user `k` / `!thread`, `~`, `.cxr`, `.trap`, `u` / `uf`, source lines and `dv` with private PDBs, `.dump /u` minidumps) that opens `.dmp` files even without MemProcFS.
 
 | Command (ExtraCmds) | Effect |
 |---|---|

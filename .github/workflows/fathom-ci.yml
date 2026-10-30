@@ -24,6 +24,8 @@ jobs:
 
       - name: wineye server protocol tests (MCP / DAP / gdb)
         run: python hvkdfusion/tests/test_servers.py
+      - name: wineye debugger tests
+        run: python hvkdfusion/tests/test_debugger.py
 
       - name: HvKdFusion readiness report
         run: python hvkdfusion/hvkdfusion.py check --json

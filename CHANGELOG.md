@@ -6,6 +6,21 @@ branch; this changelog covers Fathom's own additions and branding.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+- **wineye 1.1.0** (`hvkdfusion/wineye.py`) — crash-dump debugger: `!analyze -v`,
+  call stacks from kernel into user mode (`k`, `!thread`, `!process <pid> 7`),
+  processors and contexts (`~`, `.thread`, `.cxr`, `.trap`, `.frame`),
+  disassembly (`u`, `uf`, `ln`), source lines and locals (`dv`) with private
+  PDBs (`--sympath`), user-mode minidumps (`.dump /u`), and a native engine
+  that opens kernel `.dmp` files without MemProcFS. MCP tools `stack`,
+  `analyze`, `disassemble`. Tests in `hvkdfusion/tests/test_debugger.py`.
+
+### Fixed
+- wineye: `vmm.dll` was never initialized (its argument parsing starts at
+  index 0); kernel reads in a KVA-shadowed process context fall back to System.
+
 ## [1.1.0] - 2026-10-29
 
 ### Added

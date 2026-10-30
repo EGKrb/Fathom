@@ -68,6 +68,8 @@ reqs = [
      "params": {"name": "list_processes", "arguments": {}}},
     {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
      "params": {"name": "registers", "arguments": {}}},
+    {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+     "params": {"name": "stack", "arguments": {}}},
 ]
 _in, _out = io.StringIO("".join(json.dumps(r) + "\n" for r in reqs)), io.StringIO()
 _oi, _oo = sys.stdin, sys.stdout
@@ -80,11 +82,14 @@ responses = [json.loads(l) for l in _out.getvalue().splitlines() if l.strip()]
 byid = {r.get("id"): r for r in responses}
 check("initialize -> protocolVersion", byid[1]["result"]["protocolVersion"] == "2024-11-05")
 check("initialized notification -> no response", None not in byid)
-check("tools/list -> 8 tools", len(byid[2]["result"]["tools"]) == 8)
+_tools = {t["name"] for t in byid[2]["result"]["tools"]}
+check("tools/list -> 11 tools", len(_tools) == 11)
+check("tools/list -> debugger tools", {"stack", "analyze", "disassemble"} <= _tools)
 _rm = json.loads(byid[3]["result"]["content"][0]["text"])
 check("tools/call read_memory -> 16 bytes", int(_rm["size"], 0) == 16 and len(bytes.fromhex(_rm["hex"])) == 16)
 check("tools/call list_processes -> 2 procs", len(json.loads(byid[4]["result"]["content"][0]["text"])) == 2)
 check("tools/call registers (no ctl) -> isError", byid[5]["result"].get("isError") is True)
+check("tools/call stack (no debugger layer) -> isError", byid[6]["result"].get("isError") is True)
 
 # ----------------------------- gdb -----------------------------
 print("== gdb (RSP) ==")

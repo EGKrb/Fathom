@@ -112,7 +112,20 @@ WinDbg-style commands on the memory of the target, which is not aware it is bein
 | `s <addr> <len> <hex>` | byte pattern search |
 | `info`, `help`, `q` | summary, help, quit |
 
-Addresses accept `0x..`, decimal and `module!symbol`. On a **live** VM (`--live --vm N`, or `.ctl N` in the REPL), the hvlib control channel adds `freeze`, `resume` / `g` and `r [reg...]` (VP0 registers). There are no breakpoints or single-stepping there: hvlib delivers no trap events. For run control, use `hvkdfusion.py debug` (WinDbg/kd).
+**Debugger** (crash dumps, images, live VMs; Microsoft symbols downloaded, private PDBs with `--sympath`):
+
+| Command | Effect |
+|---|---|
+| `!analyze [-v]` | bugcheck, arguments, faulting context (trap frame / context record), instruction, module / driver, stack |
+| `k [n]`, `!thread [ethread]`, `!process <pid> 7` | call stacks, kernel then user mode across the system call; source lines with a private PDB |
+| `~`, `~<n>`, `.thread`, `.cxr [addr]`, `.trap <addr>`, `r`, `.frame [n]` | processors and register contexts |
+| `u [addr] [L<n>]`, `uf <func>`, `ln <addr>` | disassembly (WinDbg syntax), whole function, nearest symbol |
+| `dv` | parameters and locals of the selected frame (private PDB) |
+| `.dump /u [pid] <file>` | user-mode minidump of a process, for WinDbg / Visual Studio |
+
+Kernel crash dumps (`.dmp`) also open without MemProcFS (`--engine native`, automatic when `vmm.dll` is missing). Full documentation: [EGKrb/wineye](https://github.com/EGKrb/wineye).
+
+Addresses are hexadecimal by default as in WinDbg (`0x..` too, `0n` for decimal), with registers and `module!symbol`. On a **live** VM (`--live --vm N`, or `.ctl N` in the REPL), the hvlib control channel adds `freeze`, `resume` / `g` and `r [reg...]` (VP0 registers). There are no breakpoints or single-stepping there: hvlib delivers no trap events. For run control, use `hvkdfusion.py debug` (WinDbg/kd).
 
 `wineye.py` can also be imported from Python (`Vmm` class) — e.g. next to a [pybridge](../pybridge/README.md) script, to compare what a process sees with what the kernel holds.
 
@@ -122,9 +135,9 @@ The modes ntoseye exposes — now native Windows, no WSL. They run instead of th
 
 | Mode | Command | Use |
 |---|---|---|
-| **MCP** | `wineye --dump d.raw --serve mcp` | MCP server (JSON-RPC 2.0 over stdio) for an AI/agent client. Tools: `list_processes`, `process_info`, `list_modules`, `list_handles`, `list_vads`, `read_memory`, `resolve_symbol`, `registers`. |
+| **MCP** | `wineye --dump d.raw --serve mcp` | MCP server (JSON-RPC 2.0 over stdio) for an AI/agent client. Tools: `list_processes`, `process_info`, `list_modules`, `list_handles`, `list_vads`, `read_memory`, `resolve_symbol`, `registers`, `stack`, `analyze`, `disassemble`. |
 | **gdbserver** | `wineye --dump d.raw --serve gdb [--listen 127.0.0.1:2159]` | GDB Remote Serial Protocol over TCP. From GDB: `target remote 127.0.0.1:2159`, then read memory (`x/16xg <addr>`) and, on a live VM, `info registers`. |
-| **DAP** | `wineye --dump d.raw --serve dap [--listen 127.0.0.1:4711]` | Debug Adapter Protocol (stdio, or TCP with `--listen`) for an IDE: `modules`, `readMemory`, `evaluate module!symbol`. |
+| **DAP** | `wineye --dump d.raw --serve dap [--listen 127.0.0.1:4711]` | Debug Adapter Protocol (stdio, or TCP with `--listen`) for an IDE: `modules`, `stackTrace`, `readMemory`, `evaluate module!symbol`. |
 
 Example — register wineye as an MCP server (e.g. in an MCP client config):
 
@@ -206,7 +219,7 @@ Fathom releases ship ntoseye's Linux x86_64 build in `ntoseye\` next to `hvkdfus
 
 ```
 hvkdfusion.py        CLI: setup, check, list, read, write, dump, resume, debug, mount, ntoseye, wineye, menu
-wineye.py            WinDbg-style REPL on vmm.dll (ctypes)
+wineye.py            WinDbg-style REPL and crash-dump debugger (vmm.dll or native)
 hvkd.ps1             launcher with automatic elevation (used by the x64dbg 'hvkd' command)
 config.example.json  configuration keys; setup writes config.json (local paths, not versioned)
 plugin_build/        LiveCloudKd hvlib headers + hvlib.lib, to build the hvmm LeechCore plugin
