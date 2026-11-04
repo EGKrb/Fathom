@@ -8,6 +8,7 @@
 #include "variable.h"
 #include "TraceRecord.h"
 #include "TraceExport.h"
+#include "ftt/ftt.h"
 
 extern std::vector<std::pair<duint, duint>> RunToUserCodeBreakpoints;
 
@@ -248,8 +249,59 @@ bool cbDebugTraceExport(int argc, char* argv[])
 {
     if(IsArgumentsLessThan(argc, 3))
         return false;
+    // TraceExport trace, output[, format][, slide][, key=value...]
+    TraceExportOptions options;
+    String formatName;
+    bool slideGiven = false;
+    for(int i = 3; i < argc; i++)
+    {
+        String arg = argv[i];
+        auto equal = arg.find('=');
+        String key = equal == String::npos ? "" : StringUtils::ToLower(StringUtils::Trim(arg.substr(0, equal)));
+        String value = equal == String::npos ? arg : StringUtils::Trim(arg.substr(equal + 1));
+        duint number = 0;
+        if(key.empty() && i == 3)
+            formatName = StringUtils::ToLower(value);
+        else if((key.empty() && i == 4) || key == "slide")
+        {
+            if(!valfromstring(value.c_str(), &number, false))
+            {
+                dprintf(QT_TRANSLATE_NOOP("DBG", "Invalid expression \"%s\"\n"), value.c_str());
+                return false;
+            }
+            options.slide = number;
+            slideGiven = true;
+        }
+        else if(key == "format")
+            formatName = StringUtils::ToLower(value);
+        else if(key == "regs" || key == "registers")
+        {
+            if(!ftt::ParseLevels(value, options.registers))
+            {
+                dprintf(QT_TRANSLATE_NOOP("DBG", "Unknown register level \"%s\", use gpr, fpu, sse, avx, all or a combination such as fpu+sse\n"), value.c_str());
+                return false;
+            }
+        }
+        else if(key == "thread" || key == "snapshot")
+        {
+            if(!valfromstring(value.c_str(), &number, false) || number > 0xFFFFFFFF)
+            {
+                dprintf(QT_TRANSLATE_NOOP("DBG", "Invalid expression \"%s\"\n"), value.c_str());
+                return false;
+            }
+            if(key == "thread")
+                options.thread = (uint32_t)number;
+            else
+                options.snapshotInterval = (uint32_t)number;
+        }
+        else
+        {
+            dprintf(QT_TRANSLATE_NOOP("DBG", "Unknown argument \"%s\" (options: regs=, thread=, snapshot=, slide=)\n"), argv[i]);
+            return false;
+        }
+    }
+
     TraceExportFormat format = TraceExportFormat::Json;
-    String formatName = StringUtils::ToLower(argc > 3 ? argv[3] : "");
     if(formatName.empty())
     {
         auto outputName = StringUtils::ToLower(argv[2]);
@@ -257,6 +309,8 @@ bool cbDebugTraceExport(int argc, char* argv[])
             format = TraceExportFormat::Csv;
         else if(StringUtils::EndsWith(outputName, ".tenet")) // extension used by the Frinet tracer
             format = TraceExportFormat::Frinet;
+        else if(StringUtils::EndsWith(outputName, ".ftt"))
+            format = TraceExportFormat::Ftt;
     }
     else if(formatName == "csv")
         format = TraceExportFormat::Csv;
@@ -264,29 +318,21 @@ bool cbDebugTraceExport(int argc, char* argv[])
         format = TraceExportFormat::Tenet;
     else if(formatName == "frinet")
         format = TraceExportFormat::Frinet;
+    else if(formatName == "ftt")
+        format = TraceExportFormat::Ftt;
     else if(formatName != "json")
     {
-        dprintf(QT_TRANSLATE_NOOP("DBG", "Unknown export format \"%s\", use \"json\", \"csv\", \"tenet\" or \"frinet\"\n"), argv[3]);
+        dprintf(QT_TRANSLATE_NOOP("DBG", "Unknown export format \"%s\", use \"json\", \"csv\", \"tenet\", \"frinet\" or \"ftt\"\n"), formatName.c_str());
+        return false;
+    }
+    if(slideGiven && format != TraceExportFormat::Frinet)
+    {
+        dputs(QT_TRANSLATE_NOOP("DBG", "The slide argument is only used by the frinet format"));
         return false;
     }
 
-    duint slide = 0;
-    if(argc > 4)
-    {
-        if(format != TraceExportFormat::Frinet)
-        {
-            dputs(QT_TRANSLATE_NOOP("DBG", "The slide argument is only used by the frinet format"));
-            return false;
-        }
-        if(!valfromstring(argv[4], &slide, false))
-        {
-            dprintf(QT_TRANSLATE_NOOP("DBG", "Invalid expression \"%s\"\n"), argv[4]);
-            return false;
-        }
-    }
-
     TraceExportResult result;
-    if(!TraceExportFile(argv[1], argv[2], format, result, slide))
+    if(!TraceExportFile(argv[1], argv[2], format, result, options))
     {
         dprintf(QT_TRANSLATE_NOOP("DBG", "Trace export failed: %s\n"), result.error.c_str());
         return false;
@@ -301,6 +347,9 @@ bool cbDebugTraceExport(int argc, char* argv[])
             dputs(QT_TRANSLATE_NOOP("DBG", "No ASLR slide written (pass it as the 4th argument, for example mod.main())"));
     }
     varset("$result", result.count, false);
-    dprintf(QT_TRANSLATE_NOOP("DBG", "Exported %llu instructions to %s\n"), (unsigned long long)result.count, argv[2]);
+    dprintf(QT_TRANSLATE_NOOP("DBG", "Exported %llu instructions (%llu threads, %llu context switches) to %s\n"), (unsigned long long)result.count,
+            (unsigned long long)result.threads, (unsigned long long)result.switches, argv[2]);
+    if(format == TraceExportFormat::Ftt)
+        dprintf(QT_TRANSLATE_NOOP("DBG", "%llu memory snapshots\n"), (unsigned long long)result.snapshots);
     return true;
 }

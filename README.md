@@ -6,7 +6,8 @@
 
 **Fathom** — a Windows reverse-engineering and memory-forensics toolkit, from a single instruction to the whole machine. It is **built on [x64dbg](https://github.com/x64dbg/x64dbg)** (GPL-3.0), the open-source Windows debugger (malware analysis, reverse-engineering of executables without source code), tracks its official `development` branch, and adds, for **malware triage, reverse-engineering and CTF**:
 
-- **`TraceExport`** — turn execution traces into readable **JSON** or **CSV** that any tool can parse, or into **Tenet** / **Frinet** text traces to explore them in IDA Pro;
+- **`TraceExport`** — turn execution traces into readable **JSON** or **CSV** that any tool can parse, into **Tenet** / **Frinet** text traces to explore them in IDA Pro, or into the indexed, compressed **`.ftt`** format with per-thread timelines and memory snapshots;
+- a **Time Travel** tab and `tt.*` commands — navigate a trace **backward and forward** without leaving the debugger: any thread at any instant, registers, memory rebuilt at that instant, who wrote this address;
 - **pybridge** — drive Fathom **from Python** (breakpoints, single-stepping, registers, memory, traces);
 - ready-to-use **script templates** for **`headless.exe`** (Fathom with no GUI);
 - a **memory dump viewer** (`.dmp`) and handy commands: **`.init`** (executable or dump), **`.save`**, **`scylla_hide.enable` / `.disable` / `.status`**;
@@ -70,14 +71,15 @@ TraceExport C:\traces\sample.trace64, C:\traces\sample.json
 2. [Differences from official x64dbg](#differences-from-official-x64dbg)
 3. [How x64dbg works](#how-x64dbg-works)
 4. [TraceExport: exporting traces](#traceexport-exporting-traces)
-5. [pybridge: driving x64dbg from Python](#pybridge-driving-x64dbg-from-python)
-6. [Templates for headless.exe](#templates-for-headlessexe)
-7. [Added commands and memory dumps](#added-commands-and-memory-dumps)
-8. [HvKdFusion: Hyper-V kernel debugging and memory forensics](#hvkdfusion-hyper-v-kernel-debugging-and-memory-forensics)
-9. [Bundled plugins](#bundled-plugins)
-10. [Building it yourself](#building-it-yourself)
-11. [Repository layout](#repository-layout)
-12. [Licenses and credits](#licenses-and-credits)
+5. [Time Travel: exploring a trace backward](#time-travel-exploring-a-trace-backward)
+6. [pybridge: driving x64dbg from Python](#pybridge-driving-x64dbg-from-python)
+7. [Templates for headless.exe](#templates-for-headlessexe)
+8. [Added commands and memory dumps](#added-commands-and-memory-dumps)
+9. [HvKdFusion: Hyper-V kernel debugging and memory forensics](#hvkdfusion-hyper-v-kernel-debugging-and-memory-forensics)
+10. [Bundled plugins](#bundled-plugins)
+11. [Building it yourself](#building-it-yourself)
+12. [Repository layout](#repository-layout)
+13. [Licenses and credits](#licenses-and-credits)
 
 ---
 
@@ -122,11 +124,12 @@ A second file, `Fathom_<version>_symbols.zip`, contains the debug symbols (`.pdb
 | | Official x64dbg | This fork |
 |---|---|---|
 | Code base | published releases (e.g. 2026.05.27) | recent `development` branch (features and fixes not yet in an official release) |
-| Trace export | binary `.trace64`, readable only by x64dbg; CSV export only from the GUI | `TraceExport` command → JSON, CSV, Tenet or Frinet, also in scripts and `headless.exe` |
+| Trace export | binary `.trace64`, readable only by x64dbg; CSV export only from the GUI | `TraceExport` command → JSON, CSV, Tenet, Frinet or `.ftt`, extended registers, per-thread timelines, also in scripts and `headless.exe` |
+| Time travel | trace view (forward list of instructions) | Time Travel tab and `tt.*` commands: any thread at any instant, memory rebuilt at that instant, previous execution / write |
 | Automation | x64dbg script language, C/C++ SDK | + Python client (pybridge) + headless templates with a launcher |
 | Memory dumps (`.dmp`) | creation only (`minidump`) | + dump viewer (`minidump.exe`), opened with `.init file.dmp`; kernel dumps and raw memory images open in wineye |
 | Kernel / whole machine | — (user-mode only) | HvKdFusion: Hyper-V VM memory read/write/dump, WinDbg/kd on a VM, MemProcFS mount, wineye REPL (`hvkd`, `wineye`) |
-| Commands | — | `.init`, `.save`, `scylla_hide.enable` / `.disable` / `.status`, `hvkd`, `hvkd.log`, `hvkd.check`, `wineye` (ExtraCmds plugin) |
+| Commands | — | `.init`, `.save`, `scylla_hide.enable` / `.disable` / `.status`, `hvkd`, `hvkd.log`, `hvkd.check`, `wineye`, `tt.*` (ExtraCmds plugin) |
 | Plugins | none | ScyllaHide and xAnalyzer bundled, pybridge and ExtraCmds bundled, OllyDumpEx via `install-plugins.ps1` |
 | Build | — | fixes a `using namespace std` that broke the *unity build* (`patternfind.cpp`) |
 
@@ -177,15 +180,18 @@ For each instruction, x64dbg writes to the `.trace64` file: the thread, the inst
 ## TraceExport: exporting traces
 
 ```
-TraceExport trace_file, output_file[, format[, slide]]
+TraceExport trace_file, output_file[, format[, slide]][, regs=...][, thread=...][, snapshot=...]
 ```
 
 | Argument | Description |
 |---|---|
-| `trace_file` | trace to read: `.trace64` with x64dbg, `.trace32` with x32dbg |
+| `trace_file` | trace to read: `.trace64` with x64dbg, `.trace32` with x32dbg, or a `.ftt` |
 | `output_file` | created file (overwritten if it exists) |
-| `format` | `json`, `csv`, `tenet` or `frinet`. Without this 3rd argument: `csv` if the name ends in `.csv`, `frinet` if it ends in `.tenet`, otherwise `json` |
+| `format` | `json`, `csv`, `tenet`, `frinet` or `ftt`. Without this 3rd argument: `csv` if the name ends in `.csv`, `frinet` if it ends in `.tenet`, `ftt` if it ends in `.ftt`, otherwise `json` |
 | `slide` | `frinet` only, optional: ASLR slide (runtime base of the traced module, e.g. `mod.main()`). Default: base of the debugged module if the trace belongs to it, otherwise none |
+| `regs=` | registers written by `json`, `csv` and `ftt` (verbosity): `gpr` (default), `fpu` (x87), `sse` (xmm, mxcsr), `avx` (+ upper ymm halves), `all`, or `fpu+sse`… |
+| `thread=` | export only that thread's timeline (e.g. `thread=tid()`) |
+| `snapshot=` | `ftt`: instructions between two memory snapshots (default `.65536`) |
 
 After the command, **`$result`** holds the number of exported instructions. The command **does not need a process being debugged**: it also works to convert old traces, and inside `headless.exe`.
 
@@ -248,24 +254,84 @@ rip=0x7ff7fa51128c,rax=0x7ff7fa51128c,…,rsp=0xcee90fff20,…
 rip=0x7ff7fa511290,rsp=0xcee90fff18,mr=0xcee90fff20:0000000000000000,mw=0xcee90fff18:951251faf77f0000
 ```
 
-Limits: x64dbg stores each memory access as one pointer-sized value, so an access may cover more bytes than the operand; a multi-thread trace is written as a single timeline; in `tenet`, the memory of the last instruction is lost (no following line), and in `frinet` the registers after the last instruction (or before a thread switch) are unknown.
+Limits: x64dbg stores each memory access as one pointer-sized value, so an access may cover more bytes than the operand; a multi-thread trace is written as a single timeline in the text formats unless `thread=` selects one (the `.ftt` format keeps one timeline per thread); in `tenet`, the memory of the last instruction is lost (no following line), and in `frinet` the registers after the last instruction (or before a thread switch) are unknown.
 
 ### How it works internally
 
 [`src/dbg/TraceExport.cpp`](src/dbg/TraceExport.cpp) streams the file (constant memory, whatever the trace size):
 
-1. checks the `TRAC` header and its JSON (version 1, same architecture as the debugger);
+1. checks the `TRAC` header and its JSON (version 1, same architecture as the debugger), or opens a `.ftt` through its index;
 2. for each instruction block, applies the changed registers to the current state (registers are delta-encoded), reads the memory accesses, then disassembles the bytes;
-3. skips user blocks (type ≥ 0x80) allowed by the format;
-4. writes the JSON, CSV, Tenet or Frinet output as it goes (Tenet/Frinet keep the previous instruction to place memory accesses and post-execution registers on the right line).
+3. reads the context-switch markers (user block 0x81) and skips the other user blocks (type ≥ 0x80) allowed by the format;
+4. writes the JSON, CSV, Tenet, Frinet or `.ftt` output as it goes (Tenet/Frinet keep the previous instruction to place memory accesses and post-execution registers on the right line; `.ftt` buffers one chunk per thread and writes the memory snapshots and the index).
 
 Safety: an output file identical to the input file is refused (it would be overwritten); a trace **still being recorded** can be exported, its incomplete last block is skipped with a warning; a corrupt file gives a precise message stating after how many instructions.
 
-Limits: only general registers, the instruction pointer and flags are exported (not SSE/AVX/x87 registers, even though they are present in the trace); a 32-bit trace must be exported with x32dbg and vice versa.
+Limits: Tenet and Frinet only get the general registers (the other registers need `json`, `csv` or `ftt` with `regs=`); a 32-bit trace must be exported with x32dbg and vice versa.
 
 Command docs: [`docs/commands/tracing/TraceExport.md`](docs/commands/tracing/TraceExport.md). Automated test: [`src/tests/trace_export/`](src/tests/trace_export).
 
 ---
+
+## Time Travel: exploring a trace backward
+
+A trace converted to the **`.ftt`** format (Fathom Time Travel, [`docs/developers/ftt.md`](docs/developers/ftt.md)) can be explored backward and forward **inside the debugger**, like a time-travel debugging session:
+
+```
+StartTraceRecording "C:\traces\target.trace64"
+TraceIntoConditional 0, .100000
+StopTraceRecording
+TraceExport "C:\traces\target.trace64", "C:\traces\target.ftt", ftt, regs=all
+tt.open "C:\traces\target.ftt"        // or open it from the Time Travel tab
+```
+
+What the format stores:
+
+- **one timeline per thread**, synchronized by a global sequence number, so the state of every thread is known at any instant and you can jump from one thread to another at instant T;
+- explicit **context-switch markers** (timestamped when the recorder wrote them);
+- **strict deltas**: a full register keyframe per chunk, then only the registers that changed, and only the memory content not already known;
+- **memory snapshots** at regular intervals (`snapshot=`), so the memory at any instant is rebuilt from the last snapshot plus a bounded replay;
+- **LZ4-compressed chunks and an index** at the end of the file, for direct access to any instruction;
+- the **registers at the verbosity you choose** (`regs=gpr`, `fpu`, `sse`, `avx`, `all`).
+
+### Time Travel tab (GUI)
+
+The 64-bit ExtraCmds plugin built with Qt adds a **Time Travel** tab:
+
+- **Open a trace…** — a `.ftt`, or a `.trace64` / `.trace32` recorded by x64dbg (converted on the fly with every register);
+- **per-thread timelines**: one lane per thread, the red line is the position; click a lane to see **that thread at that instant**;
+- navigation: start / end, previous / next instruction **of all threads** (◀◀ ▶▶) or **of the viewed thread** (◀ ▶), go to instruction n;
+- the **instructions around the position** (context switches highlighted, optionally the viewed thread only), double-click to go there;
+- the viewed thread's **registers**, changes made by its previous instruction in red, general purpose / x87 / SSE / all;
+- the **memory at that instant** (address or register, `csp` by default): `??` unknown, lowercase = value read later (inferred);
+- **previous / next execution** of an address, **previous / next write** to an address (the "who wrote this?" question);
+- **Show in CPU** when the process being debugged is the one the trace was recorded from.
+
+Nothing touches the debugged process: the tab only reads the trace.
+
+### Commands
+
+The same navigation in scripts and `headless.exe` (ExtraCmds, also in the 32-bit and Qt-less builds); the tab follows the commands. `$result` is set to the position (or to the value read).
+
+| Command | Effect |
+|---|---|
+| `tt.open file` / `tt.close` / `tt.info` | open a `.ftt` (or convert a `.trace64`), close it, summary and threads |
+| `tt.seek n` | go to instruction n (global sequence number) |
+| `tt.next [n]` / `tt.prev [n]` | n instructions forward / backward, all threads |
+| `tt.tnext [n]` / `tt.tprev [n]` | n instructions forward / backward in the viewed thread |
+| `tt.thread tid` | view another thread at the same instant |
+| `tt.regs [all]` | the viewed thread's registers (`*` = changed); `$result` = instruction pointer |
+| `tt.mem address[, size]` | memory at that instant; `$result` = first pointer-sized value |
+| `tt.find address` / `tt.findback address` | next / previous execution of an address |
+| `tt.write address[, size]` / `tt.writenext ...` | previous / next write to memory |
+| `tt.show` | bring the Time Travel tab to the front |
+
+### Recording
+
+Traces still come from x64dbg's recorder (single-stepping, `StartTraceRecording`), which now writes a timestamped context-switch marker when the next instruction runs on another thread. A recorder based on dynamic binary instrumentation or on Intel PT is not included: Intel PT needs an Intel processor and a kernel driver.
+
+---
+
 
 ## pybridge: driving x64dbg from Python
 

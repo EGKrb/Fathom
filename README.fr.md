@@ -8,7 +8,8 @@
 
 **Fathom** — une boîte à outils Windows de rétro-ingénierie et de forensic mémoire, de l'instruction isolée à la machine entière. Elle est **construite sur [x64dbg](https://github.com/x64dbg/x64dbg)** (GPL-3.0), le débogueur open source pour Windows (analyse de malwares, rétro-ingénierie d'exécutables sans code source), dont elle reprend la branche `development` officielle, et ajoute :
 
-- **`TraceExport`** : conversion des traces d'exécution en **JSON** ou **CSV** lisibles par n'importe quel outil, ou en traces texte **Tenet** / **Frinet** pour les explorer dans IDA Pro ;
+- **`TraceExport`** : conversion des traces d'exécution en **JSON** ou **CSV** lisibles par n'importe quel outil, en traces texte **Tenet** / **Frinet** pour les explorer dans IDA Pro, ou au format **`.ftt`** indexé et compressé, avec une chronologie par thread et des instantanés mémoire ;
+- un onglet **Time Travel** et les commandes `tt.*` : naviguer dans une trace **en arrière comme en avant** sans quitter le débogueur — n'importe quel thread à n'importe quel instant, registres, mémoire reconstruite à cet instant, qui a écrit à cette adresse ;
 - **pybridge** : pilotage complet d'x64dbg **depuis Python** (breakpoints, pas à pas, registres, mémoire, traces) ;
 - des **modèles de scripts** prêts à l'emploi pour **`headless.exe`** (x64dbg sans interface) ;
 - un **visualiseur de dumps mémoire** (`.dmp`) et des commandes pratiques : **`.init`** (exécutable ou dump), **`.save`**, **`scylla_hide.enable` / `.disable` / `.status`** ;
@@ -31,14 +32,15 @@ Récupérez **`Fathom_<version>.zip`** depuis la [dernière release](https://git
 2. [Différences avec x64dbg officiel](#différences-avec-x64dbg-officiel)
 3. [Comment fonctionne x64dbg](#comment-fonctionne-x64dbg)
 4. [TraceExport : exporter les traces](#traceexport--exporter-les-traces)
-5. [pybridge : piloter x64dbg depuis Python](#pybridge--piloter-x64dbg-depuis-python)
-6. [Modèles pour headless.exe](#modèles-pour-headlessexe)
-7. [Commandes ajoutées et dumps mémoire](#commandes-ajoutées-et-dumps-mémoire)
-8. [HvKdFusion : débogage noyau et forensics mémoire Hyper-V](#hvkdfusion--débogage-noyau-et-forensics-mémoire-hyper-v)
-9. [Plugins inclus](#plugins-inclus)
-10. [Compiler soi-même](#compiler-soi-même)
-11. [Organisation du dépôt](#organisation-du-dépôt)
-12. [Licences et crédits](#licences-et-crédits)
+5. [Time Travel : explorer une trace à reculons](#time-travel--explorer-une-trace-à-reculons)
+6. [pybridge : piloter x64dbg depuis Python](#pybridge--piloter-x64dbg-depuis-python)
+7. [Modèles pour headless.exe](#modèles-pour-headlessexe)
+8. [Commandes ajoutées et dumps mémoire](#commandes-ajoutées-et-dumps-mémoire)
+9. [HvKdFusion : débogage noyau et forensics mémoire Hyper-V](#hvkdfusion--débogage-noyau-et-forensics-mémoire-hyper-v)
+10. [Plugins inclus](#plugins-inclus)
+11. [Compiler soi-même](#compiler-soi-même)
+12. [Organisation du dépôt](#organisation-du-dépôt)
+13. [Licences et crédits](#licences-et-crédits)
 
 ---
 
@@ -83,11 +85,12 @@ Un second fichier, `Fathom_<version>_symbols.zip`, contient les symboles de déb
 | | x64dbg officiel | Ce fork |
 |---|---|---|
 | Code de base | releases publiées (ex. 2026.05.27) | branche `development` récente (fonctionnalités et correctifs pas encore publiés officiellement) |
-| Export des traces | binaire `.trace64` lisible uniquement par x64dbg ; export CSV possible seulement dans l'interface | commande `TraceExport` → JSON, CSV, Tenet ou Frinet, aussi en script et dans `headless.exe` |
+| Export des traces | binaire `.trace64` lisible uniquement par x64dbg ; export CSV possible seulement dans l'interface | commande `TraceExport` → JSON, CSV, Tenet, Frinet ou `.ftt`, registres étendus, chronologies par thread, aussi en script et dans `headless.exe` |
+| Time travel | vue des traces (liste des instructions, vers l'avant) | onglet Time Travel et commandes `tt.*` : n'importe quel thread à n'importe quel instant, mémoire reconstruite, exécution / écriture précédente |
 | Automatisation | langage de script x64dbg, SDK C/C++ | + client Python (pybridge) + modèles headless avec lanceur |
 | Dumps mémoire (`.dmp`) | création seulement (`minidump`) | + visualiseur de dumps (`minidump.exe`), ouvert par `.init fichier.dmp` ; les dumps noyau et images mémoire brutes s'ouvrent dans wineye |
 | Noyau / machine entière | — (mode utilisateur seulement) | HvKdFusion : lecture/écriture/dump de la mémoire d'une VM Hyper-V, WinDbg/kd sur une VM, montage MemProcFS, REPL wineye (`hvkd`, `wineye`) |
-| Commandes | — | `.init`, `.save`, `scylla_hide.enable` / `.disable` / `.status`, `hvkd`, `hvkd.log`, `hvkd.check`, `wineye` (plugin ExtraCmds) |
+| Commandes | — | `.init`, `.save`, `scylla_hide.enable` / `.disable` / `.status`, `hvkd`, `hvkd.log`, `hvkd.check`, `wineye`, `tt.*` (plugin ExtraCmds) |
 | Plugins | aucun | ScyllaHide et xAnalyzer inclus, pybridge et ExtraCmds inclus, OllyDumpEx via `install-plugins.ps1` |
 | Compilation | — | correctif d'un `using namespace std` qui cassait le *unity build* (`patternfind.cpp`) |
 
@@ -138,15 +141,18 @@ Pour chaque instruction, x64dbg écrit dans le fichier `.trace64` : le thread, l
 ## TraceExport : exporter les traces
 
 ```
-TraceExport fichier_trace, fichier_sortie[, format[, slide]]
+TraceExport fichier_trace, fichier_sortie[, format[, slide]][, regs=...][, thread=...][, snapshot=...]
 ```
 
 | Argument | Description |
 |---|---|
-| `fichier_trace` | trace à lire : `.trace64` avec x64dbg, `.trace32` avec x32dbg |
+| `fichier_trace` | trace à lire : `.trace64` avec x64dbg, `.trace32` avec x32dbg, ou un `.ftt` |
 | `fichier_sortie` | fichier créé (écrasé s'il existe) |
-| `format` | `json`, `csv`, `tenet` ou `frinet`. Sans ce 3e argument : `csv` si le nom se termine par `.csv`, `frinet` s'il se termine par `.tenet`, sinon `json` |
+| `format` | `json`, `csv`, `tenet`, `frinet` ou `ftt`. Sans ce 3e argument : `csv` si le nom se termine par `.csv`, `frinet` s'il se termine par `.tenet`, `ftt` s'il se termine par `.ftt`, sinon `json` |
 | `slide` | `frinet` uniquement, facultatif : décalage ASLR (base du module tracé à l'exécution, par ex. `mod.main()`). Par défaut : base du module débogué si la trace lui appartient, sinon aucun |
+| `regs=` | registres écrits par `json`, `csv` et `ftt` (niveau de détail) : `gpr` (défaut), `fpu` (x87), `sse` (xmm, mxcsr), `avx` (+ moitiés hautes des ymm), `all`, ou `fpu+sse`… |
+| `thread=` | n'exporter que la chronologie de ce thread (par ex. `thread=tid()`) |
+| `snapshot=` | `ftt` : instructions entre deux instantanés mémoire (`.65536` par défaut) |
 
 Après la commande, **`$result`** contient le nombre d'instructions exportées. La commande **n'a pas besoin d'un processus en cours de débogage** : elle fonctionne aussi pour convertir des traces anciennes, et dans `headless.exe`.
 
@@ -209,24 +215,84 @@ rip=0x7ff7fa51128c,rax=0x7ff7fa51128c,…,rsp=0xcee90fff20,…
 rip=0x7ff7fa511290,rsp=0xcee90fff18,mr=0xcee90fff20:0000000000000000,mw=0xcee90fff18:951251faf77f0000
 ```
 
-Limites : x64dbg enregistre chaque accès mémoire comme une valeur de la taille d'un pointeur, un accès peut donc couvrir plus d'octets que l'opérande ; une trace multi-thread est écrite comme une seule chronologie ; en `tenet`, la mémoire de la dernière instruction est perdue (pas de ligne suivante), et en `frinet` les registres après la dernière instruction (ou avant un changement de thread) sont inconnus.
+Limites : x64dbg enregistre chaque accès mémoire comme une valeur de la taille d'un pointeur, un accès peut donc couvrir plus d'octets que l'opérande ; une trace multi-thread est écrite comme une seule chronologie dans les formats texte, sauf si `thread=` en choisit une (le format `.ftt` garde une chronologie par thread) ; en `tenet`, la mémoire de la dernière instruction est perdue (pas de ligne suivante), et en `frinet` les registres après la dernière instruction (ou avant un changement de thread) sont inconnus.
 
 ### Fonctionnement interne
 
 [`src/dbg/TraceExport.cpp`](src/dbg/TraceExport.cpp) lit le fichier en continu (mémoire constante, quelle que soit la taille de la trace) :
 
-1. vérifie l'en-tête `TRAC` et son JSON (version 1, architecture identique à celle du débogueur) ;
+1. vérifie l'en-tête `TRAC` et son JSON (version 1, architecture identique à celle du débogueur), ou ouvre un `.ftt` par son index ;
 2. pour chaque bloc d'instruction, applique les registres modifiés à l'état courant (les registres sont encodés par différence), lit les accès mémoire, puis désassemble les octets ;
-3. ignore les blocs utilisateur (type ≥ 0x80) prévus par le format ;
-4. écrit le JSON, le CSV, la trace Tenet ou Frinet au fil de l'eau (Tenet/Frinet gardent l'instruction précédente pour placer les accès mémoire et les registres après exécution sur la bonne ligne).
+3. lit les marqueurs de changement de contexte (bloc utilisateur 0x81) et ignore les autres blocs utilisateur (type ≥ 0x80) prévus par le format ;
+4. écrit le JSON, le CSV, la trace Tenet, Frinet ou le `.ftt` au fil de l'eau (Tenet/Frinet gardent l'instruction précédente pour placer les accès mémoire et les registres après exécution sur la bonne ligne ; `.ftt` garde un bloc par thread et écrit les instantanés mémoire et l'index).
 
 Sécurités : un fichier de sortie identique au fichier d'entrée est refusé (il serait écrasé) ; une trace **en cours d'enregistrement** peut être exportée, son dernier bloc incomplet est ignoré avec un avertissement ; un fichier corrompu donne un message précis indiquant après combien d'instructions.
 
-Limites : seuls les registres généraux, le pointeur d'instruction et les drapeaux sont exportés (pas les registres SSE/AVX/x87, pourtant présents dans la trace) ; une trace 32 bits doit être exportée avec x32dbg et inversement.
+Limites : Tenet et Frinet ne reçoivent que les registres généraux (les autres registres passent par `json`, `csv` ou `ftt` avec `regs=`) ; une trace 32 bits doit être exportée avec x32dbg et inversement.
 
 Documentation de la commande : [`docs/commands/tracing/TraceExport.md`](docs/commands/tracing/TraceExport.md). Test automatique : [`src/tests/trace_export/`](src/tests/trace_export).
 
 ---
+
+## Time Travel : explorer une trace à reculons
+
+Une trace convertie au format **`.ftt`** (Fathom Time Travel, [`docs/developers/ftt.md`](docs/developers/ftt.md)) s'explore en arrière comme en avant **sans quitter le débogueur**, comme une session de débogage « time travel » :
+
+```
+StartTraceRecording "C:\traces\cible.trace64"
+TraceIntoConditional 0, .100000
+StopTraceRecording
+TraceExport "C:\traces\cible.trace64", "C:\traces\cible.ftt", ftt, regs=all
+tt.open "C:\traces\cible.ftt"          // ou l'ouvrir depuis l'onglet Time Travel
+```
+
+Ce que le format enregistre :
+
+- **une chronologie par thread**, synchronisées par un numéro de séquence global : l'état de chaque thread est connu à tout instant, et l'on peut sauter d'un thread à l'autre à un instant T ;
+- des **marqueurs de changement de contexte** explicites (horodatés quand l'enregistreur les a écrits) ;
+- des **deltas stricts** : une image complète des registres par bloc, puis seulement les registres modifiés, et seulement le contenu mémoire pas encore connu ;
+- des **instantanés mémoire** à intervalles réguliers (`snapshot=`) : la mémoire à n'importe quel instant se reconstruit depuis le dernier instantané plus un rejeu borné ;
+- des **blocs compressés LZ4 et un index** en fin de fichier, pour accéder directement à n'importe quelle instruction ;
+- les **registres au niveau de détail choisi** (`regs=gpr`, `fpu`, `sse`, `avx`, `all`).
+
+### Onglet Time Travel (GUI)
+
+Le plugin ExtraCmds 64 bits compilé avec Qt ajoute un onglet **Time Travel** :
+
+- **Ouvrir une trace…** : un `.ftt`, ou une `.trace64` / `.trace32` enregistrée par x64dbg (convertie à la volée avec tous les registres) ;
+- **chronologies par thread** : une piste par thread, la ligne rouge est la position ; un clic sur une piste montre **ce thread à cet instant** ;
+- navigation : début / fin, instruction précédente / suivante **de tous les threads** (◀◀ ▶▶) ou **du thread affiché** (◀ ▶), aller à l'instruction n ;
+- les **instructions autour de la position** (changements de contexte surlignés, au besoin le thread affiché seul), double-clic pour s'y rendre ;
+- les **registres** du thread affiché, en rouge ceux modifiés par son instruction précédente, généraux / x87 / SSE / tous ;
+- la **mémoire à cet instant** (adresse ou registre, `csp` par défaut) : `??` inconnu, minuscules = valeur lue plus tard (déduite) ;
+- **exécution précédente / suivante** d'une adresse, **écriture précédente / suivante** à une adresse (« qui a écrit ça ? ») ;
+- **Afficher dans le CPU** quand le processus débogué est celui de la trace.
+
+Rien ne touche au processus débogué : l'onglet ne fait que lire la trace.
+
+### Commandes
+
+La même navigation dans les scripts et `headless.exe` (ExtraCmds, aussi en 32 bits et sans Qt) ; l'onglet suit les commandes. `$result` reçoit la position (ou la valeur lue).
+
+| Commande | Effet |
+|---|---|
+| `tt.open fichier` / `tt.close` / `tt.info` | ouvre un `.ftt` (ou convertit une `.trace64`), le ferme, résumé et threads |
+| `tt.seek n` | aller à l'instruction n (numéro de séquence global) |
+| `tt.next [n]` / `tt.prev [n]` | n instructions en avant / en arrière, tous threads |
+| `tt.tnext [n]` / `tt.tprev [n]` | n instructions en avant / en arrière dans le thread affiché |
+| `tt.thread tid` | voir un autre thread au même instant |
+| `tt.regs [all]` | registres du thread affiché (`*` = modifié) ; `$result` = pointeur d'instruction |
+| `tt.mem adresse[, taille]` | mémoire à cet instant ; `$result` = première valeur de la taille d'un pointeur |
+| `tt.find adresse` / `tt.findback adresse` | exécution suivante / précédente d'une adresse |
+| `tt.write adresse[, taille]` / `tt.writenext ...` | écriture précédente / suivante en mémoire |
+| `tt.show` | afficher l'onglet Time Travel au premier plan |
+
+### Enregistrement
+
+Les traces viennent toujours de l'enregistreur de x64dbg (pas-à-pas, `StartTraceRecording`), qui écrit désormais un marqueur horodaté quand l'instruction suivante s'exécute sur un autre thread. Un enregistreur par instrumentation binaire dynamique ou par Intel PT n'est pas fourni : Intel PT exige un processeur Intel et un pilote noyau.
+
+---
+
 
 ## pybridge : piloter x64dbg depuis Python
 

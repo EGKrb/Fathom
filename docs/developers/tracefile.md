@@ -41,6 +41,20 @@ struct {
 
 The debugger will skip these user-defined blocks, and you can use them for whatever you like.
 
+Block type `0x81` is written by the recorder itself, between two instructions that run on different threads (a context switch). Its 32-byte data is:
+
+```c++
+struct {
+    DWORD FromThreadId;      // thread of the previous instruction
+    DWORD ToThreadId;        // thread of the next instruction
+    uint64_t NextInstruction; // index of the next instruction in the trace
+    uint64_t Counter;         // QueryPerformanceCounter when the switch was recorded
+    uint64_t Frequency;       // QueryPerformanceFrequency
+};
+```
+
+Readers that do not know it skip it like any other user-defined block. `TraceExport` uses it to timestamp the context switches of the per-thread timelines of the `.ftt` format ([ftt.md](ftt.md)).
+
 `RegisterChanges` is a unsigned byte that counts the number of elements in the array `RegisterChangePosition` and `RegisterChangeNewData`.
 
 `MemoryAccesses` is a unsigned byte that counts the number of elements in the array `MemoryAccessFlags`.

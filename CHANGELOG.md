@@ -9,6 +9,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- **Time Travel** — explore a trace backward and forward without leaving the
+  debugger. New **`.ftt` format** (Fathom Time Travel, `docs/developers/ftt.md`):
+  binary, LZ4-compressed and indexed, one timeline per thread synchronized by a
+  global sequence number, explicit context-switch markers, register keyframes +
+  strict deltas, and memory snapshots at regular intervals so the state at any
+  instant is rebuilt on demand. **Time Travel tab** (ExtraCmds, Qt): per-thread
+  timelines (click a lane to see that thread at that instant), instructions
+  around the position with the context switches, registers with changes
+  highlighted, memory rebuilt at that instant, previous / next execution of an
+  address and write to memory, "show in CPU". **`tt.*` commands** for scripts and
+  `headless.exe`: `tt.open`, `tt.info`, `tt.seek`, `tt.next` / `tt.prev`,
+  `tt.tnext` / `tt.tprev`, `tt.thread`, `tt.regs`, `tt.mem`, `tt.find` /
+  `tt.findback`, `tt.write` / `tt.writenext`, `tt.show`.
+- **TraceExport**: `ftt` output format (`.ftt` extension) and `.ftt` input;
+  extended registers at a chosen verbosity (`regs=gpr|fpu|sse|avx|all`) in JSON,
+  CSV and `.ftt`; one thread's timeline (`thread=`); `snapshot=` interval; JSON
+  `seq` and `switch` members, CSV `seq` column, `size` of memory accesses.
+- Trace recording: a context-switch marker (user block `0x81`, timestamped) is
+  written when the next instruction runs on another thread; existing readers
+  skip it.
+- Tests: `src/tests/trace_export` (`.ftt` read back by an independent parser),
+  `extracmds/tests/test_time_travel.py` (the `tt.*` commands checked against a
+  real trace, x64 and x86).
 - **wineye 1.1.0** (`hvkdfusion/wineye.py`) — crash-dump debugger: `!analyze -v`,
   call stacks from kernel into user mode (`k`, `!thread`, `!process <pid> 7`),
   processors and contexts (`~`, `.thread`, `.cxr`, `.trap`, `.frame`),

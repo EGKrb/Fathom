@@ -10,10 +10,23 @@
 //   hvkd.log action [options]           run an HvKdFusion action without a window, output in the log
 //   hvkd.check [--deep]                 HvKdFusion readiness table in the log
 //   wineye file | wineye --options      open a kernel dump / memory image (or a live Hyper-V VM) in wineye
+//   tt.open file                        open a time travel trace (.ftt, or a .trace32/.trace64 to convert)
+//   tt.info / tt.close                  summary of the open trace / close it
+//   tt.seek n                           go to instruction n (global sequence number)
+//   tt.next [n] / tt.prev [n]           n instructions forward / backward in the timeline of all threads
+//   tt.tnext [n] / tt.tprev [n]         n instructions forward / backward in the viewed thread
+//   tt.thread tid                       view another thread at the same instant
+//   tt.regs [all]                       registers of the viewed thread at the position
+//   tt.mem address[, size]              memory at the position (?? = unknown, ~ = read later)
+//   tt.find address / tt.findback ...   next / previous execution of an address
+//   tt.write address[, size]            previous write to memory (tt.writenext: next one)
+//   tt.show                             bring the Time Travel tab to the front (GUI)
 
 #include "_plugins.h"
 
 #include "hvkdpanel.h"
+#include "ttmodel.h"
+#include "ttpanel.h"
 
 #include <string>
 #include <vector>
@@ -25,6 +38,7 @@
 namespace
 {
     int gPluginHandle;
+    void* gTimeTravelTab = nullptr; // the Time Travel tab, once added (GUI build)
 
     const char* const ScyllaHidePluginName = "ScyllaHideX64DBGPlugin";
     const wchar_t* const ScyllaHideDisabledProfile = L"Disabled";
@@ -575,6 +589,271 @@ namespace
             return LaunchHvKd(L"wineye " + Utf8ToUtf16(RawArguments(argv[0])));
         return OpenInWineye(argv[1]);
     }
+
+    // ------------------------------------------------------------------ time travel ----------
+    bool TtRequireOpen()
+    {
+        if(TtModel::Get().IsOpen())
+            return true;
+        _plugin_logputs(LOG_PREFIX "no time travel trace is open (tt.open file)");
+        return false;
+    }
+
+    bool TtArgument(int argc, char* argv[], int index, duint defaultValue, duint & value)
+    {
+        if(argc <= index)
+        {
+            value = defaultValue;
+            return true;
+        }
+        bool success = false;
+        value = DbgEval(argv[index], &success);
+        if(!success)
+            _plugin_logprintf(LOG_PREFIX "invalid expression \"%s\"\n", argv[index]);
+        return success;
+    }
+
+    void TtSetResult(uint64_t value)
+    {
+        char command[64];
+        sprintf_s(command, "mov $result, 0x%llX", (unsigned long long)value);
+        DbgCmdExecDirect(command);
+    }
+
+    // One line describing the position: instruction, thread, address, disassembly
+    void TtLogPosition()
+    {
+        auto & model = TtModel::Get();
+        const uint64_t position = model.Position();
+        ftt::Instruction ins;
+        if(!model.Instruction(position, ins))
+            return;
+        std::string label = model.Label(ins.ip);
+        _plugin_logprintf(LOG_PREFIX "#%llu  thread %u  %p  %s%s%s\n", (unsigned long long)position, ins.thread, (void*)(duint)ins.ip,
+                          model.Disassemble(ins).c_str(), label.empty() ? "" : "  ; ", label.c_str());
+        if(model.ViewThread() != ins.thread)
+            _plugin_logprintf(LOG_PREFIX "viewed thread: %u\n", model.ViewThread());
+        TtSetResult(position);
+    }
+
+    bool CbTtOpen(int argc, char* argv[])
+    {
+        if(argc < 2)
+        {
+            _plugin_logputs(LOG_PREFIX "usage: tt.open file");
+            return false;
+        }
+        std::string error;
+        if(!TtModel::Get().Open(Utf8ToUtf16(argv[1]), error))
+        {
+            _plugin_logprintf(LOG_PREFIX "cannot open the time travel trace: %s\n", error.c_str());
+            return false;
+        }
+        auto info = TtModel::Get().GetInfo();
+        _plugin_logprintf(LOG_PREFIX "time travel trace: %llu instructions, %llu threads, %llu memory snapshots (%s)\n", (unsigned long long)info.count,
+                          (unsigned long long)info.threads, (unsigned long long)info.snapshots, Utf16ToUtf8(info.path).c_str());
+        TtSetResult(info.count);
+        return true;
+    }
+
+    bool CbTtClose(int, char* [])
+    {
+        TtModel::Get().Close();
+        return true;
+    }
+
+    bool CbTtInfo(int, char* [])
+    {
+        if(!TtRequireOpen())
+            return false;
+        auto & model = TtModel::Get();
+        auto info = model.GetInfo();
+        std::string levels = "gpr";
+        if(info.levels & ftt::LevelFpu)
+            levels += "+fpu";
+        if(info.levels & ftt::LevelSse)
+            levels += "+sse";
+        if(info.levels & ftt::LevelAvx)
+            levels += "+avx";
+        _plugin_logprintf(LOG_PREFIX "%s (%s, registers %s)\n", Utf16ToUtf8(info.path).c_str(), info.pointerSize == 8 ? "x64" : "x86", levels.c_str());
+        if(!info.source.empty())
+            _plugin_logprintf(LOG_PREFIX "converted from %s\n", Utf16ToUtf8(info.source).c_str());
+        _plugin_logprintf(LOG_PREFIX "%llu instructions, %llu chunks, %llu memory snapshots (every %u instructions)\n", (unsigned long long)info.count,
+                          (unsigned long long)info.chunks, (unsigned long long)info.snapshots, info.snapshotInterval);
+        for(auto & t : model.Threads())
+            _plugin_logprintf(LOG_PREFIX "  thread %u: %llu instructions, #%llu to #%llu\n", t.thread, (unsigned long long)t.count,
+                              (unsigned long long)t.firstSeq, (unsigned long long)t.lastSeq);
+        TtLogPosition();
+        return true;
+    }
+
+    bool CbTtSeek(int argc, char* argv[])
+    {
+        duint seq;
+        if(!TtRequireOpen() || argc < 2 || !TtArgument(argc, argv, 1, 0, seq))
+            return false;
+        if(!TtModel::Get().Seek(seq))
+        {
+            _plugin_logprintf(LOG_PREFIX "no instruction #%llu in the trace\n", (unsigned long long)seq);
+            return false;
+        }
+        TtLogPosition();
+        return true;
+    }
+
+    bool TtStep(int argc, char* argv[], bool forward, bool sameThread)
+    {
+        duint count;
+        if(!TtRequireOpen() || !TtArgument(argc, argv, 1, 1, count))
+            return false;
+        duint done = 0;
+        while(done < count && TtModel::Get().Step(forward, sameThread))
+            done++;
+        if(done < count)
+            _plugin_logprintf(LOG_PREFIX "%s of the %s reached\n", forward ? "end" : "start", sameThread ? "thread" : "trace");
+        TtLogPosition();
+        return done > 0 || count == 0;
+    }
+
+    bool CbTtNext(int argc, char* argv[]) { return TtStep(argc, argv, true, false); }
+    bool CbTtPrev(int argc, char* argv[]) { return TtStep(argc, argv, false, false); }
+    bool CbTtThreadNext(int argc, char* argv[]) { return TtStep(argc, argv, true, true); }
+    bool CbTtThreadPrev(int argc, char* argv[]) { return TtStep(argc, argv, false, true); }
+
+    bool CbTtThread(int argc, char* argv[])
+    {
+        duint thread;
+        if(!TtRequireOpen() || argc < 2 || !TtArgument(argc, argv, 1, 0, thread))
+            return false;
+        if(!TtModel::Get().SwitchThread((uint32_t)thread))
+        {
+            _plugin_logprintf(LOG_PREFIX "thread %u is not in the trace\n", (unsigned)thread);
+            return false;
+        }
+        TtLogPosition();
+        return true;
+    }
+
+    bool CbTtRegs(int argc, char*[])
+    {
+        if(!TtRequireOpen())
+            return false;
+        auto & model = TtModel::Get();
+        ftt::RegisterFile regs, previous;
+        uint64_t at = 0;
+        if(!model.Registers(regs, &at))
+            return false;
+        const bool havePrevious = model.PreviousRegisters(previous);
+        const auto info = model.GetInfo();
+        const auto & catalog = ftt::Registers(info.pointerSize);
+        const uint32_t levels = argc > 1 ? info.levels : ftt::LevelGpr;
+        _plugin_logprintf(LOG_PREFIX "thread %u, before instruction #%llu (* = changed by the previous instruction of the thread)\n", model.ViewThread(),
+                          (unsigned long long)at);
+        std::string line;
+        int column = 0;
+        for(unsigned id = 0; id < catalog.size(); id++)
+        {
+            if(!(catalog[id].level & levels) || !regs.known[id])
+                continue;
+            const bool changed = havePrevious && previous.known[id] && memcmp(previous.value[id], regs.value[id], catalog[id].size) != 0;
+            char cell[96];
+            sprintf_s(cell, "%7s%c%-20s", catalog[id].name, changed ? '*' : '=', ftt::RegisterText(regs, id, catalog[id].size).c_str());
+            line += cell;
+            if(++column == 3 || catalog[id].size > 8)
+            {
+                _plugin_logprintf(LOG_PREFIX "%s\n", line.c_str());
+                line.clear();
+                column = 0;
+            }
+        }
+        if(!line.empty())
+            _plugin_logprintf(LOG_PREFIX "%s\n", line.c_str());
+        TtSetResult(regs.get(ftt::IpRegister(info.pointerSize)));
+        return true;
+    }
+
+    bool CbTtMem(int argc, char* argv[])
+    {
+        duint address, size;
+        if(!TtRequireOpen() || argc < 2 || !TtArgument(argc, argv, 1, 0, address) || !TtArgument(argc, argv, 2, 64, size))
+            return false;
+        size = std::min<duint>(size, 4096);
+        std::vector<uint8_t> data;
+        std::vector<bool> known, inferred;
+        TtModel::Get().Memory(address, size, data, known, inferred);
+        _plugin_logprintf(LOG_PREFIX "memory before instruction #%llu (?? unknown, ~ value read later)\n", (unsigned long long)TtModel::Get().Position());
+        for(duint row = 0; row < size; row += 16)
+        {
+            std::string line;
+            for(duint i = row; i < row + 16 && i < size; i++)
+            {
+                char cell[8];
+                if(!known[i])
+                    strcpy_s(cell, " ??");
+                else
+                    sprintf_s(cell, "%c%02X", inferred[i] ? '~' : ' ', data[i]);
+                line += cell;
+            }
+            _plugin_logprintf(LOG_PREFIX "%p %s\n", (void*)(address + row), line.c_str());
+        }
+        // $result: the first pointer-sized value when it is known
+        uint64_t value = 0;
+        const size_t ptr = std::min<size_t>(TtModel::Get().GetInfo().pointerSize, size);
+        bool all = true;
+        for(size_t i = 0; i < ptr; i++)
+            all &= (bool)known[i];
+        if(all)
+        {
+            memcpy(&value, data.data(), ptr);
+            TtSetResult(value);
+        }
+        return true;
+    }
+
+    bool TtFind(int argc, char* argv[], bool forward)
+    {
+        duint address;
+        if(!TtRequireOpen() || argc < 2 || !TtArgument(argc, argv, 1, 0, address))
+            return false;
+        if(!TtModel::Get().FindExecution(address, forward, false))
+        {
+            _plugin_logprintf(LOG_PREFIX "%p is not executed %s this point\n", (void*)address, forward ? "after" : "before");
+            return false;
+        }
+        TtLogPosition();
+        return true;
+    }
+
+    bool CbTtFind(int argc, char* argv[]) { return TtFind(argc, argv, true); }
+    bool CbTtFindBack(int argc, char* argv[]) { return TtFind(argc, argv, false); }
+
+    bool TtWrite(int argc, char* argv[], bool forward)
+    {
+        duint address, size;
+        if(!TtRequireOpen() || argc < 2 || !TtArgument(argc, argv, 1, 0, address) || !TtArgument(argc, argv, 2, 1, size))
+            return false;
+        if(!TtModel::Get().FindWrite(address, size ? size : 1, forward))
+        {
+            _plugin_logprintf(LOG_PREFIX "no write to %p %s this point\n", (void*)address, forward ? "after" : "before");
+            return false;
+        }
+        TtLogPosition();
+        return true;
+    }
+
+    bool CbTtShow(int, char* [])
+    {
+        if(!gTimeTravelTab)
+        {
+            _plugin_logputs(LOG_PREFIX "no Time Travel tab (headless, or plugin built without Qt)");
+            return false;
+        }
+        GuiShowQWidgetTab(gTimeTravelTab);
+        return true;
+    }
+
+    bool CbTtWrite(int argc, char* argv[]) { return TtWrite(argc, argv, false); }
+    bool CbTtWriteNext(int argc, char* argv[]) { return TtWrite(argc, argv, true); }
 }
 
 extern "C" __declspec(dllexport) bool pluginit(PLUG_INITSTRUCT* initStruct)
@@ -593,6 +872,22 @@ extern "C" __declspec(dllexport) bool pluginit(PLUG_INITSTRUCT* initStruct)
     _plugin_registercommand(gPluginHandle, "hvkd.log", CbHvKdLog, false);
     _plugin_registercommand(gPluginHandle, "hvkd.check", CbHvKdCheck, false);
     _plugin_registercommand(gPluginHandle, "wineye", CbWineye, false);
+    _plugin_registercommand(gPluginHandle, "tt.open", CbTtOpen, false);
+    _plugin_registercommand(gPluginHandle, "tt.close", CbTtClose, false);
+    _plugin_registercommand(gPluginHandle, "tt.info", CbTtInfo, false);
+    _plugin_registercommand(gPluginHandle, "tt.seek", CbTtSeek, false);
+    _plugin_registercommand(gPluginHandle, "tt.next", CbTtNext, false);
+    _plugin_registercommand(gPluginHandle, "tt.prev", CbTtPrev, false);
+    _plugin_registercommand(gPluginHandle, "tt.tnext", CbTtThreadNext, false);
+    _plugin_registercommand(gPluginHandle, "tt.tprev", CbTtThreadPrev, false);
+    _plugin_registercommand(gPluginHandle, "tt.thread", CbTtThread, false);
+    _plugin_registercommand(gPluginHandle, "tt.regs", CbTtRegs, false);
+    _plugin_registercommand(gPluginHandle, "tt.mem", CbTtMem, false);
+    _plugin_registercommand(gPluginHandle, "tt.find", CbTtFind, false);
+    _plugin_registercommand(gPluginHandle, "tt.findback", CbTtFindBack, false);
+    _plugin_registercommand(gPluginHandle, "tt.write", CbTtWrite, false);
+    _plugin_registercommand(gPluginHandle, "tt.writenext", CbTtWriteNext, false);
+    _plugin_registercommand(gPluginHandle, "tt.show", CbTtShow, false);
     return true;
 }
 
@@ -613,5 +908,11 @@ extern "C" __declspec(dllexport) void plugsetup(PLUG_SETUPSTRUCT*)
         GuiAddQWidgetTab(panel);
     else
         _plugin_logputs(LOG_PREFIX "HvKdFusion GUI tab not added (hvkdfusion folder not found)");
+    // "Time Travel" tab: navigates the trace of TtModel, shared with the tt.* commands
+    if(QWidget* timeTravel = CreateTimeTravelPanel())
+    {
+        GuiAddQWidgetTab(timeTravel);
+        gTimeTravelTab = timeTravel;
+    }
 #endif
 }

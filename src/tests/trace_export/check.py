@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import struct
 import sys
 from pathlib import Path
 
@@ -102,6 +103,212 @@ def check_frinet(path: Path, instructions: list[dict], gprs: list[str], ip: str,
     return None
 
 
+def lz4_block_decompress(src: bytes, size: int) -> bytes:
+    """Decompress an LZ4 block (the format of the .ftt chunks), independently of the C++ reader."""
+    out = bytearray()
+    i = 0
+    while i < len(src):
+        token = src[i]
+        i += 1
+        literal = token >> 4
+        if literal == 15:
+            while True:
+                b = src[i]
+                i += 1
+                literal += b
+                if b != 255:
+                    break
+        out += src[i:i + literal]
+        i += literal
+        if i >= len(src):
+            break
+        offset = src[i] | (src[i + 1] << 8)
+        i += 2
+        match = token & 15
+        if match == 15:
+            while True:
+                b = src[i]
+                i += 1
+                match += b
+                if b != 255:
+                    break
+        match += 4
+        start = len(out) - offset
+        for k in range(match):
+            out.append(out[start + k])
+    if len(out) != size:
+        raise ValueError(f"lz4: {len(out)} bytes instead of {size}")
+    return bytes(out)
+
+
+def ftt_registers(ptr_size: int) -> list[tuple[str, int]]:
+    """The .ftt register catalog (docs/developers/ftt.md): (name, size), the id is the position."""
+    if ptr_size == 8:
+        regs = [(n, 8) for n in "rax rcx rdx rbx rsp rbp rsi rdi r8 r9 r10 r11 r12 r13 r14 r15 rip rflags".split()]
+        nxmm = 16
+    else:
+        regs = [(n, 4) for n in "eax ecx edx ebx esp ebp esi edi eip eflags".split()]
+        nxmm = 8
+    regs += [(f"st{i}", 10) for i in range(8)] + [("fpcw", 2), ("fpsw", 2), ("fptw", 2)]
+    regs += [(f"xmm{i}", 16) for i in range(nxmm)] + [("mxcsr", 4)]
+    regs += [(f"ymm{i}h", 16) for i in range(nxmm)]
+    return regs
+
+
+def read_ftt(path: Path) -> dict:
+    """Parse a .ftt file: header, metadata, chunks, index; decode every instruction with the full
+    register state of its thread and the memory snapshots."""
+    data = path.read_bytes()
+    magic, version, ptr_size, levels, snapshot_interval, meta_size, _ = struct.unpack_from("<4sHHIIII", data, 0)
+    if magic != b"FTT1" or version != 1:
+        raise ValueError("bad header")
+    meta = json.loads(data[24:24 + meta_size])
+    index_offset, trailer = struct.unpack_from("<Q4s", data, len(data) - 16)
+    if trailer != b"FTTX":
+        raise ValueError("bad trailer")
+    catalog = ftt_registers(ptr_size)
+
+    def chunk(offset: int) -> tuple[tuple, bytes]:
+        header = struct.unpack_from("<4sBBHIIQQQII", data, offset)
+        cmagic, kind, compressed, _, thread, count, first, last, local, raw_size, stored = header
+        if cmagic != b"FCHK":
+            raise ValueError(f"bad chunk at {offset:#x}")
+        body = data[offset + 48:offset + 48 + stored]
+        raw = lz4_block_decompress(body, raw_size) if compressed else body
+        return header, raw
+
+    (_, kind, *_), raw = chunk(index_offset)
+    if kind != 3:
+        raise ValueError("bad index")
+    count = struct.unpack_from("<I", raw, 0)[0]
+    entries = [struct.unpack_from("<QBIIQQQ", raw, 4 + 41 * i) for i in range(count)]
+    pos = 4 + 41 * count
+    nthreads = struct.unpack_from("<I", raw, pos)[0]
+    threads = [struct.unpack_from("<IQQQ", raw, pos + 4 + 28 * i) for i in range(nthreads)]
+    total = struct.unpack_from("<Q", raw, pos + 4 + 28 * nthreads)[0]
+
+    instructions = {}
+    snapshots = []
+    for offset, kind, thread, count, first, last, local in entries:
+        header, raw = chunk(offset)
+        if kind == 2:
+            pages = {}
+            for i in range(count):
+                base = struct.unpack_from("<Q", raw, i * (8 + 512 + 4096))[0]
+                known = raw[i * 4616 + 8:i * 4616 + 520]
+                content = raw[i * 4616 + 520:i * 4616 + 4616]
+                pages[base] = (known, content)
+            snapshots.append((first, pages))
+            continue
+        regs = {}
+        nkey = struct.unpack_from("<H", raw, 0)[0]
+        p = 2
+        for _ in range(nkey):
+            rid = raw[p]
+            regs[catalog[rid][0]] = raw[p + 1:p + 1 + catalog[rid][1]]
+            p += 1 + catalog[rid][1]
+        seq = first
+        switch = None
+        while p < len(raw):
+            tag = raw[p]
+            p += 1
+            if tag == 2:
+                switch = struct.unpack_from("<IQ", raw, p)
+                p += 12
+                continue
+            if tag != 1:
+                raise ValueError(f"unknown event {tag}")
+            delta, shift = 0, 0
+            while True:
+                b = raw[p]
+                p += 1
+                delta |= (b & 0x7F) << shift
+                shift += 7
+                if not b & 0x80:
+                    break
+            seq += delta
+            opsize = raw[p]
+            opcode = raw[p + 1:p + 1 + opsize]
+            p += 1 + opsize
+            nchanged = raw[p]
+            p += 1
+            for _ in range(nchanged):
+                rid = raw[p]
+                regs[catalog[rid][0]] = raw[p + 1:p + 1 + catalog[rid][1]]
+                p += 1 + catalog[rid][1]
+            mem = []
+            nmem = raw[p]
+            p += 1
+            for _ in range(nmem):
+                flags, address, size = struct.unpack_from("<BQB", raw, p)
+                p += 10
+                old = None
+                if not flags & 2:
+                    old = raw[p:p + size]
+                    p += size
+                new = None
+                if flags & 1:
+                    new = raw[p:p + size]
+                    p += size
+                mem.append((address, size, old, new))
+            instructions[seq] = {"thread": thread, "opcode": opcode, "regs": dict(regs), "mem": mem, "switch": switch}
+            switch = None
+    return {"ptr_size": ptr_size, "levels": levels, "meta": meta, "threads": threads, "total": total,
+            "instructions": instructions, "snapshots": snapshots, "catalog": catalog}
+
+
+def check_ftt(path: Path, instructions: list[dict], ip: str, all_registers: bool) -> str | None:
+    """The .ftt holds the same instructions as the json export, in per-thread chunks, and its memory
+    snapshots match the memory accesses replayed up to each snapshot."""
+    ftt = read_ftt(path)
+    if ftt["total"] != len(instructions) or sorted(ftt["instructions"]) != list(range(len(instructions))):
+        return f"{path.name}: {len(ftt['instructions'])} instructions, json has {len(instructions)}"
+    if sum(t[1] for t in ftt["threads"]) != len(instructions):
+        return f"{path.name}: per-thread counts do not add up"
+    ptr = ftt["ptr_size"]
+    for seq, instruction in enumerate(instructions):
+        entry = ftt["instructions"][seq]
+        if entry["thread"] != instruction["thread"] or entry["opcode"].hex(" ").upper() != instruction["bytes"]:
+            return f"{path.name} instruction {seq}: thread or opcode differs"
+        for name, value in instruction["regs"].items():
+            if int.from_bytes(entry["regs"][name], "little") != int(value, 16):
+                return f"{path.name} instruction {seq}: {name} differs"
+        if (entry["switch"] is not None) != ("switch" in instruction):
+            return f"{path.name} instruction {seq}: context switch marker differs"
+        if len(entry["mem"]) != len(instruction["mem"]):
+            return f"{path.name} instruction {seq}: memory access count differs"
+        for (address, size, old, new), access in zip(entry["mem"], instruction["mem"]):
+            if address != int(access["address"], 16) or size != ptr:
+                return f"{path.name} instruction {seq}: memory access differs"
+            if old is not None and int.from_bytes(old, "little") != int(access["old"], 16):
+                return f"{path.name} instruction {seq}: old memory value differs"
+            written = int(access["old"], 16) != int(access["new"], 16)
+            if (new is not None) and int.from_bytes(new, "little") != int(access["new"], 16):
+                return f"{path.name} instruction {seq}: new memory value differs"
+            if written and new is None:
+                return f"{path.name} instruction {seq}: write without new value"
+    if all_registers:
+        names = {name for name, _ in ftt["catalog"]}
+        if any(set(e["regs"]) != names for e in ftt["instructions"].values()):
+            return f"{path.name}: not every register is stored"
+    # memory snapshots: each known byte equals the memory replayed from the accesses before it
+    memory: dict[int, int] = {}
+    replayed = 0
+    for seq, pages in sorted(ftt["snapshots"], key=lambda s: s[0]):
+        for instruction in instructions[replayed:seq]:
+            for access in instruction["mem"]:
+                address = int(access["address"], 16)
+                new = int(access["new"], 16).to_bytes(ptr, "little")
+                for k in range(ptr):
+                    memory[address + k] = new[k]
+        replayed = seq
+        for base, (known, content) in pages.items():
+            for offset in range(4096):
+                if known[offset // 8] >> (offset % 8) & 1 and memory.get(base + offset) != content[offset]:
+                    return f"{path.name}: snapshot before {seq} differs at {base + offset:#x}"
+    return None
+
+
 def main() -> int:
     args = parse_args()
     runtime_dir = Path(args.runtime_dir)
@@ -144,6 +351,39 @@ def main() -> int:
             error = f"text trace is malformed: {exc}"
         if error:
             return fail(error)
+
+    # .ftt: read back by an independent parser, exported again identically
+    for name, all_registers in (("trace.ftt", False), ("trace.all.ftt", True)):
+        try:
+            error = check_ftt(runtime_dir / name, instructions, ip, all_registers)
+        except (OSError, ValueError, IndexError, struct.error) as exc:
+            error = f"{name} is malformed: {exc}"
+        if error:
+            return fail(error)
+    if read_ftt(runtime_dir / "trace.all.ftt")["snapshots"] == []:
+        return fail("trace.all.ftt has no memory snapshot")
+    for original, again in (("trace.json", "trace.ftt.json"), ("trace.log", "trace.ftt.log")):
+        if (runtime_dir / original).read_bytes() != (runtime_dir / again).read_bytes():
+            return fail(f"{again} differs from {original}")
+
+    # extended registers: the general purpose ones unchanged, the others present
+    extended = json.loads((runtime_dir / "trace.regs.json").read_text(encoding="utf-8"))["instructions"]
+    for full, instruction in zip(extended, instructions):
+        if any(full["regs"][name] != value for name, value in instruction["regs"].items()):
+            return fail(f"trace.regs.json instruction {full['index']}: general purpose registers differ")
+        if not {"st0", "fpcw", "xmm0", "mxcsr", "ymm0h"} <= set(full["regs"]):
+            return fail("trace.regs.json lacks the extended registers")
+    with open(runtime_dir / "trace.sse.csv", newline="", encoding="utf-8") as f:
+        header = next(csv.reader(f))
+    if "xmm0" not in header or "st0" in header or header[-1] != "seq":
+        return fail(f"trace.sse.csv has unexpected columns {header}")
+
+    # one thread's timeline: the instructions of that thread, in order, with their global numbers
+    single = json.loads((runtime_dir / "trace.thread.json").read_text(encoding="utf-8"))
+    tid = single.get("thread")
+    expected = [i for i in instructions if i["thread"] == tid]
+    if [(i["seq"], i["address"], i["regs"]) for i in single["instructions"]] != [(i["seq"], i["address"], i["regs"]) for i in expected]:
+        return fail("trace.thread.json is not the timeline of its thread")
 
     return 0
 

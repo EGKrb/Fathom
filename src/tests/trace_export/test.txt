@@ -22,6 +22,22 @@ testassert $result == jsoncount, "explicit format argument"
 TraceExport "tests/trace_export/trace.trace64", "tests/trace_export/trace.log", tenet
 testassert $result == jsoncount, "tenet export has the same instruction count"
 
+// Fathom Time Travel trace (.ftt): converted by extension, then read back as a source
+TraceExport "tests/trace_export/trace.trace64", "tests/trace_export/trace.ftt"
+testassert $result == jsoncount, "ftt conversion by extension"
+TraceExport "tests/trace_export/trace.ftt", "tests/trace_export/trace.ftt.json"
+testassert $result == jsoncount, "json export of the ftt trace"
+TraceExport "tests/trace_export/trace.ftt", "tests/trace_export/trace.ftt.log", tenet
+testassert $result == jsoncount, "tenet export of the ftt trace"
+TraceExport "tests/trace_export/trace.trace64", "tests/trace_export/trace.all.ftt", ftt, regs=all, snapshot=16
+testassert $result == jsoncount, "ftt with every register and frequent snapshots"
+TraceExport "tests/trace_export/trace.all.ftt", "tests/trace_export/trace.regs.json", json, regs=all
+testassert $result == jsoncount, "extended registers from the ftt trace"
+TraceExport "tests/trace_export/trace.trace64", "tests/trace_export/trace.sse.csv", regs=sse
+testassert $result == jsoncount, "csv with the sse registers"
+TraceExport "tests/trace_export/trace.trace64", "tests/trace_export/trace.thread.json", json, thread=tid()
+testassert $result > 0 && $result <= jsoncount, "timeline of one thread"
+
 // The Frinet format is 64-bit only: 0xFFFFFFFF+1 wraps to 0 on x32
 cmp 0xFFFFFFFF+1, 0
 je done

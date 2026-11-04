@@ -401,6 +401,25 @@ void TraceRecordManager::TraceExecuteRecord(const Zydis & newInstruction)
                 WriteBufferPtr += sizeof(duint);
             }
         }
+        //Context switch marker (user block 0x81, skipped by readers that do not know it): the next
+        //instruction runs on another thread. See docs/developers/tracefile.md
+        if(newThreadId != rtOldThreadId)
+        {
+            LARGE_INTEGER counter, frequency;
+            QueryPerformanceCounter(&counter);
+            QueryPerformanceFrequency(&frequency);
+            const uint32_t markerSize = 2 * sizeof(DWORD) + 3 * sizeof(uint64_t);
+            const uint64_t instructionIndex = rtRecordedInstructions; // index of the next instruction
+            WriteBufferPtr[0] = 0x81;
+            memcpy(WriteBufferPtr + 1, &markerSize, sizeof(markerSize));
+            WriteBufferPtr += 1 + sizeof(markerSize);
+            memcpy(WriteBufferPtr, &rtOldThreadId, sizeof(DWORD));
+            memcpy(WriteBufferPtr + 4, &newThreadId, sizeof(DWORD));
+            memcpy(WriteBufferPtr + 8, &instructionIndex, sizeof(uint64_t));
+            memcpy(WriteBufferPtr + 16, &counter.QuadPart, sizeof(uint64_t));
+            memcpy(WriteBufferPtr + 24, &frequency.QuadPart, sizeof(uint64_t));
+            WriteBufferPtr += markerSize;
+        }
     }
     //Switch context buffers
     rtOldThreadId = newThreadId;
