@@ -3704,12 +3704,57 @@ class KernelDebugger:
         return self.q(self.sym("nt!KiProcessorBlock") + 8 * cpu)
 
     def processor_context(self, cpu):
-        """Saved register context of a processor (bugcheck / freeze): KPRCB.ProcessorState."""
+        """Register context of a processor -> (regs, label); see cpu_context."""
+        regs, _known, label = self.cpu_context(cpu)
+        return regs, label
+
+    def cpu_context(self, cpu):
+        """Register context of a processor -> (regs, known registers, label): the dump
+        header's for the processor it saved, else KPRCB.ProcessorState (bugcheck, live
+        dump). A raw image or a live target often has neither for a processor: its
+        thread, if it was running user-mode code, then has its user registers in the
+        trap frame built at the top of its kernel stack on the entry into the kernel."""
         if self.dump is not None and cpu == self._crash_cpu():
-            return parse_context(self.dump.context), "contexte du dump (processeur courant)"
+            regs = parse_context(self.dump.context)
+            return regs, set(regs), "contexte du dump (processeur courant)"
         prcb = self.prcb(cpu)
         raw = self.read(prcb + self.off("_KPRCB", "ProcessorState.ContextFrame"), CONTEXT_SIZE, 4)
-        return parse_context(raw), f"KPRCB.ProcessorState du processeur {cpu}"
+        regs = parse_context(raw.ljust(CONTEXT_SIZE, b"\0"))
+        if regs["rip"] or regs["rsp"]:
+            return regs, set(regs), f"KPRCB.ProcessorState du processeur {cpu}"
+        try:
+            info = self.thread_info(self.current_thread(cpu))
+        except DbgError:
+            info = None
+        if info is not None:
+            found = self._user_trap_frame(info)
+            if found is not None:
+                tregs, tknown, where = found
+                return tregs, tknown | {"rip", "rsp"}, \
+                    f"processeur {cpu} sans contexte sauvegardé : registres user de la {where}"
+        return regs, set(regs), f"processeur {cpu} : contexte non sauvegardé dans la source"
+
+    def _user_trap_frame(self, info):
+        """User-mode registers of a thread from a trap frame: the one at the top of its
+        kernel stack (every entry from user mode builds it there), else KTHREAD.TrapFrame
+        - only if it holds a user-mode context. -> (regs, known, label) or None."""
+        try:
+            size = self.ntpdb.type_size(self.ntpdb.find_type("_KTRAP_FRAME")) or 0x190
+        except Exception:
+            size = 0x190
+        cands = []
+        if info["initial_stack"]:
+            cands.append((info["initial_stack"] - size, "trap frame en haut de la pile noyau"))
+        if info["trap_frame"]:
+            cands.append((info["trap_frame"], "KTHREAD.TrapFrame"))
+        for tf, where in cands:
+            try:
+                regs, known = self.trap_frame_context(tf)
+            except DbgError:
+                continue
+            if regs.get("cs", 0) & 3 == 3 and 0x10000 <= regs["rip"] < KERNEL_SPACE and 0 < regs["rsp"] < KERNEL_SPACE:
+                return regs, known, f"{where} ({tf:#x})"
+        return None
 
     def _crash_cpu(self):
         """Processor whose state the dump header holds: the one running the context's RSP stack."""
@@ -3797,6 +3842,12 @@ class KernelDebugger:
         o = self.ntpdb.field_offset("_KTRAP_FRAME", "SegSs")
         if o:
             regs["ss"] = struct.unpack("<H", self.read(tf + o[0], 2, 4))[0]
+        # rbx / rdi / rsi are saved only on a system call (ExceptionActive 2); after an
+        # interrupt (0) or an exception (1) these fields hold stale values
+        o = self.ntpdb.field_offset("_KTRAP_FRAME", "ExceptionActive")
+        active = self.read(tf + o[0], 1, 4) if o else b""
+        if active and active[0] != 2:
+            known -= {"rbx", "rdi", "rsi"}
         for r in _REGS:
             regs.setdefault(r, 0)
         return regs, known
@@ -3808,8 +3859,8 @@ class KernelDebugger:
         try:
             for cpu in range(self.processor_count()):
                 if self.current_thread(cpu) == ethread:
-                    regs, label = self.processor_context(cpu)
-                    return regs, set(_REGS) | {"rip"}, f"thread en cours sur le processeur {cpu}", info
+                    regs, known, label = self.cpu_context(cpu)
+                    return regs, known, f"thread en cours sur le processeur {cpu} - {label}", info
         except DbgError:
             pass
         ks = info["kernel_stack"]
@@ -4654,13 +4705,13 @@ class BugcheckAnalyzer:
             w("")
             w("Aucun bugcheck : ce dump n'est pas un plantage (dump pris par .dump, dump à chaud,")
             w("ou image mémoire). Analyse du contexte du processeur courant.")
-            ctx_regs, label = kd.processor_context(kd.cpu)
+            ctx_regs, ctx_known, label = kd.cpu_context(kd.cpu)
             th = None
             try:
                 th = kd.current_thread(kd.cpu)
             except Exception:
                 pass
-            return out + self._context_report(ctx_regs, set(ctx_regs), label, th, None, None, code)
+            return out + self._context_report(ctx_regs, ctx_known, label, th, None, None, code)
         base = code & 0xFFFFFFF if code & 0x10000000 and (code & 0xFFFFFFF) in _BUGCHECKS else code
         entry = _BUGCHECKS.get(base)
         name = entry[0] if entry else f"BUGCHECK_{code:X}"
@@ -4697,8 +4748,7 @@ class BugcheckAnalyzer:
         except Exception as e:
             w(f"[~] contexte fautif illisible : {e}")
         if regs is None:
-            regs, label = kd.processor_context(kd.cpu)
-            known = set(regs)
+            regs, known, label = kd.cpu_context(kd.cpu)
         if fault_ip is None and regs is not None and label and label.startswith((".cxr", ".trap")):
             fault_ip = regs["rip"]
         th = None
@@ -5042,8 +5092,8 @@ class DebugCommands:
         if kd.ctx is None:
             cpu = kd._crash_cpu() if kd.dump is not None else 0
             kd.cpu = cpu
-            regs, label = kd.processor_context(cpu)
-            kd.ctx, kd.ctx_known, kd.ctx_label = regs, set(regs), label
+            regs, known, label = kd.cpu_context(cpu)
+            kd.ctx, kd.ctx_known, kd.ctx_label = regs, known, label
             try:
                 kd.thread = kd.current_thread(cpu)
                 pid = kd.pid_of_eprocess(kd.thread_info(kd.thread)["process"])
@@ -5352,11 +5402,11 @@ class DebugCommands:
             if not 0 <= cpu < n:
                 print(f"[!] processeur {cpu} hors plage (0..{n - 1})")
                 return
-            regs, label = kd.processor_context(cpu)
+            regs, known, label = kd.cpu_context(cpu)
             th = kd.current_thread(cpu)
             kd.cpu = cpu
             pid = kd.pid_of_eprocess(kd.thread_info(th)["process"])
-            self._set_context(regs, set(regs), label, th, pid)
+            self._set_context(regs, known, label, th, pid)
             return
         rows = []
         for cpu in range(n):
@@ -6100,8 +6150,7 @@ class WineyeOps:
             pid = kd.pid_of_eprocess(info["process"]) or 4
         else:
             cpu = kd._crash_cpu() if kd.dump is not None else 0
-            regs, _label = kd.processor_context(cpu)
-            known = set(regs)
+            regs, known, _label = kd.cpu_context(cpu)
             th = kd.current_thread(cpu)
             pid = kd.pid_of_eprocess(kd.thread_info(th)["process"]) or 4
         kd.pid = pid

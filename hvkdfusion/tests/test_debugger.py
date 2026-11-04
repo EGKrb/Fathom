@@ -21,7 +21,10 @@
 - x86 code without PDB: stack layout from the code (push / pop / ebp frame / ret N),
   return addresses checked against their call, function starts after int 3 padding,
   the ebp chain as an upper bound; module data from the VADs, vmm.dll's zero-filled
-  pages, a minidump whose thread stacks lie inside its memory list.
+  pages, a minidump whose thread stacks lie inside its memory list;
+- a processor without saved context (raw image, live target): its running thread's
+  user registers from the trap frame at the top of its kernel stack, rbx / rdi / rsi
+  only after a system call.
 
 Exits non-zero on failure.
 """
@@ -690,6 +693,71 @@ mods = kv32.user_modules(PID)
 check("name paged out: taken from the VADs", [m.name for m in mods] == ["fixture32.exe", "ntdll.dll"]
       and mods[0].timestamp == pe32.timestamp)
 check("zero-filled header: image found locally, symbols", kv32.symbolize(BASE32 + 0x1027, PID)[0] == "fixture32!inner32+0x17")
+
+print("== processor without saved context: trap frame of its running thread ==")
+PRCB, ETH, KSTACK = 0xFFFF800000700000, 0xFFFF800000710000, 0xFFFF800000728000
+TF_TOP, TF_OLD = KSTACK - 0x190, 0xFFFF800000730000
+KTF = {"Rax": 0x30, "Rcx": 0x38, "Rdx": 0x40, "R8": 0x48, "R9": 0x50, "R10": 0x58, "R11": 0x60,
+       "ExceptionActive": 0x2B, "Rbx": 0x140, "Rdi": 0x148, "Rsi": 0x150, "Rbp": 0x158, "Rip": 0x168,
+       "SegCs": 0x170, "EFlags": 0x178, "Rsp": 0x180, "SegSs": 0x188}
+
+
+class FakeNtPdb:
+    def field_offset(self, typ, field):
+        return (KTF[field], 0) if typ == "_KTRAP_FRAME" and field in KTF else None
+
+    def find_type(self, name):
+        return name
+
+    def type_size(self, ti):
+        return 0x190
+
+
+class CpuKd(wineye.KernelDebugger):
+    """A running thread on a processor whose KPRCB holds no context (raw image)."""
+    ntpdb = FakeNtPdb()
+    trap_frame = 0
+
+    def prcb(self, cpu):
+        return PRCB
+
+    def off(self, typ, field, default=None):
+        return 0x40
+
+    def current_thread(self, cpu):
+        return ETH
+
+    def thread_info(self, ethread):
+        return {"initial_stack": KSTACK, "trap_frame": self.trap_frame}
+
+
+def trap_frame(at, rip, rsp, cs, active, rbx=0x1234):
+    tf = bytearray(0x190)
+    for name, v in (("Rip", rip), ("Rsp", rsp), ("Rbp", T - 0xC), ("Rbx", rbx), ("Rax", 0x52)):
+        struct.pack_into("<Q", tf, KTF[name], v)
+    struct.pack_into("<H", tf, KTF["SegCs"], cs)
+    tf[KTF["ExceptionActive"]] = active
+    poke(at, bytes(tf))
+
+
+poke(PRCB + 0x40, bytes(wineye.CONTEXT_SIZE))                   # ProcessorState: never saved
+trap_frame(TF_TOP, BASE32 + 0x1027, T - 0x20, 0x23, 1)           # int 3 / exception from user mode
+ck = CpuKd(Wow64Engine(), store, dis, log=lambda m: None)
+ck.pid = PID
+regs_c, known_c, label_c = ck.cpu_context(1)
+check("no saved context: user registers of the trap frame on top of the kernel stack",
+      regs_c["rip"] == BASE32 + 0x1027 and regs_c["rsp"] == T - 0x20 and "haut de la pile noyau" in label_c)
+check("exception trap frame: rbx / rdi / rsi not known", "rbx" not in known_c and "rbp" in known_c and "rax" in known_c)
+check("stack of the running thread from it", [f.symbol for f in ck.stack(regs_c, known_c, pid=PID)] ==
+      ["fixture32!inner32+0x17", "fixture32!outer32+0x17", "fixture32!entry+0x7"])
+trap_frame(TF_TOP, BASE32 + 0x1027, T - 0x20, 0x23, 2)
+check("system call trap frame: rbx known", "rbx" in ck.cpu_context(1)[1])
+trap_frame(TF_TOP, 0xFFFFF80000123456, 0xFFFF800000727000, 0x10, 0)   # kernel-mode frame: not a user context
+trap_frame(TF_OLD, BASE32 + 0x103F, T - 0x1C, 0x23, 2)
+ck.trap_frame = TF_OLD
+check("else KTHREAD.TrapFrame", ck.cpu_context(1)[0]["rip"] == BASE32 + 0x103F and "KTHREAD.TrapFrame" in ck.cpu_context(1)[2])
+ck.trap_frame = 0
+check("else said: not saved", ck.cpu_context(1)[0]["rip"] == 0 and "non sauvegardé" in ck.cpu_context(1)[2])
 
 print("== WoW64 modules in a kernel dump (PEB32 loader list) ==")
 vmem = {}
