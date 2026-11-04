@@ -349,7 +349,7 @@ with Debugger.launch(r"C:\Outils\x64dbg\release") as dbg:
 | Breakpoints | `set_breakpoint(adr, condition, log, command, break_, singleshot)` | logiciel, avec condition, texte de log et commande automatiques |
 | | `set_hardware_breakpoint(adr, kind="x"/"w"/"r", size)`, `delete_breakpoint(adr)` | matériel ; suppression (tous si `adr` absent) |
 | Traces | `trace(fichier, condition, max_steps, step_over)` | trace (et enregistre) jusqu'à la condition |
-| | `export_trace(trace, sortie, fmt, slide)` | `TraceExport` (`fmt` : `json`, `csv`, `tenet`, `frinet`) ; renvoie le nombre d'instructions |
+| | `export_trace(trace, sortie, fmt, slide)` | `TraceExport` (`fmt` : `json`, `csv`, `tenet`, `frinet`, `ftt`) ; renvoie le nombre d'instructions |
 | Commandes | `cmd("texte")`, `command(nom, *args)`, `eval(expr)`, `result` | toute commande x64dbg ; `command()` échappe les arguments texte |
 
 Les adresses et valeurs acceptent un **entier** ou une **expression x64dbg** (chaîne) ; les résultats sont des entiers Python. Les erreurs (mémoire illisible, expression invalide, commande refusée) lèvent `BridgeError` avec le message d'x64dbg.

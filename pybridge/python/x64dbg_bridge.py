@@ -495,7 +495,7 @@ class Debugger:
                      slide: int | str | None = None) -> int:
         """Convert a trace file with the TraceExport command. Returns the instruction count.
 
-        fmt: "json", "csv", "tenet" or "frinet" (default: from the output file extension).
+        fmt: "json", "csv", "tenet", "frinet" or "ftt" (default: from the output file extension).
         slide: frinet only, the ASLR slide (an integer or an expression such as "mod.main()").
         """
         if slide is not None and not fmt:
