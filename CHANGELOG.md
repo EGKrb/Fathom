@@ -6,7 +6,7 @@ branch; this changelog covers Fathom's own additions and branding.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.2.0] - 2026-11-04
 
 ### Added
 - **Time Travel** — explore a trace backward and forward without leaving the
@@ -32,7 +32,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Tests: `src/tests/trace_export` (`.ftt` read back by an independent parser),
   `extracmds/tests/test_time_travel.py` (the `tt.*` commands checked against a
   real trace, x64 and x86).
-- **wineye 1.1.0** (`hvkdfusion/wineye.py`) — crash-dump debugger: `!analyze -v`,
+- **wineye 1.2.1** (`hvkdfusion/wineye.py`) — crash-dump debugger: `!analyze -v`,
   call stacks from kernel into user mode (`k`, `!thread`, `!process <pid> 7`),
   processors and contexts (`~`, `.thread`, `.cxr`, `.trap`, `.frame`),
   disassembly (`u`, `uf`, `ln`), source lines and locals (`dv`) with private
@@ -42,10 +42,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - wineye: user-mode minidumps as targets; on kernel dumps without user pages,
   modules rebuilt from the VADs and the user-mode entry frame of each thread
   symbolized; `kb`, and `dv` without a private PDB (parameter home slots).
+- wineye: the **32-bit code of WoW64 processes is unwound** (it was x64 only),
+  with or without PDBs: FPO / FrameData programs of the PDB, otherwise the
+  stack layout of the code itself (`/Oy` code included), bounded by the ebp
+  chain; `k` marks the 64-bit / 32-bit transitions; `kb`, `dv`, `r`, `u`, `uf`
+  and `!analyze` on x86 frames; x86 minidumps; 32-bit modules of WoW64
+  processes (PEB32) and modules completed from the VADs.
+- wineye: a processor without saved context (raw memory image, live target)
+  gets the user-mode registers of its running thread from the trap frame at
+  the top of its kernel stack.
+
+### Changed
+- HvKdFusion `setup` uses the components bundled in `release\hvkdfusion\`
+  (`hvlib\`, `memprocfs\`, `ntoseye\`, `dokany\`): the LiveCloudKd source
+  tree is no longer needed, MemProcFS is found next to the script, ntoseye
+  runs through WSL, and Dokany is pointed to (never installed by Fathom).
 
 ### Fixed
 - wineye: `vmm.dll` was never initialized (its argument parsing starts at
   index 0); kernel reads in a KVA-shadowed process context fall back to System.
+- wineye: the rbx / rdi / rsi of a trap frame are no longer taken as known after
+  an interrupt or an exception (the kernel saves them only on a system call).
+
+### Security
+- `src/cross/remote_server`: lief 0.17.2 (null pointer dereference in the ELF
+  parser of 0.16.4).
 
 ## [1.1.0] - 2026-10-29
 
