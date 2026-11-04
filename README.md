@@ -624,6 +624,8 @@ Files specific to Fathom (the rest is identical to x64dbg):
 
 ```
 src/dbg/TraceExport.cpp, .h          TraceExport command
+src/dbg/ftt/ftt.h                    .ftt time travel format: writer and reader
+extracmds/src/ttmodel.*, ttpanel.*   Time Travel navigation, tt.* commands and tab
 src/dbg/commands/cmd-tracing.cpp     command declaration
 src/tests/trace_export/              automated test
 docs/commands/tracing/TraceExport.md command documentation

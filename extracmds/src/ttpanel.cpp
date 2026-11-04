@@ -132,7 +132,8 @@ namespace
         uint32_t mViewThread = 0;
     };
 
-    class TimeTravelPanel : public QWidget
+    class TimeTravelPanel :
+        public QWidget
     {
     public:
         TimeTravelPanel()
@@ -298,7 +299,7 @@ namespace
             connect(open, &QPushButton::clicked, this, [this]
             {
                 const QString path = QFileDialog::getOpenFileName(this, tr("Ouvrir une trace"), QString(),
-                                     tr("Traces (*.ftt *.trace64 *.trace32);;Tous les fichiers (*.*)"));
+                    tr("Traces (*.ftt *.trace64 *.trace32);;Tous les fichiers (*.*)"));
                 if(path.isEmpty())
                     return;
                 std::string error;
