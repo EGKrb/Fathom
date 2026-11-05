@@ -38,6 +38,7 @@ static bool genericConditionalTraceCommand(TITANCBSTEP callback, STEPFUNCTION st
     }
 
     stepFunction(callback);
+    dbgtracearmthreads(callback);
     return cbDebugRunInternal(1, argv, history_clear);
 }
 
@@ -233,6 +234,85 @@ bool cbDebugTraceSetStepFilter(int argc, char* argv[])
     return true;
 }
 
+// TraceSetSkip none|system|only[, module...]: the calls into the modules that are not traced run at
+// full speed and are recorded as one instruction
+bool cbDebugTraceSetSkip(int argc, char* argv[])
+{
+    std::vector<String> modules;
+    if(argc < 2)
+    {
+        auto mode = dbggettraceskip(&modules);
+        if(mode == TRACE_SKIP_SYSTEM)
+            dputs(QT_TRANSLATE_NOOP("DBG", "Trace skip: calls into the system modules"));
+        else if(mode == TRACE_SKIP_ONLY)
+        {
+            String list;
+            for(auto & module : modules)
+                list += (list.empty() ? "" : ", ") + module;
+            dprintf(QT_TRANSLATE_NOOP("DBG", "Trace skip: calls out of %s\n"), list.empty() ? "the debuggee" : list.c_str());
+        }
+        else
+            dputs(QT_TRANSLATE_NOOP("DBG", "Trace skip: none"));
+        return true;
+    }
+    int mode;
+    if(_stricmp(argv[1], "none") == 0)
+        mode = TRACE_SKIP_NONE;
+    else if(_stricmp(argv[1], "system") == 0)
+        mode = TRACE_SKIP_SYSTEM;
+    else if(_stricmp(argv[1], "only") == 0)
+        mode = TRACE_SKIP_ONLY;
+    else
+    {
+        dprintf(QT_TRANSLATE_NOOP("DBG", "Invalid trace skip \"%s\", valid options are: none, system, only\n"), argv[1]);
+        return false;
+    }
+    for(int i = 2; i < argc; i++)
+    {
+        if(mode != TRACE_SKIP_ONLY)
+        {
+            dputs(QT_TRANSLATE_NOOP("DBG", "Only \"TraceSetSkip only\" takes a list of modules"));
+            return false;
+        }
+        String module = argv[i];
+        if(module.find('.') == String::npos)
+            module += ".dll";
+        modules.push_back(module);
+    }
+    if(!dbgsettraceskip(mode, modules))
+    {
+        dputs(QT_TRANSLATE_NOOP("DBG", "Cannot change the trace skip while a trace is active"));
+        return false;
+    }
+    return cbDebugTraceSetSkip(1, argv);
+}
+
+// TraceSetThreads all|current: trace every thread (each instruction in the order the threads execute
+// them) or only the current thread (default)
+bool cbDebugTraceSetThreads(int argc, char* argv[])
+{
+    if(argc > 1)
+    {
+        bool all;
+        if(_stricmp(argv[1], "all") == 0)
+            all = true;
+        else if(_stricmp(argv[1], "current") == 0)
+            all = false;
+        else
+        {
+            dprintf(QT_TRANSLATE_NOOP("DBG", "Invalid trace threads \"%s\", valid options are: all, current\n"), argv[1]);
+            return false;
+        }
+        if(!dbgsettracethreads(all))
+        {
+            dputs(QT_TRANSLATE_NOOP("DBG", "Cannot change the traced threads while a trace is active"));
+            return false;
+        }
+    }
+    dputs(dbggettracethreads() ? QT_TRANSLATE_NOOP("DBG", "Trace threads: all") : QT_TRANSLATE_NOOP("DBG", "Trace threads: current"));
+    return true;
+}
+
 bool cbDebugStartTraceRecording(int argc, char* argv[])
 {
     if(IsArgumentsLessThan(argc, 2))
@@ -351,6 +431,8 @@ bool cbDebugTraceExport(int argc, char* argv[])
             (unsigned long long)result.threads, (unsigned long long)result.switches, argv[2]);
     if(format == TraceExportFormat::Ftt)
         dprintf(QT_TRANSLATE_NOOP("DBG", "%llu memory snapshots\n"), (unsigned long long)result.snapshots);
+    if(result.skippedCalls)
+        dprintf(QT_TRANSLATE_NOOP("DBG", "%llu calls ran untraced (TraceSetSkip)\n"), (unsigned long long)result.skippedCalls);
     // $result1: CPU time samples, $result2: intervals in which other threads ran outside the trace
     varset("$result1", result.samples, false);
     varset("$result2", result.concurrentSamples, false);

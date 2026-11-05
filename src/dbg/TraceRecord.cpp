@@ -1,4 +1,5 @@
 #include "TraceRecord.h"
+#include "debugger.h"
 #include "module.h"
 #include "memory.h"
 #include "threading.h"
@@ -248,7 +249,7 @@ static void HandleZydisOperand(const Zydis & zydis, int opindex, DISASM_ARGTYPE*
     }
 }
 
-void TraceRecordManager::TraceExecuteRecord(const Zydis & newInstruction)
+void TraceRecordManager::TraceExecuteRecord(const Zydis & newInstruction, const unsigned char* bytes)
 {
     if(!isTraceRecordingEnabled())
         return;
@@ -265,6 +266,24 @@ void TraceRecordManager::TraceExecuteRecord(const Zydis & newInstruction)
     unsigned char newMemoryArrayCount = 0;
     DbgGetRegDumpEx((REGDUMP_AVX512*)&newContext.registers, sizeof(REGDUMP)); //TODO: Migrate
     newThreadId = GetDebugData()->dwThreadId;
+    //The same thread reported again without executing anything (a breakpoint on the instruction it
+    //stepped onto, see TraceSetThreads): keep its pending instruction. An empty instruction is the
+    //flush of an exception, whose instruction may have changed nothing.
+    //The flags (eflags and the FLAGS fields) may differ by the trap flag of the single step, and dr6
+    //by the cause of the event.
+    auto same = rtPending.find(newThreadId);
+    if(newInstruction.Success() && same != rtPending.end())
+    {
+        const size_t eflagsWord = offsetof(REGDUMP, regcontext.eflags) / sizeof(duint);
+        const size_t dr6Word = offsetof(REGDUMP, regcontext.dr6) / sizeof(duint);
+        const size_t flagsFirst = offsetof(REGDUMP, flags) / sizeof(duint);
+        const size_t flagsLast = (offsetof(REGDUMP, flags) + sizeof(FLAGS) - 1) / sizeof(duint);
+        bool identical = true;
+        for(size_t i = 0; i < _countof(newContext.regword) && identical; i++)
+            identical = i == eflagsWord || i == dr6Word || (i >= flagsFirst && i <= flagsLast) || same->second.context.regword[i] == newContext.regword[i];
+        if(identical)
+            return;
+    }
     // Don't try to resolve memory values for invalid/lea/nop instructions
     if(newInstruction.Success() && !newInstruction.IsNop() && newInstruction.GetId() != ZYDIS_MNEMONIC_LEA)
     {
@@ -316,94 +335,40 @@ void TraceRecordManager::TraceExecuteRecord(const Zydis & newInstruction)
         //TODO: PUSHAD
         assert(newMemoryArrayCount <= memoryArrayCount);
     }
-    if(rtPrevInstAvailable)
+    //Each thread keeps its pending instruction: its block is written at the next event of the same
+    //thread, when the instruction has executed (its memory is read after it). The blocks are therefore
+    //in the order the instructions completed, whatever the other threads did in between.
+    auto pending = rtPending.find(newThreadId);
+    if(pending != rtPending.end())
     {
-        for(unsigned char i = 0; i < rtOldMemoryArrayCount; i++)
+        const PendingInstruction & previous = pending->second;
+        duint afterMemory[memoryArrayCount];
+        for(unsigned char i = 0; i < previous.memoryCount; i++)
         {
-            MemRead(rtOldMemoryAddress[i], oldMemory + i, sizeof(duint));
+            afterMemory[i] = previous.memory[i];
+            MemRead(previous.memoryAddress[i], afterMemory + i, sizeof(duint));
         }
-        //Delta compress registers
-        //Data layout is Structure of Arrays to gather the same type of data in continuous memory to improve RLE compression performance.
-        //1byte:block type,1byte:reg changed count,1byte:memory accessed count,1byte:flags,4byte/none:threadid,string:opcode,1byte[]:position,ptrbyte[]:regvalue,1byte[]:flags,ptrbyte[]:address,ptrbyte[]:oldmem,ptrbyte[]:newmem
-
-        //Always record state of LAST INSTRUCTION! (NOT current instruction)
-        unsigned char changed = 0;
-        for(unsigned char i = 0; i < _countof(rtOldContext.regword); i++)
+        //Skipped call (user block 0x83, see TraceSkippedCall): before the block of the call
+        if(previous.skippedCall)
         {
-            //rtRecordedInstructions - 1 hack: always record full registers dump at first instruction (recorded at 2nd instruction execution time)
-            //prints ASCII table in run trace at first instruction :)
-            if(rtOldContext.regword[i] != newContext.regword[i] || rtOldContextChanged[i] || ((rtRecordedInstructions - 1) % MAX_INSTRUCTIONS_TRACED_FULL_REG_DUMP == 0))
-                changed++;
+            const uint32_t blockSize = 32;
+            const uint64_t instruction = rtRecordedInstructions;
+            const uint64_t callAddress = previous.context.registers.regcontext.cip;
+            const uint64_t callDestination = previous.skippedDestination;
+            const DWORD reserved = 0;
+            WriteBufferPtr[0] = 0x83;
+            memcpy(WriteBufferPtr + 1, &blockSize, sizeof(blockSize));
+            WriteBufferPtr += 1 + sizeof(blockSize);
+            memcpy(WriteBufferPtr, &instruction, sizeof(instruction));
+            memcpy(WriteBufferPtr + 8, &callAddress, sizeof(callAddress));
+            memcpy(WriteBufferPtr + 16, &callDestination, sizeof(callDestination));
+            memcpy(WriteBufferPtr + 24, &newThreadId, sizeof(newThreadId));
+            memcpy(WriteBufferPtr + 28, &reserved, sizeof(reserved));
+            WriteBufferPtr += blockSize;
         }
-        const bool writeThreadId = newThreadId != rtOldThreadId
-                                   || rtNeedThreadId
-                                   || ((rtRecordedInstructions - 1) % MAX_INSTRUCTIONS_TRACED_FULL_REG_DUMP == 0);
-        unsigned char blockFlags = writeThreadId ? 0x80 : 0;
-        blockFlags |= rtOldOpcodeSize;
-
-        unsigned char blockType = 0;
-        WriteBufferPtr[0] = blockType; //1byte: block type
-        WriteBufferPtr[1] = changed; //1byte: registers changed
-        WriteBufferPtr[2] = rtOldMemoryArrayCount; //1byte: memory accesses count
-        WriteBufferPtr[3] = blockFlags; //1byte: flags and opcode size
-        WriteBufferPtr += 4;
-        if(writeThreadId)
-        {
-            memcpy(WriteBufferPtr, &rtOldThreadId, sizeof(rtOldThreadId));
-            WriteBufferPtr += sizeof(rtOldThreadId);
-            rtNeedThreadId = (newThreadId != rtOldThreadId);
-        }
-        memcpy(WriteBufferPtr, rtOldOpcode, rtOldOpcodeSize);
-        WriteBufferPtr += rtOldOpcodeSize;
-        int lastChangedPosition = -1; //-1
-        for(int i = 0; i < _countof(rtOldContext.regword); i++) //1byte: position
-        {
-            if(rtOldContext.regword[i] != newContext.regword[i] || rtOldContextChanged[i] || ((rtRecordedInstructions - 1) % MAX_INSTRUCTIONS_TRACED_FULL_REG_DUMP == 0))
-            {
-                WriteBufferPtr[0] = (unsigned char)(i - lastChangedPosition - 1);
-                WriteBufferPtr++;
-                lastChangedPosition = i;
-            }
-        }
-        for(unsigned char i = 0; i < _countof(rtOldContext.regword); i++) //ptrbyte: newvalue
-        {
-            if(rtOldContext.regword[i] != newContext.regword[i] || rtOldContextChanged[i] || ((rtRecordedInstructions - 1) % MAX_INSTRUCTIONS_TRACED_FULL_REG_DUMP == 0))
-            {
-                memcpy(WriteBufferPtr, &rtOldContext.regword[i], sizeof(duint));
-                WriteBufferPtr += sizeof(duint);
-            }
-            rtOldContextChanged[i] = (rtOldContext.regword[i] != newContext.regword[i]);
-        }
-        for(unsigned char i = 0; i < rtOldMemoryArrayCount; i++) //1byte: flags
-        {
-            unsigned char memoryOperandFlags = 0;
-            if(rtOldMemory[i] == oldMemory[i]) //bit 0: memory is unchanged, no new memory is saved
-                memoryOperandFlags |= 1;
-            //proposed flags: is memory valid, is memory zero
-            WriteBufferPtr[0] = memoryOperandFlags;
-            WriteBufferPtr += 1;
-        }
-        for(unsigned char i = 0; i < rtOldMemoryArrayCount; i++) //ptrbyte: address
-        {
-            memcpy(WriteBufferPtr, &rtOldMemoryAddress[i], sizeof(duint));
-            WriteBufferPtr += sizeof(duint);
-        }
-        for(unsigned char i = 0; i < rtOldMemoryArrayCount; i++) //ptrbyte: old content
-        {
-            memcpy(WriteBufferPtr, &rtOldMemory[i], sizeof(duint));
-            WriteBufferPtr += sizeof(duint);
-        }
-        for(unsigned char i = 0; i < rtOldMemoryArrayCount; i++) //ptrbyte: new content
-        {
-            if(rtOldMemory[i] != oldMemory[i])
-            {
-                memcpy(WriteBufferPtr, &oldMemory[i], sizeof(duint));
-                WriteBufferPtr += sizeof(duint);
-            }
-        }
-        //Context switch marker (user block 0x81, skipped by readers that do not know it): the next
-        //instruction runs on another thread. See docs/developers/tracefile.md
-        if(newThreadId != rtOldThreadId)
+        //Context switch marker (user block 0x81, skipped by readers that do not know it): this
+        //instruction runs on another thread than the previous block. See docs/developers/tracefile.md
+        if(rtWrittenThreadValid && newThreadId != rtWrittenThreadId)
         {
             LARGE_INTEGER counter, frequency;
             QueryPerformanceCounter(&counter);
@@ -413,45 +378,133 @@ void TraceRecordManager::TraceExecuteRecord(const Zydis & newInstruction)
             WriteBufferPtr[0] = 0x81;
             memcpy(WriteBufferPtr + 1, &markerSize, sizeof(markerSize));
             WriteBufferPtr += 1 + sizeof(markerSize);
-            memcpy(WriteBufferPtr, &rtOldThreadId, sizeof(DWORD));
+            memcpy(WriteBufferPtr, &rtWrittenThreadId, sizeof(DWORD));
             memcpy(WriteBufferPtr + 4, &newThreadId, sizeof(DWORD));
             memcpy(WriteBufferPtr + 8, &instructionIndex, sizeof(uint64_t));
             memcpy(WriteBufferPtr + 16, &counter.QuadPart, sizeof(uint64_t));
             memcpy(WriteBufferPtr + 24, &frequency.QuadPart, sizeof(uint64_t));
             WriteBufferPtr += markerSize;
         }
-    }
-    //Switch context buffers
-    const DWORD previousThreadId = rtOldThreadId;
-    rtOldThreadId = newThreadId;
-    rtOldContext = newContext;
-    rtOldMemoryArrayCount = newMemoryArrayCount;
-    memcpy(rtOldMemory, newMemory, sizeof(newMemory));
-    memcpy(rtOldMemoryAddress, newMemoryAddress, sizeof(newMemoryAddress));
-    memset(rtOldOpcode, 0, 16);
-    rtOldOpcodeSize = newInstruction.Size() & 0x0F;
-    MemRead(newContext.registers.regcontext.cip, rtOldOpcode, rtOldOpcodeSize);
-    //Write to file
-    if(rtPrevInstAvailable)
-    {
-        if(WriteBufferPtr - WriteBuffer <= sizeof(WriteBuffer))
+        //Delta compress registers
+        //Data layout is Structure of Arrays to gather the same type of data in continuous memory to improve RLE compression performance.
+        //1byte:block type,1byte:reg changed count,1byte:memory accessed count,1byte:flags,4byte/none:threadid,string:opcode,1byte[]:position,ptrbyte[]:regvalue,1byte[]:flags,ptrbyte[]:address,ptrbyte[]:oldmem,ptrbyte[]:newmem
+
+        //A reader keeps the registers of the previous block: the block lists the registers that differ
+        //from it (and those the instruction changes), all of them every 512 instructions
+        const bool fullDump = rtFullDumpNext || rtRecordedInstructions % MAX_INSTRUCTIONS_TRACED_FULL_REG_DUMP == 0;
+        auto regChanged = [&](size_t i)
         {
-            rtWriteBuffer.insert(rtWriteBuffer.end(), WriteBuffer, WriteBufferPtr);
-            // The trace browser reads the file while tracing: flush at least every 250 ms
-            auto now = GetTickCount64();
-            if(rtWriteBuffer.size() >= 256 * 1024 || now - rtLastFlush >= 250)
-                FlushTraceFile();
+            return fullDump || previous.context.regword[i] != rtWrittenContext.regword[i] || previous.context.regword[i] != newContext.regword[i];
+        };
+        unsigned char changed = 0;
+        for(size_t i = 0; i < _countof(previous.context.regword); i++)
+        {
+            if(regChanged(i))
+                changed++;
         }
-        else
-            __debugbreak(); // Buffer overrun?
+        const bool writeThreadId = fullDump || !rtWrittenThreadValid || newThreadId != rtWrittenThreadId;
+        unsigned char blockFlags = writeThreadId ? 0x80 : 0;
+        blockFlags |= previous.opcodeSize;
+
+        unsigned char blockType = 0;
+        WriteBufferPtr[0] = blockType; //1byte: block type
+        WriteBufferPtr[1] = changed; //1byte: registers changed
+        WriteBufferPtr[2] = previous.memoryCount; //1byte: memory accesses count
+        WriteBufferPtr[3] = blockFlags; //1byte: flags and opcode size
+        WriteBufferPtr += 4;
+        if(writeThreadId)
+        {
+            memcpy(WriteBufferPtr, &newThreadId, sizeof(newThreadId));
+            WriteBufferPtr += sizeof(newThreadId);
+        }
+        memcpy(WriteBufferPtr, previous.opcode, previous.opcodeSize);
+        WriteBufferPtr += previous.opcodeSize;
+        int lastChangedPosition = -1; //-1
+        for(int i = 0; i < _countof(previous.context.regword); i++) //1byte: position
+        {
+            if(regChanged(i))
+            {
+                WriteBufferPtr[0] = (unsigned char)(i - lastChangedPosition - 1);
+                WriteBufferPtr++;
+                lastChangedPosition = i;
+            }
+        }
+        for(size_t i = 0; i < _countof(previous.context.regword); i++) //ptrbyte: newvalue
+        {
+            if(regChanged(i))
+            {
+                memcpy(WriteBufferPtr, &previous.context.regword[i], sizeof(duint));
+                WriteBufferPtr += sizeof(duint);
+            }
+        }
+        for(unsigned char i = 0; i < previous.memoryCount; i++) //1byte: flags
+        {
+            unsigned char memoryOperandFlags = 0;
+            if(previous.memory[i] == afterMemory[i]) //bit 0: memory is unchanged, no new memory is saved
+                memoryOperandFlags |= 1;
+            //proposed flags: is memory valid, is memory zero
+            WriteBufferPtr[0] = memoryOperandFlags;
+            WriteBufferPtr += 1;
+        }
+        for(unsigned char i = 0; i < previous.memoryCount; i++) //ptrbyte: address
+        {
+            memcpy(WriteBufferPtr, &previous.memoryAddress[i], sizeof(duint));
+            WriteBufferPtr += sizeof(duint);
+        }
+        for(unsigned char i = 0; i < previous.memoryCount; i++) //ptrbyte: old content
+        {
+            memcpy(WriteBufferPtr, &previous.memory[i], sizeof(duint));
+            WriteBufferPtr += sizeof(duint);
+        }
+        for(unsigned char i = 0; i < previous.memoryCount; i++) //ptrbyte: new content
+        {
+            if(previous.memory[i] != afterMemory[i])
+            {
+                memcpy(WriteBufferPtr, &afterMemory[i], sizeof(duint));
+                WriteBufferPtr += sizeof(duint);
+            }
+        }
+        rtWrittenContext = previous.context;
+        rtWrittenThreadId = newThreadId;
+        rtWrittenThreadValid = true;
+        rtFullDumpNext = false;
+        rtRecordedInstructions++;
     }
-    //CPU time sample before the next instruction: when the recording (re)starts, on a context switch
-    //and every 4096 instructions
-    const bool resync = !rtPrevInstAvailable;
-    if(resync || newThreadId != previousThreadId || rtRecordedInstructions - rtLastSample >= 4096)
+    //This thread's new pending instruction
+    PendingInstruction & next = rtPending[newThreadId];
+    next.context = newContext;
+    next.memoryCount = newMemoryArrayCount;
+    memcpy(next.memory, newMemory, sizeof(duint) * newMemoryArrayCount);
+    memcpy(next.memoryAddress, newMemoryAddress, sizeof(duint) * newMemoryArrayCount);
+    memset(next.opcode, 0, sizeof(next.opcode));
+    next.opcodeSize = newInstruction.Size() & 0x0F;
+    if(bytes && newInstruction.Success())
+        memcpy(next.opcode, bytes, next.opcodeSize);
+    else
+        MemRead(newContext.registers.regcontext.cip, next.opcode, next.opcodeSize);
+    next.skippedCall = false;
+    //Write to file
+    if(WriteBufferPtr - WriteBuffer <= sizeof(WriteBuffer))
+    {
+        rtWriteBuffer.insert(rtWriteBuffer.end(), WriteBuffer, WriteBufferPtr);
+        // The trace browser reads the file while tracing: flush at least every 250 ms
+        auto now = GetTickCount64();
+        if(rtWriteBuffer.size() >= 256 * 1024 || now - rtLastFlush >= 250)
+            FlushTraceFile();
+    }
+    else
+        __debugbreak(); // Buffer overrun?
+    //CPU time sample before the next instruction: when the recording (re)starts, when the traced
+    //thread changes and every 4096 instructions. When every thread is traced (TraceSetThreads all),
+    //the threads change all the time and the order is the one of their instructions: only the periodic
+    //samples are written.
+    const bool resync = rtResync;
+    const bool threadChanged = rtEventThreadValid && newThreadId != rtEventThreadId && !dbggettracethreads();
+    if(resync || threadChanged || rtRecordedInstructions - rtLastSample >= 4096)
         writeCpuSample(newThreadId, resync);
-    rtPrevInstAvailable = true;
-    rtRecordedInstructions++;
+    rtResync = false;
+    rtEventThreadId = newThreadId;
+    rtEventThreadValid = true;
 
     dbgtracebrowserneedsupdate();
 }
@@ -514,9 +567,22 @@ void TraceRecordManager::FlushTraceFile()
     rtWriteBuffer.clear();
 }
 
+void TraceRecordManager::TraceSkippedCall(duint address, duint destination)
+{
+    //User block 0x83 (see docs/developers/tracefile.md), written before the block of the call
+    if(!isTraceRecordingEnabled())
+        return;
+    auto pending = rtPending.find(GetDebugData()->dwThreadId);
+    if(pending != rtPending.end() && pending->second.context.registers.regcontext.cip == address)
+    {
+        pending->second.skippedCall = true;
+        pending->second.skippedDestination = destination;
+    }
+}
+
 void TraceRecordManager::FlushTraceExecuteRecord()
 {
-    if(!rtEnabled || !rtPrevInstAvailable)
+    if(!rtEnabled || rtPending.find(GetDebugData()->dwThreadId) == rtPending.end())
         return;
 
     // Trace records are written one instruction late, because the writer needs
@@ -525,10 +591,10 @@ void TraceRecordManager::FlushTraceExecuteRecord()
     // the pending instruction with the current exception context.
     Zydis nextInstruction;
     TraceExecuteRecord(nextInstruction);
-    rtPrevInstAvailable = false;
-    rtNeedThreadId = true;
-    for(size_t i = 0; i < _countof(rtOldContextChanged); i++)
-        rtOldContextChanged[i] = true;
+    //The pending instructions of the other threads are not known to complete
+    rtPending.clear();
+    rtResync = true;
+    rtFullDumpNext = true;
 }
 
 unsigned int TraceRecordManager::getHitCount(duint address)
@@ -650,12 +716,16 @@ bool TraceRecordManager::enableTraceRecording(bool enabled, const char* fileName
                     }
                 }
             }
-            rtPrevInstAvailable = false;
+            rtPending.clear();
+            rtWrittenThreadValid = false;
+            rtEventThreadValid = false;
+            rtFullDumpNext = true;
+            rtResync = true;
             rtEnabled = true;
+            //Every record reads the AVX registers: one system call per instruction for the whole context
+            SetEngineVariable(UE_ENGINE_CONTEXT_CACHE_AVX, true);
             rtRecordedInstructions = 0;
-            rtNeedThreadId = true;
-            for(size_t i = 0; i < _countof(rtOldContextChanged); i++)
-                rtOldContextChanged[i] = true;
+            rtLastSample = 0;
             dprintf(QT_TRANSLATE_NOOP("DBG", "Started trace recording to file: %s\n"), fileName);
             PLUG_CB_STARTTRACE startTraceInfo{};
             startTraceInfo.traceFilePath = fileName;
@@ -683,12 +753,13 @@ bool TraceRecordManager::enableTraceRecording(bool enabled, const char* fileName
         if(rtEnabled)
         {
             //The last interval ends here
-            if(rtPrevInstAvailable)
-                writeCpuSample(rtOldThreadId, false);
+            if(rtEventThreadValid)
+                writeCpuSample(rtEventThreadId, false);
             FlushTraceFile();
             CloseHandle(rtFile);
-            rtPrevInstAvailable = false;
+            rtPending.clear();
             rtEnabled = false;
+            SetEngineVariable(UE_ENGINE_CONTEXT_CACHE_AVX, false);
             dputs(QT_TRANSLATE_NOOP("DBG", "Trace recording stopped."));
             PLUG_CB_STOPTRACE stopTraceInfo{};
             stopTraceInfo.reserved = nullptr;
@@ -834,7 +905,7 @@ void dbgtraceexecute(duint CIP)
             if(TraceRecord.isTraceRecordingEnabled())
             {
                 TraceRecord.TraceExecute(CIP, instruction.Size());
-                TraceRecord.TraceExecuteRecord(instruction);
+                TraceRecord.TraceExecuteRecord(instruction, data);
             }
             else
             {
@@ -851,7 +922,7 @@ void dbgtraceexecute(duint CIP)
             if(MemRead(CIP, data, MAX_DISASM_BUFFER))
             {
                 instruction.DisassembleSafe(CIP, data, MAX_DISASM_BUFFER);
-                TraceRecord.TraceExecuteRecord(instruction);
+                TraceRecord.TraceExecuteRecord(instruction, data);
             }
         }
     }

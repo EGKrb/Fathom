@@ -56,8 +56,11 @@ public:
 
     void TraceExecute(duint address, duint size);
     //void TraceAccess(duint address, unsigned char size, TraceRecordByteType accessType);
-    void TraceExecuteRecord(const Zydis & newInstruction);
+    // bytes: the instruction bytes when the caller already read them (saves a memory read)
+    void TraceExecuteRecord(const Zydis & newInstruction, const unsigned char* bytes = nullptr);
     void FlushTraceExecuteRecord();
+    // User block 0x83: the instruction just recorded is a call that runs untraced (TraceSetSkip)
+    void TraceSkippedCall(duint address, duint destination);
     // Writes the buffered records to the trace file (called when the debugger pauses)
     void FlushTraceFile();
 
@@ -104,7 +107,6 @@ private:
     unsigned int instructionCounter = 0;
 
     bool rtEnabled = false;
-    bool rtPrevInstAvailable = false;
     HANDLE rtFile = nullptr;
     // Records are buffered: one WriteFile per instruction costs as much as the recording itself
     std::vector<unsigned char> rtWriteBuffer;
@@ -115,16 +117,28 @@ private:
     unsigned int rtLastSample = 0;
     std::vector<THREADCPUSAMPLE> rtCpuSamples;
 
-    REGDUMPWORD rtOldContext;
-    bool rtOldContextChanged[(FIELD_OFFSET(REGDUMP, lastError) + sizeof(DWORD)) / sizeof(duint)];
-    DWORD rtOldThreadId;
-    bool rtNeedThreadId;
-    duint rtOldMemory[32];
-    duint rtOldMemoryAddress[32];
-    char rtOldOpcode[16];
-    unsigned int rtRecordedInstructions;
-    unsigned char rtOldOpcodeSize;
-    unsigned char rtOldMemoryArrayCount;
+    //The instruction a thread is about to execute: its block is written at the next event of the
+    //same thread, once it executed
+    struct PendingInstruction
+    {
+        REGDUMPWORD context; //registers before the instruction
+        duint memory[32]; //memory operands before the instruction
+        duint memoryAddress[32];
+        unsigned char memoryCount = 0;
+        char opcode[16];
+        unsigned char opcodeSize = 0;
+        bool skippedCall = false; //TraceSkippedCall: the call runs untraced
+        duint skippedDestination = 0;
+    };
+    std::unordered_map<DWORD, PendingInstruction> rtPending;
+    REGDUMPWORD rtWrittenContext; //registers of the last written block: a reader's register state
+    DWORD rtWrittenThreadId = 0;
+    bool rtWrittenThreadValid = false;
+    bool rtFullDumpNext = true; //the next block lists every register
+    bool rtResync = true; //the recording (re)starts: the next CPU sample has the resync flag
+    DWORD rtEventThreadId = 0; //thread of the previous event
+    bool rtEventThreadValid = false;
+    unsigned int rtRecordedInstructions; //written blocks: index of the next block
 };
 
 extern TraceRecordManager TraceRecord;

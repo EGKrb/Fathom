@@ -188,6 +188,7 @@ set(X64DBG_STANDARD_TESTS
     trace_cmd_condition
     trace_export
     trace_threads
+    trace_all_threads
     database_callbacks
 )
 

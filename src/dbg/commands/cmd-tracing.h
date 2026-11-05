@@ -14,6 +14,8 @@ bool cbDebugTraceSetLog(int argc, char* argv[]);
 bool cbDebugTraceSetCommand(int argc, char* argv[]);
 bool cbDebugTraceSetLogFile(int argc, char* argv[]);
 bool cbDebugTraceSetStepFilter(int argc, char* argv[]);
+bool cbDebugTraceSetSkip(int argc, char* argv[]);
+bool cbDebugTraceSetThreads(int argc, char* argv[]);
 bool cbDebugStartTraceRecording(int argc, char* argv[]);
 bool cbDebugStopTraceRecording(int argc, char* argv[]);
 bool cbDebugTraceExport(int argc, char* argv[]);

@@ -28,6 +28,7 @@ enum TitanEngineVariable
     UE_ENGINE_DISABLE_ASLR = 12,
     UE_ENGINE_SAFE_STEP = 13,
     UE_ENGINE_CONTEXT_CACHE = 14,
+    UE_ENGINE_CONTEXT_CACHE_AVX = 15,
 };
 
 enum TitanBreakpointRemoveOption
@@ -333,6 +334,8 @@ __declspec(dllexport) const DEBUG_EVENT* GetDebugData(); // TODO: remove?
 __declspec(dllexport) void SetCustomHandler(TitanCustomHandler ExceptionId, TITANCALLBACKARG CallBack);
 __declspec(dllexport) void StepInto(TITANCBSTEP traceCallBack);
 __declspec(dllexport) void StepOver(TITANCBSTEP traceCallBack);
+__declspec(dllexport) void StepIntoThreads(TITANCBSTEP traceCallBack, const DWORD* excludedThreads, DWORD excludedCount); // arms the threads without a pending step
+__declspec(dllexport) void StepCancelThreads(TITANCBSTEP traceCallBack); // cancels them, except the event thread
 __declspec(dllexport) bool GetUnusedHardwareBreakPointRegister(LPDWORD RegisterIndex);
 __declspec(dllexport) bool SetHardwareBreakPoint(ULONG_PTR bpxAddress, DWORD IndexOfRegister, TitanHardwareBreakpointType bpxType, TitanHardwareBreakpointSize bpxSize, TITANCBHWBP bpxCallBack);
 __declspec(dllexport) bool DeleteHardwareBreakPoint(DWORD IndexOfRegister);

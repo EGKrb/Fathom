@@ -109,6 +109,17 @@ namespace
         uint64_t frequency; // QueryPerformanceFrequency
     };
 
+    // Call that ran untraced (TraceSetSkip), written by TraceRecordManager before its block (user
+    // block 0x83)
+    struct TraceExportSkippedCall
+    {
+        uint64_t instruction; // index of the call
+        uint64_t address; // of the call
+        uint64_t destination;
+        uint32_t thread;
+        uint32_t reserved;
+    };
+
     // CPU time sample written by TraceRecordManager (user block 0x82): 40-byte header, then the
     // threads (24 bytes each)
     struct TraceExportCpuThread
@@ -135,13 +146,14 @@ namespace
         UserBlock,
         SwitchMarker,
         CpuSample,
+        SkippedCall,
         EndOfFile,
         Truncated,
     };
 
     // Reads the next block. The entry keeps the register state of the previous instruction, because
     // registers are delta-encoded. Throws a String on malformed data.
-    TraceExportBlockResult TraceExportReadBlock(TraceExportReader & reader, TraceExportEntry & entry, TraceExportSwitchMarker & marker, TraceExportCpuSample & sample)
+    TraceExportBlockResult TraceExportReadBlock(TraceExportReader & reader, TraceExportEntry & entry, TraceExportSwitchMarker & marker, TraceExportCpuSample & sample, TraceExportSkippedCall & skipped)
     {
         unsigned char blockType;
         if(!reader.readExact(&blockType, 1))
@@ -154,6 +166,9 @@ namespace
                 return TraceExportBlockResult::Truncated;
             if(blockType == 0x81 && blockSize == sizeof(TraceExportSwitchMarker))
                 return reader.readExact(&marker, sizeof(marker)) ? TraceExportBlockResult::SwitchMarker : TraceExportBlockResult::Truncated;
+            static_assert(sizeof(TraceExportSkippedCall) == 32, "TraceExportSkippedCall is the 32-byte block");
+            if(blockType == 0x83 && blockSize == sizeof(TraceExportSkippedCall))
+                return reader.readExact(&skipped, sizeof(skipped)) ? TraceExportBlockResult::SkippedCall : TraceExportBlockResult::Truncated;
             if(blockType == 0x82 && blockSize >= 40 && (blockSize - 40) % 24 == 0)
             {
                 uint32_t header[10];
@@ -241,6 +256,8 @@ namespace
         bool switched = false; // the previous instruction ran on another thread
         uint32_t fromThread = 0;
         uint64_t timestamp = 0; // of the context switch, in 100 ns units (0 = unknown)
+        bool skipped = false; // a call that ran untraced (TraceSetSkip)
+        uint64_t skipDestination = 0;
         // A CPU time sample precedes the instruction: the threads that used CPU time outside the trace
         // during the interval [sampleFrom, seq) (see ftt::CpuSample)
         bool sampled = false;
@@ -384,6 +401,8 @@ namespace
         TraceExportEntry entry;
         TraceExportSwitchMarker marker = {};
         bool hasMarker = false;
+        TraceExportSkippedCall skipped = {};
+        bool hasSkipped = false;
         // CPU time samples: the previous one, and the threads recorded since it
         TraceExportCpuSample sample, base;
         bool hasBase = false;
@@ -401,7 +420,7 @@ namespace
         {
             while(true)
             {
-                auto blockResult = TraceExportReadBlock(reader, entry, marker, sample);
+                auto blockResult = TraceExportReadBlock(reader, entry, marker, sample, skipped);
                 if(blockResult == TraceExportBlockResult::EndOfFile)
                     break;
                 if(blockResult == TraceExportBlockResult::Truncated)
@@ -413,6 +432,11 @@ namespace
                 if(blockResult == TraceExportBlockResult::SwitchMarker)
                 {
                     hasMarker = true;
+                    continue;
+                }
+                if(blockResult == TraceExportBlockResult::SkippedCall)
+                {
+                    hasSkipped = true;
                     continue;
                 }
                 if(blockResult == TraceExportBlockResult::CpuSample)
@@ -467,6 +491,9 @@ namespace
                 if(record.switched && hasMarker && marker.frequency)
                     record.timestamp = (uint64_t)((double)marker.counter * 10000000.0 / (double)marker.frequency);
                 hasMarker = false;
+                record.skipped = hasSkipped && (uint64_t)record.ip == skipped.address; // the block that follows (an appended recording restarts the indexes)
+                record.skipDestination = record.skipped ? skipped.destination : 0;
+                hasSkipped = false;
                 record.sampled = pendingSample;
                 record.sampleFrom = pendingFrom;
                 record.sampleInterval = pendingInterval;
@@ -832,6 +859,8 @@ bool TraceExportFile(const char* traceFileName, const char* outputFileName, Trac
         threads.insert(record.thread);
         if(record.switched)
             result.switches++;
+        if(record.skipped)
+            result.skippedCalls++;
         if(options.thread)
             record.sampled = false;
         if(record.sampled)
@@ -908,6 +937,12 @@ bool TraceExportFile(const char* traceFileName, const char* outputFileName, Trac
                 if(record.timestamp)
                     line += ", \"timestamp\": " + std::to_string(record.timestamp);
                 line += "}";
+            }
+            if(record.skipped)
+            {
+                // the call ran untraced: the next instruction of this thread is after its return
+                line += ", \"skip\": ";
+                TraceExportJsonString(line, TraceExportHex((duint)record.skipDestination));
             }
             if(record.sampled)
             {

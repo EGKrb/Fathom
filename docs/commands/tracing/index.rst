@@ -17,6 +17,8 @@ Tracing
    TraceSetLog
    TraceSetCommand
    TraceSetLogFile
+   TraceSetSkip
+   TraceSetThreads
    StartRunTrace
    StopRunTrace
    TraceExport

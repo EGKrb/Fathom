@@ -6,6 +6,37 @@ branch; this changelog covers Fathom's own additions and branding.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+- **`TraceSetSkip none|system|only[, modules]`**: the calls into modules that are
+  not traced (the system modules, or every module but the listed ones) run at
+  full speed and are recorded as one instruction, like a step over. The
+  destination is resolved through the import thunks; code outside any module is
+  always traced. On a loop calling `wsprintfA`, `lstrlenA` and `GetTickCount64`
+  then `qsort`, recording the function goes from 255,571 to 69,711 instructions
+  and from 20.3 s to 5.5 s. A skipped call is marked in the trace (user block
+  `0x83`) and in the JSON export of `TraceExport` (`skip` member).
+- **`TraceSetThreads current|all`**: with `all`, every thread of the debuggee is
+  single-stepped (TitanEngine `StepIntoThreads` / `StepCancelThreads`), including
+  the threads created during the trace, and the trace holds the instructions of
+  all of them in the order of their debug events instead of following one thread.
+  Combined with `TraceSetSkip`, the loader initialization of a new thread runs at
+  full speed up to its start address. Test `trace_all_threads`: three workers
+  incrementing a shared counter with an interlocked instruction, every increment
+  recorded.
+
+### Changed
+- **Recorder**: an instruction is written when its own thread reports the next
+  one (once it executed), not at the next event of any thread, so the memory
+  written by an instruction of one thread is no longer read before it ran. The
+  file format is unchanged; a thread reported twice at the same instruction
+  without executing it gets one block.
+- **Recording about 12% faster**: while trace recording is on, TitanEngine reads
+  the AVX registers with the rest of the thread context in one system call per
+  instruction (engine variable `UE_ENGINE_CONTEXT_CACHE_AVX`), and the recorder
+  reuses the instruction bytes it already read.
+
 ## [1.3.0] - 2026-11-05
 
 ### Changed

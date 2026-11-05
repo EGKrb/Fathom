@@ -116,6 +116,17 @@ void dbgforcebreakstep();
 bool dbgsettracelogfile(const char* fileName);
 void dbgsettracepartyfilter(int party);
 int dbggettracepartyfilter();
+enum
+{
+    TRACE_SKIP_NONE,
+    TRACE_SKIP_SYSTEM, // calls into the system modules
+    TRACE_SKIP_ONLY, // calls into the modules that are not listed
+};
+bool dbgsettraceskip(int mode, const std::vector<String> & modules);
+int dbggettraceskip(std::vector<String>* modules);
+bool dbgsettracethreads(bool all);
+bool dbggettracethreads();
+void dbgtracearmthreads(TITANCBSTEP callback);
 void dbgsetdebuggeeinitscript(const char* fileName);
 const char* dbggetdebuggeeinitscript();
 void dbgsetforeground();

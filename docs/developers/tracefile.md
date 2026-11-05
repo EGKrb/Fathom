@@ -75,7 +75,21 @@ struct {
 };
 ```
 
-Between two samples a single thread is recorded (a context switch takes a sample). Another thread whose `CycleTime` grew in that interval used the processor while the recorded instructions ran; if its `ContextHash` changed too, it executed user-mode code outside the trace, so the order of its instructions relative to the recorded ones is unknown. A thread that used CPU time with an unchanged hash only ran kernel code: the suspensions of the debugger wake waiting threads at every debug event. `TraceExport` turns the samples into the intervals of the `.ftt` format.
+With [TraceSetThreads](../commands/tracing/TraceSetThreads.md) `current` (the default), a single thread is recorded between two samples (a context switch takes a sample). With `all`, every thread is recorded and the samples are only written when the recording starts and stops and every 4096 instructions. Another thread whose `CycleTime` grew in that interval used the processor while the recorded instructions ran; if its `ContextHash` changed too, it executed user-mode code outside the trace, so the order of its instructions relative to the recorded ones is unknown. A thread that used CPU time with an unchanged hash only ran kernel code: the suspensions of the debugger wake waiting threads at every debug event. `TraceExport` turns the samples into the intervals of the `.ftt` format.
+
+Block type `0x83` marks a call that ran untraced ([TraceSetSkip](../commands/tracing/TraceSetSkip.md)): the called code ran at full speed and the next instruction of the thread is at the return address. It is written right before the block of the call. Its 32-byte data is:
+
+```c++
+struct {
+    uint64_t Instruction; // index of the call in the trace (since the recording started)
+    uint64_t Address;     // address of the call
+    uint64_t Destination; // called address, after the import thunks
+    DWORD ThreadId;
+    DWORD Reserved;
+};
+```
+
+The block of an instruction holds the registers before it and the memory it accessed, read before and after it executed: the recorder keeps the instruction a thread is about to execute and writes its block when the same thread reports its next instruction. The blocks are in the order their instructions completed, which with several recorded threads is the order of their debug events. A thread that reports the same instruction twice without executing it (a breakpoint on the instruction it stepped onto) gets one block.
 
 `RegisterChanges` is a unsigned byte that counts the number of elements in the array `RegisterChangePosition` and `RegisterChangeNewData`.
 

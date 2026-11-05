@@ -39,6 +39,7 @@
 #include "handles.h"
 #include <shellapi.h>
 #include <tlhelp32.h>
+#include <unordered_set>
 
 // Debugging variables
 static PROCESS_INFORMATION g_pi = {0, 0, 0, 0};
@@ -115,6 +116,26 @@ HANDLE hDebugLoopThread = nullptr;
 DWORD dwDebugFlags = 0;
 std::atomic_bool bIsDebugging;
 
+// Trace skip filter, see dbgsettraceskip
+static int traceSkipMode = TRACE_SKIP_NONE;
+static std::vector<String> traceSkipModules; // traced modules of TRACE_SKIP_ONLY (lowercase, empty: the debuggee)
+static std::unordered_map<duint, bool> traceSkipCache; // module base -> skipped
+static duint traceSkippedCalls = 0;
+// TraceSetThreads all: every thread is single-stepped, see dbgtracearmthreads
+static bool traceAllThreads = false;
+static TITANCBSTEP traceThreadsCallback = nullptr;
+// TraceSetThreads all: the threads in a skipped call run to a breakpoint at the return address and
+// are not stepped meanwhile. Several threads can wait for the same return address: the breakpoint
+// stays until the last one is back.
+struct TraceSkipThread
+{
+    duint call;
+    duint ret;
+};
+static std::unordered_map<DWORD, TraceSkipThread> traceSkipThreads;
+static std::unordered_map<duint, int> traceSkipBreakpoints; // return address -> threads waiting for it
+static std::unordered_set<DWORD> traceSeenThreads; // threads that existed or were handled
+
 static duint dbgcleartracestate()
 {
     auto steps = traceState.StepCount();
@@ -140,6 +161,8 @@ bool dbgsettracecondition(const String & expression, duint maxSteps)
         return false;
     if(!traceState.InitTraceCondition(expression, maxSteps))
         return false;
+    traceSkippedCalls = 0;
+    traceSkipCache.clear(); // modules may have been unloaded since the last trace
     if(traceState.InitLogFile())
         return true;
     dbgcleartracestate();
@@ -198,6 +221,226 @@ void dbgsettracepartyfilter(int party)
 int dbggettracepartyfilter()
 {
     return traceState.GetPartyFilter();
+}
+
+// Trace skip filter (TraceSetSkip): a call whose destination is in a module that is not traced runs
+// at full speed (step over), the trace records it as one instruction. Code outside the modules is
+// always traced. Its state is declared next to dbgcleartracestate.
+
+bool dbgsettraceskip(int mode, const std::vector<String> & modules)
+{
+    if(dbgtraceactive())
+        return false;
+    traceSkipMode = mode;
+    traceSkipModules.clear();
+    for(auto & module : modules)
+        traceSkipModules.push_back(StringUtils::ToLower(module));
+    traceSkipCache.clear();
+    return true;
+}
+
+int dbggettraceskip(std::vector<String>* modules)
+{
+    if(modules)
+        *modules = traceSkipModules;
+    return traceSkipMode;
+}
+
+static bool traceSkipAddress(duint addr)
+{
+    auto base = ModBaseFromAddr(addr);
+    if(!base)
+        return false;
+    auto found = traceSkipCache.find(base);
+    if(found != traceSkipCache.end())
+        return found->second;
+    bool skip;
+    if(traceSkipMode == TRACE_SKIP_SYSTEM)
+        skip = ModGetParty(base) == mod_system;
+    else if(traceSkipModules.empty())
+        skip = base != dbgdebuggedbase();
+    else
+    {
+        char name[MAX_MODULE_SIZE] = "";
+        skip = ModNameFromAddr(base, name, true)
+               && std::find(traceSkipModules.begin(), traceSkipModules.end(), StringUtils::ToLower(name)) == traceSkipModules.end();
+    }
+    traceSkipCache.emplace(base, skip);
+    return skip;
+}
+
+bool dbgsettracethreads(bool all)
+{
+    if(dbgtraceactive())
+        return false;
+    traceAllThreads = all;
+    return true;
+}
+
+bool dbggettracethreads()
+{
+    return traceAllThreads;
+}
+
+// One thread less waits for the breakpoint at this return address
+static void traceSkipRelease(duint ret)
+{
+    auto found = traceSkipBreakpoints.find(ret);
+    if(found != traceSkipBreakpoints.end() && --found->second <= 0)
+    {
+        DeleteBPX(ret);
+        traceSkipBreakpoints.erase(found);
+    }
+}
+
+// Breakpoint at the return address of a skipped call (TraceSetThreads all): a thread is at an
+// instruction of the traced code, the trace goes on with it
+static void cbTraceSkipReturn()
+{
+    auto threadId = GetDebugData()->dwThreadId;
+    hActiveThread = ThreadGetHandle(threadId);
+    auto cip = GetContextDataEx(hActiveThread, UE_CIP);
+    auto owner = traceSkipThreads.find(threadId);
+    if(owner != traceSkipThreads.end() && owner->second.ret == cip)
+    {
+        traceSkipThreads.erase(owner);
+        traceSkipRelease(cip);
+    }
+    if(dbgtraceactive() && traceThreadsCallback)
+        traceThreadsCallback();
+}
+
+// TraceSetThreads all: arms a single-step with the trace callback on every thread that has none.
+// Each thread then reports each of its instructions, in the order the threads execute them, and
+// the trace records them all. Called when the trace starts and at every step (new threads, threads
+// that could not be armed).
+void dbgtracearmthreads(TITANCBSTEP callback)
+{
+    if(!traceAllThreads)
+        return;
+    const bool start = traceThreadsCallback == nullptr;
+    traceThreadsCallback = callback;
+    // A thread created during the trace starts in the system modules (loader initialization): with
+    // TraceSetSkip, it runs to its start address at full speed, like a skipped call
+    std::vector<THREADINFO> threads;
+    ThreadGetList(threads);
+    for(auto & thread : threads)
+    {
+        if(!traceSeenThreads.insert(thread.ThreadId).second || start || traceSkipMode == TRACE_SKIP_NONE)
+            continue;
+        auto entry = thread.ThreadStartAddress;
+        auto cip = GetContextDataEx(thread.Handle, UE_CIP);
+        if(!entry || !cip || cip == entry || traceSkipAddress(entry) || !traceSkipAddress(cip))
+            continue;
+        auto & waiting = traceSkipBreakpoints[entry];
+        if(waiting == 0 && !SetBPX(entry, UE_BREAKPOINT, (TITANCBSOFTBP)cbTraceSkipReturn))
+        {
+            traceSkipBreakpoints.erase(entry);
+            continue;
+        }
+        waiting++;
+        traceSkipThreads[thread.ThreadId] = { 0, entry };
+    }
+    // A thread in a skipped call is armed again when it is back in traced code without its
+    // breakpoint (another thread hit it, or a callback of the skipped code)
+    std::vector<DWORD> excluded;
+    for(auto it = traceSkipThreads.begin(); it != traceSkipThreads.end();)
+    {
+        // The event thread just started its skipped call, the others may not have executed it yet.
+        // After the int3 (ret + 1) the breakpoint event of the thread can be deferred by the engine.
+        auto hThread = ThreadGetHandle(it->first);
+        auto cip = it->first == GetDebugData()->dwThreadId || !hThread ? 0 : GetContextDataEx(hThread, UE_CIP);
+        if(it->first == GetDebugData()->dwThreadId || (cip && (cip == it->second.call || cip == it->second.ret || cip == it->second.ret + 1 || traceSkipAddress(cip))))
+        {
+            excluded.push_back(it->first);
+            ++it;
+        }
+        else
+        {
+            traceSkipRelease(it->second.ret);
+            it = traceSkipThreads.erase(it);
+        }
+    }
+    StepIntoThreads(callback, excluded.data(), (DWORD)excluded.size());
+}
+
+// Cancels the single-steps of the other threads when the trace ends (the debugger pauses)
+static void dbgtracecancelthreads()
+{
+    if(traceThreadsCallback)
+    {
+        StepCancelThreads(traceThreadsCallback);
+        traceThreadsCallback = nullptr;
+    }
+    traceSkipThreads.clear();
+    for(auto & bp : traceSkipBreakpoints)
+        DeleteBPX(bp.first);
+    traceSkipBreakpoints.clear();
+    traceSeenThreads.clear();
+}
+
+// Destination of the call or jmp at addr, 0 when it cannot be resolved
+static duint traceBranchDestination(duint addr, unsigned char* data, Zydis & zydis)
+{
+    if(!MemRead(addr, data, MAX_DISASM_BUFFER) || !zydis.Disassemble(addr, data) || !zydis.OpCount())
+        return 0;
+    auto value = (duint)zydis.ResolveOpValue(0, [&zydis](ZydisRegister reg) -> uint64_t
+    {
+        auto regName = zydis.RegName(reg);
+        return regName ? getregister(nullptr, regName) : 0;
+    });
+    const auto & op = zydis[0];
+    if(op.type == ZYDIS_OPERAND_TYPE_MEMORY)
+    {
+        if(op.mem.segment == ArchValue(ZYDIS_REGISTER_FS, ZYDIS_REGISTER_GS))
+            value += duint(GetTEBLocation(hActiveThread));
+        if(!MemRead(value, &value, sizeof(value)))
+            return 0;
+    }
+    else if(op.type != ZYDIS_OPERAND_TYPE_IMMEDIATE && op.type != ZYDIS_OPERAND_TYPE_REGISTER)
+        return 0;
+    return value;
+}
+
+// Steps over the call at cip when it goes to a module that is not traced, following the jmp thunks
+// of the imports. Returns false when the instruction must be stepped normally.
+static bool traceSkipCall(duint cip, TITANCBSTEP callback)
+{
+    if(traceSkipMode == TRACE_SKIP_NONE)
+        return false;
+    unsigned char data[MAX_DISASM_BUFFER];
+    Zydis zydis;
+    if(!MemRead(cip, data, sizeof(data)) || !zydis.Disassemble(cip, data) || !zydis.IsCall() || traceSkipAddress(cip))
+        return false;
+    auto dest = traceBranchDestination(cip, data, zydis);
+    for(int thunk = 0; dest && thunk < 3 && !traceSkipAddress(dest); thunk++)
+    {
+        // call thunk; thunk: jmp [__imp_X] (and the jmp rel32 of incremental linking)
+        Zydis jmp;
+        if(!MemRead(dest, data, sizeof(data)) || !jmp.Disassemble(dest, data) || !jmp.IsBranchType(Zydis::BTUncondJmp))
+            return false;
+        dest = traceBranchDestination(dest, data, jmp);
+    }
+    if(!dest || !traceSkipAddress(dest))
+        return false;
+    if(traceAllThreads)
+    {
+        // a breakpoint shared by the threads that wait for this return address; the thread runs
+        auto ret = cip + zydis.Size();
+        auto & waiting = traceSkipBreakpoints[ret];
+        if(waiting == 0 && !SetBPX(ret, UE_BREAKPOINT, (TITANCBSOFTBP)cbTraceSkipReturn))
+        {
+            traceSkipBreakpoints.erase(ret);
+            return false;
+        }
+        waiting++;
+        traceSkipThreads[GetDebugData()->dwThreadId] = { cip, ret };
+    }
+    else
+        StepOverWrapper(callback);
+    traceSkippedCalls++;
+    TraceRecord.TraceSkippedCall(cip, dest);
+    return true;
 }
 
 static DWORD WINAPI memMapThread(void* ptr)
@@ -281,6 +524,8 @@ static DWORD WINAPI dumpRefreshThread(void* ptr)
 */
 void cbDebuggerPaused()
 {
+    // Stop single-stepping the other threads (TraceSetThreads all)
+    dbgtracecancelthreads();
     // Clear tracing conditions
     dbgcleartracestate();
     dbgClearRtuBreakpoints();
@@ -1512,12 +1757,16 @@ static void __forceinline cbTraceUniversalConditionalStep(duint cip, STEPFUNCTIO
 #else //x86
         dprintf(QT_TRANSLATE_NOOP("DBG", "Trace finished after %u steps!\n"), steps);
 #endif //_WIN64
+        if(traceSkippedCalls)
+            dprintf(QT_TRANSLATE_NOOP("DBG", "%s calls into modules that are not traced ran at full speed (TraceSetSkip)\n"), std::to_string(traceSkippedCalls).c_str());
         cbRtrFinalStep(false); // TODO: replace with generic pause function
     }
     else //continue tracing
     {
         dbgtraceexecute(cip);
-        stepFunction(callback);
+        if(!traceSkipCall(cip, callback))
+            stepFunction(callback);
+        dbgtracearmthreads(callback);
     }
 }
 
@@ -1767,6 +2016,11 @@ static void cbCreateThread(CREATE_THREAD_DEBUG_INFO* CreateThread)
         command = StringUtils::sprintf("bp %p,\"%s %X\",ss", entry, GuiTranslateText(QT_TRANSLATE_NOOP("DBG", "Thread Entry")), dwThreadId);
         cmddirectexec(command.c_str());
     }
+
+    // TraceSetThreads all: the new thread is armed (or waited for at its entry) before its first
+    // instruction, a short thread could otherwise run to its end before the next traced event
+    if(dbgtraceactive() && traceThreadsCallback)
+        dbgtracearmthreads(traceThreadsCallback);
 
     if(settingboolget("Events", "ThreadStart", false))
     {

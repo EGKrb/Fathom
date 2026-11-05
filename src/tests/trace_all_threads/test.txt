@@ -1,0 +1,25 @@
+settingset Events, TlsCallbacks, 0
+settingset Events, TlsCallbacksSystem, 0
+settingset Events, EntryBreakpoint, 0
+init tests/trace_all_threads.exe
+bp trace_all_threads:Work
+run
+testassert cip == trace_all_threads:Work, "stopped in Work"
+var sp0, csp
+var tid0, tid()
+
+// Every thread is single-stepped, the calls into the system modules run at full speed
+TraceSetSkip system
+TraceSetThreads all
+StartTraceRecording "tests/trace_all_threads/trace.trace64"
+TraceIntoConditional tid() == tid0 && csp > sp0, .2000000
+StopTraceRecording
+testassert tid() == tid0, "the trace ends in the main thread, after Work"
+TraceSetThreads current
+TraceSetSkip none
+
+TraceExport "tests/trace_all_threads/trace.trace64", "tests/trace_all_threads/trace.json"
+testassert $result > .0, "instructions exported"
+
+bc trace_all_threads:Work
+run

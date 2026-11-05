@@ -30,6 +30,7 @@ struct TraceExportResult
     size_t samples = 0; // CPU time samples of the recorder (intervals whose concurrency is known)
     size_t concurrentSamples = 0; // intervals in which other threads ran outside the trace
     size_t snapshots = 0; // ftt: memory snapshots written
+    size_t skippedCalls = 0; // calls that ran untraced (TraceSetSkip, user block 0x83)
     String error; // set when the export failed
 };
 

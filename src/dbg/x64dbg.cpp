@@ -270,6 +270,8 @@ static void registercommands()
     dbgcmdnew("TraceSetCommand,SetTraceCommand", cbDebugTraceSetCommand, true); //Set trace command text + condition
     dbgcmdnew("TraceSetLogFile,SetTraceLogFile", cbDebugTraceSetLogFile, true); //Set trace log file
     dbgcmdnew("TraceSetStepFilter,SetTraceStepFilter", cbDebugTraceSetStepFilter, true); //Set trace step filter (none/user/system)
+    dbgcmdnew("TraceSetSkip,SetTraceSkip", cbDebugTraceSetSkip, false); //Calls that run untraced (none/system/only)
+    dbgcmdnew("TraceSetThreads,SetTraceThreads", cbDebugTraceSetThreads, false); //Traced threads (current/all)
     dbgcmdnew("StartTraceRecording,StartRunTrace,opentrace", cbDebugStartTraceRecording, true); //start run trace (Ollyscript command "opentrace" "opens run trace window")
     dbgcmdnew("StopTraceRecording,StopRunTrace,tc", cbDebugStopTraceRecording, true); //stop run trace (and Ollyscript command)
     dbgcmdnew("TraceExport", cbDebugTraceExport, false); //export a trace file to JSON or CSV

@@ -23,6 +23,8 @@ EXPORTS
     GetDebugData
     SetCustomHandler
     StepInto
+    StepIntoThreads
+    StepCancelThreads
     StepOver
     GetUnusedHardwareBreakPointRegister
     SetHardwareBreakPoint
