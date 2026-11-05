@@ -124,6 +124,7 @@ enum
 };
 bool dbgsettraceskip(int mode, const std::vector<String> & modules);
 int dbggettraceskip(std::vector<String>* modules);
+bool dbgtracethreadssupported();
 bool dbgsettracethreads(bool all);
 bool dbggettracethreads();
 void dbgtracearmthreads(TITANCBSTEP callback);

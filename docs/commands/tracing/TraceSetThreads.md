@@ -8,7 +8,7 @@ Choose the threads that the next traces single-step: only the current thread (de
 
 ## results
 
-This command does not set any result variables.
+`$result` is set to 1, or to 0 when `all` is not supported by the debug engine: the TitanEngine emulation of GleeBug (`Engine` / `DebugEngine` = 1) cannot step every thread, the current thread is then traced.
 
 ## remarks
 

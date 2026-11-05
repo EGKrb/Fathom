@@ -11,6 +11,9 @@ var tid0, tid()
 // Every thread is single-stepped, the calls into the system modules run at full speed
 TraceSetSkip system
 TraceSetThreads all
+// The TitanEngine emulation of GleeBug cannot step every thread ($result = 0): no trace, check.py skips
+cmp $result, 0
+je unsupported
 StartTraceRecording "tests/trace_all_threads/trace.trace64"
 TraceIntoConditional tid() == tid0 && csp > sp0, .2000000
 StopTraceRecording
@@ -20,6 +23,11 @@ TraceSetSkip none
 
 TraceExport "tests/trace_all_threads/trace.trace64", "tests/trace_all_threads/trace.json"
 testassert $result > .0, "instructions exported"
+jmp done
 
+unsupported:
+TraceSetSkip none
+
+done:
 bc trace_all_threads:Work
 run

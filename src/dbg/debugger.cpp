@@ -269,9 +269,24 @@ static bool traceSkipAddress(duint addr)
     return skip;
 }
 
+// The debug engine provides StepIntoThreads and StepCancelThreads (the TitanEngine of Fathom, not the
+// TitanEngine emulation of GleeBug): x64dbg delay-loads them, a missing export would crash at the call
+bool dbgtracethreadssupported()
+{
+    static int supported = -1;
+    if(supported == -1)
+    {
+        auto engine = GetModuleHandleW(L"TitanEngine.dll");
+        if(!engine)
+            return false;
+        supported = GetProcAddress(engine, "StepIntoThreads") && GetProcAddress(engine, "StepCancelThreads") ? 1 : 0;
+    }
+    return supported == 1;
+}
+
 bool dbgsettracethreads(bool all)
 {
-    if(dbgtraceactive())
+    if(dbgtraceactive() || (all && !dbgtracethreadssupported()))
         return false;
     traceAllThreads = all;
     return true;
@@ -316,7 +331,7 @@ static void cbTraceSkipReturn()
 // that could not be armed).
 void dbgtracearmthreads(TITANCBSTEP callback)
 {
-    if(!traceAllThreads)
+    if(!traceAllThreads || !dbgtracethreadssupported())
         return;
     const bool start = traceThreadsCallback == nullptr;
     traceThreadsCallback = callback;

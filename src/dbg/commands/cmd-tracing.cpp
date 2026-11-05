@@ -303,6 +303,14 @@ bool cbDebugTraceSetThreads(int argc, char* argv[])
             dprintf(QT_TRANSLATE_NOOP("DBG", "Invalid trace threads \"%s\", valid options are: all, current\n"), argv[1]);
             return false;
         }
+        // $result: 1 when every thread can be traced, so that a script can do without it
+        varset("$result", duint(1), false);
+        if(all && !dbgtracethreadssupported())
+        {
+            varset("$result", duint(0), false);
+            dputs(QT_TRANSLATE_NOOP("DBG", "TraceSetThreads all is not supported by this debug engine (it needs the TitanEngine of Fathom), the current thread is traced"));
+            return true;
+        }
         if(!dbgsettracethreads(all))
         {
             dputs(QT_TRANSLATE_NOOP("DBG", "Cannot change the traced threads while a trace is active"));

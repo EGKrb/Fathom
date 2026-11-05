@@ -6,6 +6,14 @@ branch; this changelog covers Fathom's own additions and branding.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+- `TraceSetThreads all` with the GleeBug debug engine: its TitanEngine emulation
+  has no `StepIntoThreads` / `StepCancelThreads`, and the first call crashed
+  (delay-loaded import). The command now sets `$result` to 0, says so and traces
+  the current thread; the test `trace_all_threads` skips on that engine.
+
 ## [1.4.0] - 2026-11-05
 
 ### Added

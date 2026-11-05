@@ -24,6 +24,14 @@ def fail(message: str) -> int:
 def main() -> int:
     args = parse_args()
     runtime_dir = Path(args.runtime_dir)
+    if not args.current and not (runtime_dir / "trace.trace64").exists():
+        # TraceSetThreads all is not supported by the TitanEngine emulation of GleeBug: nothing recorded
+        ini = Path(args.userdir) / "headless.ini"
+        engine = ini.read_text(encoding="utf-8") if ini.is_file() else ""
+        if "DebugEngine=0" in engine or "DebugEngine" not in engine:
+            return fail("nothing was recorded with TitanEngine")
+        print("TraceSetThreads all not supported by this debug engine, skipped")
+        return 0
     try:
         lines = (runtime_dir / "workers.txt").read_text().split()
         counter, expected = int(lines[0], 16), int(lines[1])
