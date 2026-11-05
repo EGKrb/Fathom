@@ -6,7 +6,7 @@ branch; this changelog covers Fathom's own additions and branding.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.3.0] - 2026-11-05
 
 ### Changed
 - **Faster recording**: tracing with trace recording is about 2.5 times faster
@@ -29,6 +29,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   executed code outside the trace. `tt.info`, `tt.seek` and the tooltips of the
   Time Travel tab tell whether the order of a context switch is exact or
   approximate, and which threads ran outside the trace.
+- pybridge: the docstring of `export_trace()` documents `$result1` / `$result2`.
 - Tests: `src/tests/trace_threads` (a spinning worker makes the order
   approximate, a blocked one leaves it exact).
 
