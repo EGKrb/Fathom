@@ -37,6 +37,8 @@ public:
         uint32_t levels = 0;
         uint32_t snapshotInterval = 0;
         std::string hash; // module hash of the traced process (TraceExport metadata)
+        size_t cpuSamples = 0; // sampled intervals (0: recorded before the CPU time samples existed)
+        size_t concurrentSamples = 0; // intervals in which other threads executed code outside the trace
     };
     Info GetInfo();
 
@@ -55,6 +57,9 @@ public:
     bool FindWrite(uint64_t address, size_t size, bool forward);
 
     bool Instruction(uint64_t seq, ftt::Instruction & instruction);
+    // The CPU time sample of the interval that contains instruction seq (false: not sampled). For a
+    // context switch at seq, the order between seq - 1 and seq is that of OrderSample(seq - 1).
+    bool OrderSample(uint64_t seq, ftt::CpuSample & sample);
     // The viewed thread's instruction after / before seq (to list its timeline)
     bool NextInViewThread(uint64_t seq, bool forward, uint64_t & result);
     // The viewed thread's instruction at the position (or its next / last one)

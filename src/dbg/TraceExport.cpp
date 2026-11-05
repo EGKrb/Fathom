@@ -109,18 +109,39 @@ namespace
         uint64_t frequency; // QueryPerformanceFrequency
     };
 
+    // CPU time sample written by TraceRecordManager (user block 0x82): 40-byte header, then the
+    // threads (24 bytes each)
+    struct TraceExportCpuThread
+    {
+        uint32_t thread = 0;
+        uint32_t flags = 0; // bit 0: contextHash is valid
+        uint64_t cycles = 0; // QueryThreadCycleTime
+        uint64_t contextHash = 0; // of the user-mode integer and control registers
+    };
+
+    struct TraceExportCpuSample
+    {
+        uint64_t nextInstruction = 0;
+        uint64_t counter = 0; // QueryPerformanceCounter
+        uint64_t frequency = 0; // QueryPerformanceFrequency
+        uint32_t nextThread = 0;
+        uint32_t flags = 0; // bit 0: the recording (re)started, the previous sample does not apply
+        std::vector<TraceExportCpuThread> threads;
+    };
+
     enum class TraceExportBlockResult
     {
         Instruction,
         UserBlock,
         SwitchMarker,
+        CpuSample,
         EndOfFile,
         Truncated,
     };
 
     // Reads the next block. The entry keeps the register state of the previous instruction, because
     // registers are delta-encoded. Throws a String on malformed data.
-    TraceExportBlockResult TraceExportReadBlock(TraceExportReader & reader, TraceExportEntry & entry, TraceExportSwitchMarker & marker)
+    TraceExportBlockResult TraceExportReadBlock(TraceExportReader & reader, TraceExportEntry & entry, TraceExportSwitchMarker & marker, TraceExportCpuSample & sample)
     {
         unsigned char blockType;
         if(!reader.readExact(&blockType, 1))
@@ -133,6 +154,28 @@ namespace
                 return TraceExportBlockResult::Truncated;
             if(blockType == 0x81 && blockSize == sizeof(TraceExportSwitchMarker))
                 return reader.readExact(&marker, sizeof(marker)) ? TraceExportBlockResult::SwitchMarker : TraceExportBlockResult::Truncated;
+            if(blockType == 0x82 && blockSize >= 40 && (blockSize - 40) % 24 == 0)
+            {
+                uint32_t header[10];
+                if(!reader.readExact(header, sizeof(header)))
+                    return TraceExportBlockResult::Truncated;
+                memcpy(&sample.nextInstruction, &header[0], 8);
+                memcpy(&sample.counter, &header[2], 8);
+                memcpy(&sample.frequency, &header[4], 8);
+                sample.nextThread = header[6];
+                sample.flags = header[7];
+                const uint32_t count = header[8];
+                if(count != (blockSize - 40) / 24)
+                    throw String("Bad CPU time sample");
+                sample.threads.resize(count);
+                static_assert(sizeof(TraceExportCpuThread) == 24, "TraceExportCpuThread is the 24-byte entry");
+                for(auto & thread : sample.threads)
+                {
+                    if(!reader.readExact(&thread, sizeof(thread)))
+                        return TraceExportBlockResult::Truncated;
+                }
+                return TraceExportBlockResult::CpuSample;
+            }
             return reader.skip(blockSize) ? TraceExportBlockResult::UserBlock : TraceExportBlockResult::Truncated;
         }
         if(blockType != 0)
@@ -198,6 +241,12 @@ namespace
         bool switched = false; // the previous instruction ran on another thread
         uint32_t fromThread = 0;
         uint64_t timestamp = 0; // of the context switch, in 100 ns units (0 = unknown)
+        // A CPU time sample precedes the instruction: the threads that used CPU time outside the trace
+        // during the interval [sampleFrom, seq) (see ftt::CpuSample)
+        bool sampled = false;
+        uint64_t sampleFrom = 0;
+        uint64_t sampleInterval = 0; // 100 ns units
+        std::vector<ftt::CpuSampleThread> outside;
     };
 
     // The registers of a REGDUMP in the .ftt catalog, for the selected levels
@@ -307,11 +356,20 @@ namespace
 
     using TraceExportCallback = std::function<void(TraceExportRecord &)>;
 
+    // A CPU time sample after the last instruction (taken when the recording stopped)
+    struct TraceExportTrailingSample
+    {
+        bool present = false;
+        uint64_t from = 0;
+        uint64_t interval = 0;
+        std::vector<ftt::CpuSampleThread> threads;
+    };
+
     // Thrown by a callback to stop reading (its error is already in the result)
     struct TraceExportAbort { };
 
     // Reads a .trace32/.trace64 recorded by x64dbg and calls back for each instruction
-    bool TraceExportReadTrace(const char* traceFileName, uint32_t levels, TraceExportHeader & header, TraceExportResult & result, const TraceExportCallback & callback)
+    bool TraceExportReadTrace(const char* traceFileName, uint32_t levels, TraceExportHeader & header, TraceExportResult & result, TraceExportTrailingSample & trailing, const TraceExportCallback & callback)
     {
         // FILE_SHARE_WRITE allows exporting a trace that is still being recorded
         Handle hTrace = CreateFileW(StringUtils::Utf8ToUtf16(traceFileName).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
@@ -326,6 +384,15 @@ namespace
         TraceExportEntry entry;
         TraceExportSwitchMarker marker = {};
         bool hasMarker = false;
+        // CPU time samples: the previous one, and the threads recorded since it
+        TraceExportCpuSample sample, base;
+        bool hasBase = false;
+        uint64_t baseSeq = 0;
+        std::set<uint32_t> recordedSinceBase;
+        bool pendingSample = false;
+        uint64_t pendingFrom = 0;
+        uint64_t pendingInterval = 0;
+        std::vector<ftt::CpuSampleThread> pendingOutside;
         bool hasPrevious = false;
         uint32_t previousThread = 0;
         TraceExportRecord record;
@@ -334,7 +401,7 @@ namespace
         {
             while(true)
             {
-                auto blockResult = TraceExportReadBlock(reader, entry, marker);
+                auto blockResult = TraceExportReadBlock(reader, entry, marker, sample);
                 if(blockResult == TraceExportBlockResult::EndOfFile)
                     break;
                 if(blockResult == TraceExportBlockResult::Truncated)
@@ -346,6 +413,42 @@ namespace
                 if(blockResult == TraceExportBlockResult::SwitchMarker)
                 {
                     hasMarker = true;
+                    continue;
+                }
+                if(blockResult == TraceExportBlockResult::CpuSample)
+                {
+                    // an interval without instruction (two samples in a row) tells nothing
+                    pendingSample = hasBase && !(sample.flags & 1) && sample.frequency != 0 && seq > baseSeq;
+                    if(pendingSample)
+                    {
+                        pendingFrom = baseSeq;
+                        pendingInterval = (uint64_t)((double)(sample.counter - base.counter) * 10000000.0 / (double)sample.frequency);
+                        pendingOutside.clear();
+                        // The recorded threads used CPU time for their recorded instructions (and the
+                        // single steps): only the others ran outside the trace
+                        for(auto & thread : sample.threads)
+                        {
+                            if(recordedSinceBase.count(thread.thread))
+                                continue;
+                            const TraceExportCpuThread* before = nullptr;
+                            for(auto & previousThread : base.threads)
+                                if(previousThread.thread == thread.thread)
+                                    before = &previousThread;
+                            const uint64_t cycles = thread.cycles - (before ? std::min(before->cycles, thread.cycles) : 0);
+                            if(cycles == 0)
+                                continue;
+                            ftt::CpuSampleThread outside;
+                            outside.thread = thread.thread;
+                            outside.cycles = cycles;
+                            // a new thread, or one without a register hash, may have executed anything
+                            outside.userCode = !before || !(before->flags & 1) || !(thread.flags & 1) || before->contextHash != thread.contextHash;
+                            pendingOutside.push_back(outside);
+                        }
+                    }
+                    base = sample;
+                    hasBase = true;
+                    baseSeq = seq;
+                    recordedSinceBase.clear();
                     continue;
                 }
                 if(blockResult == TraceExportBlockResult::UserBlock)
@@ -364,6 +467,14 @@ namespace
                 if(record.switched && hasMarker && marker.frequency)
                     record.timestamp = (uint64_t)((double)marker.counter * 10000000.0 / (double)marker.frequency);
                 hasMarker = false;
+                record.sampled = pendingSample;
+                record.sampleFrom = pendingFrom;
+                record.sampleInterval = pendingInterval;
+                record.outside.clear();
+                if(pendingSample)
+                    record.outside.swap(pendingOutside);
+                pendingSample = false;
+                recordedSinceBase.insert(entry.threadId);
                 record.memory.clear();
                 for(unsigned char i = 0; i < entry.memoryCount; i++)
                 {
@@ -388,13 +499,17 @@ namespace
         {
             result.error = StringUtils::sprintf("Malformed trace file after %llu instructions: %s", (unsigned long long)seq, error.c_str());
         }
+        trailing.present = pendingSample;
+        trailing.from = pendingFrom;
+        trailing.interval = pendingInterval;
+        trailing.threads = pendingOutside;
         return true;
     }
 
     // Reads a .ftt trace and calls back for each instruction of the selected thread (0 = all), in
     // the global order of the instructions. levels is masked with the registers the .ftt holds,
     // before the first callback
-    bool TraceExportReadFtt(const char* traceFileName, uint32_t thread, TraceExportHeader & header, TraceExportResult & result, uint32_t & levels, const TraceExportCallback & callback)
+    bool TraceExportReadFtt(const char* traceFileName, uint32_t thread, TraceExportHeader & header, TraceExportResult & result, uint32_t & levels, TraceExportTrailingSample & trailing, const TraceExportCallback & callback)
     {
         ftt::Reader reader;
         std::string error;
@@ -413,12 +528,22 @@ namespace
         levels &= reader.levels() | ftt::LevelGpr;
         TraceExportShadow shadow;
         TraceExportRecord record;
+        const auto & samples = reader.cpuSamples();
+        size_t nextSample = 0;
         // every thread is read, so that the memory known so far includes their accesses
         reader.forEach(0, [&](const ftt::Instruction & ins, const ftt::RegisterFile & regs)
         {
             record.memory = ins.memory;
             for(auto & access : record.memory)
                 shadow.complete(access);
+            while(nextSample < samples.size() && samples[nextSample].seq < ins.seq)
+                nextSample++;
+            record.sampled = nextSample < samples.size() && samples[nextSample].seq == ins.seq;
+            record.sampleFrom = record.sampled ? samples[nextSample].from : 0;
+            record.sampleInterval = record.sampled ? samples[nextSample].interval : 0;
+            record.outside.clear();
+            if(record.sampled)
+                record.outside = samples[nextSample].threads;
             if(thread && ins.thread != thread)
                 return true;
             record.seq = ins.seq;
@@ -433,6 +558,13 @@ namespace
             callback(record);
             return true;
         });
+        if(!samples.empty() && samples.back().seq >= reader.count())
+        {
+            trailing.present = true;
+            trailing.from = samples.back().from;
+            trailing.interval = samples.back().interval;
+            trailing.threads = samples.back().threads;
+        }
         return true;
     }
 
@@ -700,6 +832,18 @@ bool TraceExportFile(const char* traceFileName, const char* outputFileName, Trac
         threads.insert(record.thread);
         if(record.switched)
             result.switches++;
+        if(options.thread)
+            record.sampled = false;
+        if(record.sampled)
+        {
+            result.samples++;
+            for(auto & thread : record.outside)
+                if(thread.userCode)
+                {
+                    result.concurrentSamples++;
+                    break;
+                }
+        }
 
         if(format == TraceExportFormat::Ftt)
         {
@@ -711,6 +855,8 @@ bool TraceExportFile(const char* traceFileName, const char* outputFileName, Trac
             in.registers = &record.regs;
             in.memory = record.memory;
             in.switchTimestamp = record.timestamp;
+            if(record.sampled)
+                writer.cpuSample(record.sampleFrom, record.sampleInterval, record.outside);
             writer.instruction(in);
             result.count++;
             return;
@@ -761,6 +907,27 @@ bool TraceExportFile(const char* traceFileName, const char* outputFileName, Trac
                 line += ", \"switch\": {\"from\": " + std::to_string(record.fromThread);
                 if(record.timestamp)
                     line += ", \"timestamp\": " + std::to_string(record.timestamp);
+                line += "}";
+            }
+            if(record.sampled)
+            {
+                // outside: threads that executed code outside the trace; kernel: CPU time in the kernel only
+                line += ", \"cpu\": {\"from\": " + std::to_string(record.sampleFrom) + ", \"interval\": " + std::to_string(record.sampleInterval);
+                for(bool userCode : { true, false })
+                {
+                    line += userCode ? ", \"outside\": {" : ", \"kernel\": {";
+                    bool first = true;
+                    for(auto & thread : record.outside)
+                    {
+                        if(thread.userCode != userCode)
+                            continue;
+                        if(!first)
+                            line += ", ";
+                        first = false;
+                        line += "\"" + std::to_string(thread.thread) + "\": " + std::to_string(thread.cycles);
+                    }
+                    line += "}";
+                }
                 line += "}";
             }
             line += ", \"address\": ";
@@ -851,18 +1018,19 @@ bool TraceExportFile(const char* traceFileName, const char* outputFileName, Trac
 
     // json / csv / ftt export the registers of the levels chosen; from a .ftt, of the levels it has
     bool ok;
+    TraceExportTrailingSample trailing;
     try
     {
         if(fromFtt)
         {
-            ok = TraceExportReadFtt(traceFileName, options.thread, header, result, levels, [&](TraceExportRecord & record)
+            ok = TraceExportReadFtt(traceFileName, options.thread, header, result, levels, trailing, [&](TraceExportRecord & record)
             {
                 onRecord(record);
             });
         }
         else
         {
-            ok = TraceExportReadTrace(traceFileName, ftt::LevelAll, header, result, [&](TraceExportRecord & record)
+            ok = TraceExportReadTrace(traceFileName, ftt::LevelAll, header, result, trailing, [&](TraceExportRecord & record)
             {
                 if(options.thread && record.thread != options.thread)
                     return;
@@ -894,6 +1062,18 @@ bool TraceExportFile(const char* traceFileName, const char* outputFileName, Trac
     }
 
     result.threads = threads.size();
+    if(trailing.present && !options.thread)
+    {
+        result.samples++;
+        for(auto & thread : trailing.threads)
+            if(thread.userCode)
+            {
+                result.concurrentSamples++;
+                break;
+            }
+        if(format == TraceExportFormat::Ftt)
+            writer.cpuSample(trailing.from, trailing.interval, trailing.threads);
+    }
     if(format == TraceExportFormat::Ftt)
     {
         std::string error;

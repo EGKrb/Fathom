@@ -200,6 +200,8 @@ def read_ftt(path: Path) -> dict:
                 pages[base] = (known, content)
             snapshots.append((first, pages))
             continue
+        if kind != 1:
+            continue  # other chunks (4: CPU time samples) are skipped, like readers that do not know them
         regs = {}
         nkey = struct.unpack_from("<H", raw, 0)[0]
         p = 2

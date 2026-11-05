@@ -351,5 +351,11 @@ bool cbDebugTraceExport(int argc, char* argv[])
             (unsigned long long)result.threads, (unsigned long long)result.switches, argv[2]);
     if(format == TraceExportFormat::Ftt)
         dprintf(QT_TRANSLATE_NOOP("DBG", "%llu memory snapshots\n"), (unsigned long long)result.snapshots);
+    // $result1: CPU time samples, $result2: intervals in which other threads ran outside the trace
+    varset("$result1", result.samples, false);
+    varset("$result2", result.concurrentSamples, false);
+    if(result.samples)
+        dprintf(QT_TRANSLATE_NOOP("DBG", "Thread order: %llu of %llu sampled intervals exact, %llu with other threads running outside the trace (approximate order)\n"),
+                (unsigned long long)(result.samples - result.concurrentSamples), (unsigned long long)result.samples, (unsigned long long)result.concurrentSamples);
     return true;
 }

@@ -27,6 +27,8 @@ struct TraceExportResult
     duint slide = 0; // Frinet: ASLR slide written to the file (0 = none)
     size_t threads = 0; // number of threads in the exported timeline
     size_t switches = 0; // context switches
+    size_t samples = 0; // CPU time samples of the recorder (intervals whose concurrency is known)
+    size_t concurrentSamples = 0; // intervals in which other threads ran outside the trace
     size_t snapshots = 0; // ftt: memory snapshots written
     String error; // set when the export failed
 };

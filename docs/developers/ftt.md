@@ -107,6 +107,30 @@ byte (bit `i % 8` of `known[i / 8]`) set when that byte's content is known. A sn
 pages whose known content changed since the previous snapshot: the most recent copy of a page is the
 one of the last snapshot that contains it.
 
+### CPU time samples data (kind 4)
+
+The intervals between the CPU time samples of the recorder (user block `0x82` of the `.trace64`, see
+[tracefile.md](tracefile.md)), at most one chunk, `count` samples in increasing `seq` order:
+
+```
+struct {
+  uint64 seq;                        // the sample was taken right before instruction seq
+  varint length;                     // the interval covers the instructions [seq - length, seq)
+  varint duration;                   // 100 ns units
+  varint n;
+  struct { uint32 thread; varint cycles; uint8 flags; } threads[n];
+} samples[count];
+```
+
+`threads` lists the threads other than the recorded one that used CPU time in the interval, with
+`flags` bit 0 set when the thread executed user-mode code outside the trace (its user-mode registers
+changed). An interval without such a thread has an **exact** global order: no other thread ran code
+while its instructions executed. Otherwise the order of that thread's code relative to the recorded
+instructions is unknown (the recorder single-steps one thread, the others run freely). For a context
+switch at instruction `S`, the order between `S - 1` and `S` is that of the interval that contains
+`S - 1`. The last sample can have `seq` equal to the instruction count (taken when the recording
+stopped). Traces recorded before the samples existed have no such chunk: their order is unknown.
+
 ### Index chunk data (kind 3, not listed in itself)
 
 ```
@@ -120,6 +144,8 @@ uint64 instructionCount;
 ### Trailer (16 bytes)
 
 `uint64 indexOffset; char magic[4] = "FTTX"; uint32 reserved;` — at the very end of the file.
+
+Readers skip the chunk kinds they do not know (kind 4 was added without changing the version).
 
 ## Register catalog
 

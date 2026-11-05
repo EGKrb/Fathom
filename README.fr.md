@@ -276,7 +276,7 @@ La même navigation dans les scripts et `headless.exe` (ExtraCmds, aussi en 32 b
 
 | Commande | Effet |
 |---|---|
-| `tt.open fichier` / `tt.close` / `tt.info` | ouvre un `.ftt` (ou convertit une `.trace64`), le ferme, résumé et threads |
+| `tt.open fichier` / `tt.close` / `tt.info` | ouvre un `.ftt` (ou convertit une `.trace64`), le ferme, résumé, threads et ordre des threads |
 | `tt.seek n` | aller à l'instruction n (numéro de séquence global) |
 | `tt.next [n]` / `tt.prev [n]` | n instructions en avant / en arrière, tous threads |
 | `tt.tnext [n]` / `tt.tprev [n]` | n instructions en avant / en arrière dans le thread affiché |
@@ -289,7 +289,9 @@ La même navigation dans les scripts et `headless.exe` (ExtraCmds, aussi en 32 b
 
 ### Enregistrement
 
-Les traces viennent toujours de l'enregistreur de x64dbg (pas-à-pas, `StartTraceRecording`), qui écrit désormais un marqueur horodaté quand l'instruction suivante s'exécute sur un autre thread. Un enregistreur par instrumentation binaire dynamique ou par Intel PT n'est pas fourni : Intel PT exige un processeur Intel et un pilote noyau.
+Les traces viennent de l'enregistreur de x64dbg (pas-à-pas, `StartTraceRecording`) : le débogueur arrête le programme à chaque instruction. Il est environ **2,5 fois plus rapide que dans Fathom 1.2.0** (environ 11 800 instructions enregistrées par seconde au lieu de 4 700 avec `TraceIntoConditional` sur la machine de référence ; 19 000 au lieu de 8 900 sans enregistrement). Pendant le traitement d'un événement de débogage, tous les threads du programme sont gelés : TitanEngine lit désormais le contexte d'un thread une fois par événement au lieu d'une fois par registre, réutilise les handles de threads qu'il possède et ne suspend plus des threads déjà gelés, et l'enregistreur écrit ses blocs par paquets au lieu d'une écriture par instruction. `Engine` / `ContextCache` à 0 rétablit l'ancien comportement. Cela reste du pas-à-pas : adapté aux fonctions, fragments de code et challenges plutôt qu'à des programmes entiers.
+
+L'enregistreur fait avancer un thread pendant que les autres s'exécutent librement : l'ordre des instructions de plusieurs threads dans la trace est l'ordre observé par le débogueur. Pour savoir quand il est exact, l'enregistreur échantillonne tous les threads (temps CPU et registres en mode utilisateur) au début et à la fin de l'enregistrement, à chaque changement de contexte et toutes les 4096 instructions. Un intervalle pendant lequel aucun autre thread n'a exécuté de code a un ordre **exact** ; sinon l'ordre est **approximatif** et les threads qui ont tourné hors de la trace sont listés avec leurs cycles CPU : `tt.info`, infobulles des changements de contexte dans l'onglet Time Travel, membre `cpu` de l'export JSON, `$result1` / `$result2` de `TraceExport`. Les threads qui se sont seulement réveillés dans le noyau (les suspensions du débogueur réveillent les threads en attente) ne le rendent pas approximatif. L'ordre est mesuré, pas imposé, et le code exécuté par le thread enregistré lui-même sans pas-à-pas (un appel franchi en step over) n'est pas signalé. Un enregistreur par instrumentation binaire dynamique ou par Intel PT n'est pas fourni : Intel PT exige un processeur Intel et un pilote noyau.
 
 ---
 

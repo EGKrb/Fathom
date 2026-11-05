@@ -3,6 +3,7 @@
 #include "_global.h"
 #include "_dbgfunctions.h"
 #include "debugger.h"
+#include "thread.h"
 #include "jansson/jansson_x64dbg.h"
 #include <zydis_wrapper.h>
 
@@ -57,6 +58,8 @@ public:
     //void TraceAccess(duint address, unsigned char size, TraceRecordByteType accessType);
     void TraceExecuteRecord(const Zydis & newInstruction);
     void FlushTraceExecuteRecord();
+    // Writes the buffered records to the trace file (called when the debugger pauses)
+    void FlushTraceFile();
 
     unsigned int getHitCount(duint address);
     TraceRecordByteType getByteType(duint address);
@@ -103,6 +106,14 @@ private:
     bool rtEnabled = false;
     bool rtPrevInstAvailable = false;
     HANDLE rtFile = nullptr;
+    // Records are buffered: one WriteFile per instruction costs as much as the recording itself
+    std::vector<unsigned char> rtWriteBuffer;
+    ULONGLONG rtLastFlush = 0;
+    // CPU time sample (user block 0x82): the cycles used by every thread, so that a reader knows
+    // whether other threads ran outside the trace between two samples
+    void writeCpuSample(DWORD nextThreadId, bool resync);
+    unsigned int rtLastSample = 0;
+    std::vector<THREADCPUSAMPLE> rtCpuSamples;
 
     REGDUMPWORD rtOldContext;
     bool rtOldContextChanged[(FIELD_OFFSET(REGDUMP, lastError) + sizeof(DWORD)) / sizeof(duint)];

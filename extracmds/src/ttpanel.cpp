@@ -469,8 +469,19 @@ namespace
                         item->setData(Qt::UserRole, (qulonglong)ins.seq);
                     if(ins.switched)
                     {
-                        item->setBackground(QColor(255, 236, 179));
-                        item->setToolTip(tr("Changement de contexte : l'instruction précédente s'exécutait sur le thread %1").arg(ins.fromThread));
+                        // The order of the switch is exact when no other thread executed code meanwhile
+                        ftt::CpuSample sample;
+                        const bool sampled = ins.seq > 0 && model.OrderSample(ins.seq - 1, sample);
+                        const bool exact = sampled && sample.exact();
+                        item->setBackground(sampled && !exact ? QColor(255, 205, 160) : QColor(255, 236, 179));
+                        QString order = !sampled ? tr("ordre non échantillonné")
+                                        : exact ? tr("ordre exact : aucun autre thread n'a exécuté de code entre-temps")
+                                        : tr("ordre approximatif : d'autres threads ont exécuté du code hors de la trace");
+                        if(sampled)
+                            for(auto & thread : sample.threads)
+                                if(thread.userCode)
+                                    order += tr("\nthread %1 : %2 cycles hors trace").arg(thread.thread).arg((qulonglong)thread.cycles);
+                        item->setToolTip(tr("Changement de contexte : l'instruction précédente s'exécutait sur le thread %1\n%2").arg(ins.fromThread).arg(order));
                     }
                     if(ins.seq == position)
                     {

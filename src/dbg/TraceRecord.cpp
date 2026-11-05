@@ -422,6 +422,7 @@ void TraceRecordManager::TraceExecuteRecord(const Zydis & newInstruction)
         }
     }
     //Switch context buffers
+    const DWORD previousThreadId = rtOldThreadId;
     rtOldThreadId = newThreadId;
     rtOldContext = newContext;
     rtOldMemoryArrayCount = newMemoryArrayCount;
@@ -435,23 +436,82 @@ void TraceRecordManager::TraceExecuteRecord(const Zydis & newInstruction)
     {
         if(WriteBufferPtr - WriteBuffer <= sizeof(WriteBuffer))
         {
-            DWORD written;
-            WriteFile(rtFile, WriteBuffer, (DWORD)(WriteBufferPtr - WriteBuffer), &written, NULL);
-            if(written < DWORD(WriteBufferPtr - WriteBuffer)) //Disk full?
-            {
-                CloseHandle(rtFile);
-                String error = stringformatinline(StringUtils::sprintf("{winerror@%x}", GetLastError()));
-                dprintf(QT_TRANSLATE_NOOP("DBG", "Trace recording has stopped unexpectedly because WriteFile() failed. GetLastError() = %s.\n"), error.c_str());
-                rtEnabled = false;
-            }
+            rtWriteBuffer.insert(rtWriteBuffer.end(), WriteBuffer, WriteBufferPtr);
+            // The trace browser reads the file while tracing: flush at least every 250 ms
+            auto now = GetTickCount64();
+            if(rtWriteBuffer.size() >= 256 * 1024 || now - rtLastFlush >= 250)
+                FlushTraceFile();
         }
         else
             __debugbreak(); // Buffer overrun?
     }
+    //CPU time sample before the next instruction: when the recording (re)starts, on a context switch
+    //and every 4096 instructions
+    const bool resync = !rtPrevInstAvailable;
+    if(resync || newThreadId != previousThreadId || rtRecordedInstructions - rtLastSample >= 4096)
+        writeCpuSample(newThreadId, resync);
     rtPrevInstAvailable = true;
     rtRecordedInstructions++;
 
     dbgtracebrowserneedsupdate();
+}
+
+void TraceRecordManager::writeCpuSample(DWORD nextThreadId, bool resync)
+{
+    //User block 0x82, see docs/developers/tracefile.md. The debuggee is frozen: the cycle times of
+    //its threads are those right before the next instruction.
+    rtLastSample = rtRecordedInstructions;
+    ThreadSampleCpu(rtCpuSamples);
+    LARGE_INTEGER counter, frequency;
+    QueryPerformanceCounter(&counter);
+    QueryPerformanceFrequency(&frequency);
+    const uint64_t nextInstruction = rtRecordedInstructions;
+    const DWORD flags = resync ? 1 : 0; //bit 0: the recording (re)started, the previous sample does not apply
+    const DWORD count = (DWORD)rtCpuSamples.size();
+    const DWORD reserved = 0;
+    const uint32_t blockSize = 40 + 24 * count;
+    size_t position = rtWriteBuffer.size();
+    rtWriteBuffer.resize(position + 1 + sizeof(blockSize) + blockSize);
+    unsigned char* ptr = rtWriteBuffer.data() + position;
+    auto put = [&ptr](const void* data, size_t size)
+    {
+        memcpy(ptr, data, size);
+        ptr += size;
+    };
+    *ptr++ = 0x82;
+    put(&blockSize, sizeof(blockSize));
+    put(&nextInstruction, sizeof(nextInstruction));
+    put(&counter.QuadPart, sizeof(counter.QuadPart));
+    put(&frequency.QuadPart, sizeof(frequency.QuadPart));
+    put(&nextThreadId, sizeof(nextThreadId));
+    put(&flags, sizeof(flags));
+    put(&count, sizeof(count));
+    put(&reserved, sizeof(reserved));
+    for(auto & thread : rtCpuSamples)
+    {
+        const DWORD threadFlags = thread.HasContext ? 1 : 0; //bit 0: ContextHash is valid
+        put(&thread.ThreadId, sizeof(thread.ThreadId));
+        put(&threadFlags, sizeof(threadFlags));
+        put(&thread.CycleTime, sizeof(thread.CycleTime));
+        put(&thread.ContextHash, sizeof(thread.ContextHash));
+    }
+}
+
+void TraceRecordManager::FlushTraceFile()
+{
+    rtLastFlush = GetTickCount64();
+    if(!rtEnabled || rtWriteBuffer.empty())
+        return;
+    DWORD written = 0;
+    WriteFile(rtFile, rtWriteBuffer.data(), (DWORD)rtWriteBuffer.size(), &written, NULL);
+    if(written < DWORD(rtWriteBuffer.size())) //Disk full?
+    {
+        CloseHandle(rtFile);
+        String error = stringformatinline(StringUtils::sprintf("{winerror@%x}", GetLastError()));
+        dprintf(QT_TRANSLATE_NOOP("DBG", "Trace recording has stopped unexpectedly because WriteFile() failed. GetLastError() = %s.\n"), error.c_str());
+        rtEnabled = false;
+    }
+    rtWriteBuffer.clear();
 }
 
 void TraceRecordManager::FlushTraceExecuteRecord()
@@ -622,6 +682,10 @@ bool TraceRecordManager::enableTraceRecording(bool enabled, const char* fileName
     {
         if(rtEnabled)
         {
+            //The last interval ends here
+            if(rtPrevInstAvailable)
+                writeCpuSample(rtOldThreadId, false);
+            FlushTraceFile();
             CloseHandle(rtFile);
             rtPrevInstAvailable = false;
             rtEnabled = false;

@@ -1,0 +1,31 @@
+settingset Events, TlsCallbacks, 0
+settingset Events, TlsCallbacksSystem, 0
+settingset Events, EntryBreakpoint, 0
+init tests/trace_threads.exe, busy
+bp trace_threads:Work
+run
+testassert cip == trace_threads:Work, "stopped in Work"
+
+StartTraceRecording "tests/trace_threads/trace.busy.trace64"
+TraceIntoConditional 0, .12000
+StopTraceRecording
+
+// A CPU time sample every 4096 instructions: the spinning worker ran outside the trace
+TraceExport "tests/trace_threads/trace.busy.trace64", "tests/trace_threads/trace.busy.json"
+testassert $result1 >= .2, "cpu time samples"
+testassert $result2 >= .1, "the spinning worker ran outside the trace"
+var samples, $result1
+var concurrent, $result2
+
+// The samples survive the conversion to .ftt and back
+TraceExport "tests/trace_threads/trace.busy.trace64", "tests/trace_threads/trace.busy.ftt"
+testassert $result1 == samples && $result2 == concurrent, "ftt conversion keeps the samples"
+TraceExport "tests/trace_threads/trace.busy.ftt", "tests/trace_threads/trace.busy.ftt.json"
+testassert $result1 == samples && $result2 == concurrent, "json export of the ftt trace"
+
+// One thread's timeline has no global order
+TraceExport "tests/trace_threads/trace.busy.trace64", "tests/trace_threads/trace.busy.thread.json", json, thread=tid()
+testassert $result1 == 0, "no samples with a thread filter"
+
+bc trace_threads:Work
+run

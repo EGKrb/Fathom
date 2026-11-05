@@ -37,6 +37,7 @@ namespace ftt
         ChunkThread = 1, // the instructions of one thread
         ChunkSnapshot = 2, // memory pages whose content changed since the previous snapshot
         ChunkIndex = 3, // the index, at the end of the file
+        ChunkCpuSamples = 4, // CPU time samples of the recorder (readers skip the kinds they do not know)
     };
 
     enum EventTag : uint8_t
@@ -312,6 +313,36 @@ namespace ftt
     };
 #pragma pack(pop)
 
+    // The recorder samples every thread (when the recording starts, on each context switch and every
+    // 4096 instructions): its CPU time and its user-mode registers. Between two samples only one
+    // thread is recorded. Another thread whose user-mode registers changed in that interval executed
+    // code outside the trace, concurrently with the recorded instructions: their relative order is
+    // unknown. No such thread: the global order of the interval is exact. A thread that used CPU time
+    // with unchanged registers only ran kernel code (the suspensions of the debugger wake waiting
+    // threads, for example).
+    struct CpuSampleThread
+    {
+        uint32_t thread = 0;
+        uint64_t cycles = 0; // CPU cycles used in the interval (user and kernel mode)
+        bool userCode = false; // its user-mode registers changed: it executed code outside the trace
+    };
+
+    struct CpuSample
+    {
+        uint64_t from = 0; // the interval covers the instructions [from, seq)
+        uint64_t seq = 0; // taken right before this instruction
+        uint64_t interval = 0; // duration since the previous sample, in 100 ns units
+        std::vector<CpuSampleThread> threads; // the other threads that used CPU time in the interval
+
+        bool exact() const
+        {
+            for(auto & thread : threads)
+                if(thread.userCode)
+                    return false;
+            return true;
+        }
+    };
+
     // ---------------------------------------------------------------------------- the writer ---
     struct InstructionIn
     {
@@ -358,6 +389,25 @@ namespace ftt
             fwrite(&header, sizeof(header), 1, mFile);
             fwrite(metaJson.data(), 1, metaJson.size(), mFile);
             return !ferror(mFile);
+        }
+
+        // A CPU time sample taken before the next instruction, for the interval that started before
+        // instruction from
+        void cpuSample(uint64_t from, uint64_t interval, const std::vector<CpuSampleThread> & threads)
+        {
+            mSamples.raw<uint64_t>(mNextSeq);
+            mSamples.varint(mNextSeq - std::min(from, mNextSeq));
+            mSamples.varint(interval);
+            mSamples.varint(threads.size());
+            for(auto & thread : threads)
+            {
+                mSamples.raw<uint32_t>(thread.thread);
+                mSamples.varint(thread.cycles);
+                mSamples.u8(thread.userCode ? 1 : 0);
+            }
+            if(mSampleCount++ == 0)
+                mFirstSampleSeq = mNextSeq;
+            mLastSampleSeq = mNextSeq;
         }
 
         void instruction(const InstructionIn & in)
@@ -464,6 +514,8 @@ namespace ftt
                 if(t.chunkCount)
                     flushThread(tid, t);
             }
+            if(mSampleCount)
+                writeChunk(ChunkCpuSamples, 0, mSampleCount, mFirstSampleSeq, mLastSampleSeq, 0, mSamples.data, true);
             // index
             ByteWriter index;
             index.raw<uint32_t>((uint32_t)mIndex.size());
@@ -620,6 +672,10 @@ namespace ftt
         std::vector<uint32_t> mThreadOrder;
         std::unordered_map<uint64_t, Page> mPages;
         std::vector<IndexEntry> mIndex;
+        ByteWriter mSamples;
+        uint32_t mSampleCount = 0;
+        uint64_t mFirstSampleSeq = 0;
+        uint64_t mLastSampleSeq = 0;
     };
 
     // ---------------------------------------------------------------------------- the reader ---
@@ -725,6 +781,11 @@ namespace ftt
                     mThreadChunks[e.thread].push_back(e);
                 else if(e.kind == ChunkSnapshot)
                     mSnapshots.push_back(e);
+                else if(e.kind == ChunkCpuSamples && !readSamples(e))
+                {
+                    error = "unreadable CPU time samples";
+                    return false;
+                }
             }
             uint32_t nt = 0;
             r.raw(nt);
@@ -749,6 +810,19 @@ namespace ftt
         uint64_t count() const { return mCount; }
         const std::vector<ThreadInfo> & threads() const { return mThreads; }
         size_t snapshotCount() const { return mSnapshots.size(); }
+        // CPU time samples of the recorder, by seq (empty for traces recorded before they existed)
+        const std::vector<CpuSample> & cpuSamples() const { return mSamples; }
+
+        // The sample whose interval contains instruction seq (the first one taken after it), or
+        // nullptr when no sample covers it (no samples, before the first or after the last one).
+        // For a context switch at seq, the order between seq - 1 and seq is that of sample(seq - 1).
+        const CpuSample* cpuSample(uint64_t seq) const
+        {
+            auto it = std::upper_bound(mSamples.begin(), mSamples.end(), seq, [](uint64_t s, const CpuSample & sample) { return s < sample.seq; });
+            if(it == mSamples.end() || it->from > seq)
+                return nullptr;
+            return &*it;
+        }
 
         // The spans of global time covered by a thread's chunks (the thread runs inside them,
         // interleaved with the others)
@@ -1157,6 +1231,36 @@ namespace ftt
             return seq <= pos->lastSeq ? &*pos : nullptr;
         }
 
+        bool readSamples(const IndexEntry & e)
+        {
+            ChunkHeader h;
+            std::vector<uint8_t> raw;
+            if(!readChunk(e.offset, h, raw) || h.kind != ChunkCpuSamples)
+                return false;
+            ByteReader r(raw.data(), raw.size());
+            mSamples.clear();
+            for(uint32_t i = 0; i < h.count; i++)
+            {
+                CpuSample sample;
+                uint64_t n;
+                uint64_t length;
+                if(!r.raw(sample.seq) || !r.varint(length) || length > sample.seq || !r.varint(sample.interval) || !r.varint(n) || n > 0x100000)
+                    return false;
+                sample.from = sample.seq - length;
+                for(uint64_t j = 0; j < n; j++)
+                {
+                    CpuSampleThread thread;
+                    uint8_t flags;
+                    if(!r.raw(thread.thread) || !r.varint(thread.cycles) || !r.raw(flags))
+                        return false;
+                    thread.userCode = (flags & 1) != 0;
+                    sample.threads.push_back(thread);
+                }
+                mSamples.push_back(std::move(sample));
+            }
+            return true;
+        }
+
         bool readChunk(uint64_t offset, ChunkHeader & h, std::vector<uint8_t> & raw)
         {
             if(_fseeki64(mFile, (int64_t)offset, SEEK_SET) != 0 || fread(&h, sizeof(h), 1, mFile) != 1 || memcmp(h.magic, ChunkMagic, 4) != 0)
@@ -1313,6 +1417,7 @@ namespace ftt
         uint64_t mCount = 0;
         std::map<uint32_t, std::vector<IndexEntry>> mThreadChunks;
         std::vector<IndexEntry> mSnapshots;
+        std::vector<CpuSample> mSamples;
         std::vector<ThreadInfo> mThreads;
         std::map<uint64_t, std::shared_ptr<Decoded>> mCache;
         std::map<uint64_t, std::shared_ptr<PageMap>> mSnapshotCache;

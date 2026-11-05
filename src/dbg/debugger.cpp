@@ -286,7 +286,9 @@ void cbDebuggerPaused()
     dbgClearRtuBreakpoints();
     bAbortStepping = false;
     stepRepeat = 0;
-    // Trace record is not handled by this function currently.
+    // Trace record is not handled by this function currently, but its buffered records must reach
+    // the file before the trace browser or the trace export reads it.
+    TraceRecord.FlushTraceFile();
     // Signal thread switch warning
     if(settingboolget("Engine", "HardcoreThreadSwitchWarning", false))
     {

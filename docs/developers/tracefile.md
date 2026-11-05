@@ -55,6 +55,28 @@ struct {
 
 Readers that do not know it skip it like any other user-defined block. `TraceExport` uses it to timestamp the context switches of the per-thread timelines of the `.ftt` format ([ftt.md](ftt.md)).
 
+Block type `0x82` is a CPU time sample of every thread of the debuggee, written by the recorder before the next instruction when the recording starts, on a context switch, every 4096 instructions and when the recording stops. The debuggee is frozen while it is taken. Its data is a 40-byte header followed by 24 bytes per thread:
+
+```c++
+struct {
+    uint64_t NextInstruction; // index of the next instruction in the trace
+    uint64_t Counter;         // QueryPerformanceCounter
+    uint64_t Frequency;       // QueryPerformanceFrequency
+    DWORD NextThreadId;       // thread of the next instruction
+    DWORD Flags;              // bit 0: the recording (re)started, the previous sample does not apply
+    DWORD Count;              // number of threads
+    DWORD Reserved;
+    struct {
+        DWORD ThreadId;
+        DWORD Flags;          // bit 0: ContextHash is valid
+        uint64_t CycleTime;   // QueryThreadCycleTime (user and kernel mode)
+        uint64_t ContextHash; // FNV-1a of the user-mode integer registers, stack pointer, instruction pointer and flags
+    } Threads[Count];
+};
+```
+
+Between two samples a single thread is recorded (a context switch takes a sample). Another thread whose `CycleTime` grew in that interval used the processor while the recorded instructions ran; if its `ContextHash` changed too, it executed user-mode code outside the trace, so the order of its instructions relative to the recorded ones is unknown. A thread that used CPU time with an unchanged hash only ran kernel code: the suspensions of the debugger wake waiting threads at every debug event. `TraceExport` turns the samples into the intervals of the `.ftt` format.
+
 `RegisterChanges` is a unsigned byte that counts the number of elements in the array `RegisterChangePosition` and `RegisterChangeNewData`.
 
 `MemoryAccesses` is a unsigned byte that counts the number of elements in the array `MemoryAccessFlags`.

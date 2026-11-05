@@ -7,7 +7,8 @@
 	shallow = true
 [submodule "src/third_party/TitanEngine"]
 	path = src/third_party/TitanEngine
-	url = ../../x64dbg/TitanEngine
+	url = ../../EGKrb/TitanEngine
+	branch = fathom
 [submodule "src/third_party/GleeBug"]
 	path = src/third_party/GleeBug
 	url = ../../x64dbg/GleeBug

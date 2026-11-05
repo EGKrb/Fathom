@@ -101,6 +101,10 @@ bool TtModel::Open(const std::wstring & path, std::string & error)
         mInfo.threads = mReader->threads().size();
         mInfo.chunks = mReader->chunkCount();
         mInfo.snapshots = mReader->snapshotCount();
+        mInfo.cpuSamples = mReader->cpuSamples().size();
+        for(auto & sample : mReader->cpuSamples())
+            if(!sample.exact())
+                mInfo.concurrentSamples++;
         mInfo.pointerSize = mReader->pointerSize();
         mInfo.levels = mReader->levels();
         mInfo.snapshotInterval = mReader->snapshotInterval();
@@ -263,6 +267,16 @@ bool TtModel::Instruction(uint64_t seq, ftt::Instruction & instruction)
 {
     std::lock_guard<std::recursive_mutex> lock(mLock);
     return mReader && mReader->instruction(seq, instruction);
+}
+
+bool TtModel::OrderSample(uint64_t seq, ftt::CpuSample & sample)
+{
+    std::lock_guard<std::recursive_mutex> lock(mLock);
+    auto found = mReader ? mReader->cpuSample(seq) : nullptr;
+    if(!found)
+        return false;
+    sample = *found;
+    return true;
 }
 
 bool TtModel::NextInViewThread(uint64_t seq, bool forward, uint64_t & result)

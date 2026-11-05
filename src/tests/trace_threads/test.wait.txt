@@ -1,0 +1,24 @@
+settingset Events, TlsCallbacks, 0
+settingset Events, TlsCallbacksSystem, 0
+settingset Events, EntryBreakpoint, 0
+init tests/trace_threads.exe, wait
+bp trace_threads:Work
+run
+testassert cip == trace_threads:Work, "stopped in Work"
+
+StartTraceRecording "tests/trace_threads/trace.wait.trace64"
+TraceIntoConditional 0, .12000
+StopTraceRecording
+
+// The worker is blocked: the other threads only use CPU time in the kernel (woken by the suspensions)
+TraceExport "tests/trace_threads/trace.wait.trace64", "tests/trace_threads/trace.wait.json"
+testassert $result1 >= .2, "cpu time samples"
+testassert $result2 == 0, "no other thread executed code outside the trace: the order is exact"
+var samples, $result1
+TraceExport "tests/trace_threads/trace.wait.trace64", "tests/trace_threads/trace.wait.ftt"
+testassert $result1 == samples, "ftt conversion keeps the samples"
+TraceExport "tests/trace_threads/trace.wait.ftt", "tests/trace_threads/trace.wait.ftt.json"
+testassert $result1 == samples, "json export of the ftt trace"
+
+bc trace_threads:Work
+run

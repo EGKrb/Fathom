@@ -6,6 +6,32 @@ branch; this changelog covers Fathom's own additions and branding.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed
+- **Faster recording**: tracing with trace recording is about 2.5 times faster
+  (about 11,800 instead of 4,700 instructions per second with
+  `TraceIntoConditional`, 19,000 instead of 8,900 without recording). TitanEngine
+  caches the thread contexts while a debug event is handled (the threads of the
+  debuggee are frozen until `ContinueDebugEvent`; every write invalidates the
+  thread), uses its own thread handles instead of opening new ones and no longer
+  suspends frozen threads to read a context. The recorder buffers its records
+  (flushed every 250 ms, when the debugger pauses and when the recording stops).
+  Setting `Engine` / `ContextCache` to 0 disables the cache.
+
+### Added
+- **Thread order of a trace**: the recorder samples every thread (CPU time and a
+  hash of its user-mode registers, user block `0x82`) when the recording starts
+  and stops, on each context switch and every 4096 instructions. `TraceExport`
+  stores the intervals in the `.ftt` (chunk kind 4, ignored by older readers,
+  same version) and in the JSON export (`cpu` member), and sets `$result1` /
+  `$result2` to the sampled intervals and to those in which other threads
+  executed code outside the trace. `tt.info`, `tt.seek` and the tooltips of the
+  Time Travel tab tell whether the order of a context switch is exact or
+  approximate, and which threads ran outside the trace.
+- Tests: `src/tests/trace_threads` (a spinning worker makes the order
+  approximate, a blocked one leaves it exact).
+
 ## [1.2.0] - 2026-11-04
 
 ### Added

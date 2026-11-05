@@ -621,6 +621,29 @@ namespace
     }
 
     // One line describing the position: instruction, thread, address, disassembly
+    // "exact" or "approximate (thread 1234 executed code outside the trace, ...)" for the order of
+    // the instructions around seq
+    std::string TtOrder(uint64_t seq)
+    {
+        ftt::CpuSample sample;
+        if(!TtModel::Get().OrderSample(seq, sample))
+            return "unknown (not sampled)";
+        if(sample.exact())
+            return "exact (no other thread executed code)";
+        std::string text = "approximate (";
+        bool first = true;
+        for(auto & thread : sample.threads)
+        {
+            if(!thread.userCode)
+                continue;
+            if(!first)
+                text += ", ";
+            first = false;
+            text += "thread " + std::to_string(thread.thread) + ": " + std::to_string(thread.cycles) + " cycles";
+        }
+        return text + " outside the trace)";
+    }
+
     void TtLogPosition()
     {
         auto & model = TtModel::Get();
@@ -631,6 +654,8 @@ namespace
         std::string label = model.Label(ins.ip);
         _plugin_logprintf(LOG_PREFIX "#%llu  thread %u  %p  %s%s%s\n", (unsigned long long)position, ins.thread, (void*)(duint)ins.ip,
                           model.Disassemble(ins).c_str(), label.empty() ? "" : "  ; ", label.c_str());
+        if(ins.switched && position > 0)
+            _plugin_logprintf(LOG_PREFIX "context switch from thread %u, order %s\n", ins.fromThread, TtOrder(position - 1).c_str());
         if(model.ViewThread() != ins.thread)
             _plugin_logprintf(LOG_PREFIX "viewed thread: %u\n", model.ViewThread());
         TtSetResult(position);
@@ -683,6 +708,11 @@ namespace
         for(auto & t : model.Threads())
             _plugin_logprintf(LOG_PREFIX "  thread %u: %llu instructions, #%llu to #%llu\n", t.thread, (unsigned long long)t.count,
                               (unsigned long long)t.firstSeq, (unsigned long long)t.lastSeq);
+        if(info.cpuSamples)
+            _plugin_logprintf(LOG_PREFIX "thread order: %llu of %llu sampled intervals exact, %llu approximate (other threads executed code outside the trace)\n",
+                              (unsigned long long)(info.cpuSamples - info.concurrentSamples), (unsigned long long)info.cpuSamples, (unsigned long long)info.concurrentSamples);
+        else
+            _plugin_logputs(LOG_PREFIX "thread order: not sampled (trace recorded before the CPU time samples)");
         TtLogPosition();
         return true;
     }

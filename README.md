@@ -315,7 +315,7 @@ The same navigation in scripts and `headless.exe` (ExtraCmds, also in the 32-bit
 
 | Command | Effect |
 |---|---|
-| `tt.open file` / `tt.close` / `tt.info` | open a `.ftt` (or convert a `.trace64`), close it, summary and threads |
+| `tt.open file` / `tt.close` / `tt.info` | open a `.ftt` (or convert a `.trace64`), close it, summary, threads and thread order |
 | `tt.seek n` | go to instruction n (global sequence number) |
 | `tt.next [n]` / `tt.prev [n]` | n instructions forward / backward, all threads |
 | `tt.tnext [n]` / `tt.tprev [n]` | n instructions forward / backward in the viewed thread |
@@ -328,7 +328,9 @@ The same navigation in scripts and `headless.exe` (ExtraCmds, also in the 32-bit
 
 ### Recording
 
-Traces still come from x64dbg's recorder (single-stepping, `StartTraceRecording`), which now writes a timestamped context-switch marker when the next instruction runs on another thread. A recorder based on dynamic binary instrumentation or on Intel PT is not included: Intel PT needs an Intel processor and a kernel driver.
+Traces come from x64dbg's recorder (single-stepping, `StartTraceRecording`): the debugger stops the program at every instruction. It is about **2.5 times faster than in Fathom 1.2.0** (about 11,800 recorded instructions per second instead of 4,700 with `TraceIntoConditional` on the reference machine; 19,000 instead of 8,900 without recording). While a debug event is handled, every thread of the program is frozen: TitanEngine now reads a thread context once per event instead of once per register, uses the thread handles it already has and no longer suspends frozen threads, and the recorder writes its records in blocks instead of one write per instruction. Setting `Engine` / `ContextCache` to 0 restores the previous behavior. It is still single-stepping: suited to functions, code fragments and challenges rather than to whole programs.
+
+The recorder steps one thread while the others run freely, so the order of the instructions of several threads in the trace is the order the debugger observed. To tell when it is exact, the recorder samples every thread (CPU time and user-mode registers) when the recording starts and stops, at each context switch and every 4096 instructions. An interval in which no other thread executed code has an **exact** order; otherwise the order is **approximate** and the threads that ran outside the trace are listed with their CPU cycles: `tt.info`, the tooltips of the context switches in the Time Travel tab, the `cpu` member of the JSON export, `$result1` / `$result2` of `TraceExport`. Threads that only woke up in the kernel (the suspensions of the debugger wake waiting threads) do not make it approximate. The order is measured, not enforced, and code run by the recorded thread itself without being stepped (a call stepped over) is not flagged. A recorder based on dynamic binary instrumentation or on Intel PT is not included: Intel PT needs an Intel processor and a kernel driver.
 
 ---
 

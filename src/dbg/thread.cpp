@@ -380,6 +380,41 @@ ULONG64 ThreadQueryCycleTime(HANDLE hThread)
     return CycleTime;
 }
 
+void ThreadSampleCpu(std::vector<THREADCPUSAMPLE> & samples)
+{
+    SHARED_ACQUIRE(LockThreads);
+    samples.clear();
+    for(auto & entry : threadList)
+    {
+        THREADCPUSAMPLE sample = {};
+        sample.ThreadId = entry.first;
+        if(!QueryThreadCycleTime(entry.second.Handle, &sample.CycleTime))
+            continue;
+        CONTEXT context = {};
+        context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        if(GetThreadContext(entry.second.Handle, &context))
+        {
+#ifdef _WIN64
+            const DWORD64 registers[] = { context.Rax, context.Rcx, context.Rdx, context.Rbx, context.Rsp, context.Rbp, context.Rsi, context.Rdi,
+                                          context.R8, context.R9, context.R10, context.R11, context.R12, context.R13, context.R14, context.R15,
+                                          context.Rip, context.EFlags
+                                        };
+#else
+            const DWORD64 registers[] = { context.Eax, context.Ecx, context.Edx, context.Ebx, context.Esp, context.Ebp, context.Esi, context.Edi,
+                                          context.Eip, context.EFlags
+                                        };
+#endif //_WIN64
+            ULONG64 hash = 14695981039346656037ull; // FNV-1a
+            for(auto value : registers)
+                for(int i = 0; i < 8; i++)
+                    hash = (hash ^ ((value >> (i * 8)) & 0xFF)) * 1099511628211ull;
+            sample.HasContext = true;
+            sample.ContextHash = hash;
+        }
+        samples.push_back(sample);
+    }
+}
+
 void ThreadUpdateWaitReasons()
 {
     ULONG size;

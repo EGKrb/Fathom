@@ -27,6 +27,7 @@ enum TitanEngineVariable
     UE_ENGINE_MEMBP_ALT = 11,
     UE_ENGINE_DISABLE_ASLR = 12,
     UE_ENGINE_SAFE_STEP = 13,
+    UE_ENGINE_CONTEXT_CACHE = 14,
 };
 
 enum TitanBreakpointRemoveOption
