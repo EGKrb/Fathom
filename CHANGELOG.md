@@ -6,7 +6,7 @@ branch; this changelog covers Fathom's own additions and branding.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.4.0] - 2026-11-05
 
 ### Added
 - **`TraceSetSkip none|system|only[, modules]`**: the calls into modules that are
@@ -167,5 +167,8 @@ First release under the Fathom name.
 Fathom is a modified distribution of x64dbg; see [NOTICE](NOTICE) and
 [CONTRIBUTING](CONTRIBUTING.md).
 
+[1.4.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.4.0
+[1.3.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.3.0
+[1.2.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.2.0
 [1.1.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.1.0
 [1.0.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.0.0
