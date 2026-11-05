@@ -497,6 +497,9 @@ class Debugger:
 
         fmt: "json", "csv", "tenet", "frinet" or "ftt" (default: from the output file extension).
         slide: frinet only, the ASLR slide (an integer or an expression such as "mod.main()").
+        Then eval("$result1") is the number of intervals between the CPU time samples of the recorder
+        and eval("$result2") the number of those whose thread order is approximate (another thread
+        executed code outside the trace); 0 for traces recorded before the samples existed.
         """
         if slide is not None and not fmt:
             fmt = "frinet"
