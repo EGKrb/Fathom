@@ -135,6 +135,7 @@ struct TraceSkipThread
 static std::unordered_map<DWORD, TraceSkipThread> traceSkipThreads;
 static std::unordered_map<duint, int> traceSkipBreakpoints; // return address -> threads waiting for it
 static std::unordered_set<DWORD> traceSeenThreads; // threads that existed or were handled
+static std::unordered_map<DWORD, duint> traceThreadEntrySp; // new thread -> stack pointer at its start address
 
 static duint dbgcleartracestate()
 {
@@ -318,6 +319,9 @@ static void cbTraceSkipReturn()
     auto owner = traceSkipThreads.find(threadId);
     if(owner != traceSkipThreads.end() && owner->second.ret == cip)
     {
+        // a new thread at its start address: see traceSkipThreadExit
+        if(owner->second.call == 0)
+            traceThreadEntrySp[threadId] = GetContextDataEx(hActiveThread, UE_CSP);
         traceSkipThreads.erase(owner);
         traceSkipRelease(cip);
     }
@@ -363,9 +367,10 @@ void dbgtracearmthreads(TITANCBSTEP callback)
     {
         // The event thread just started its skipped call, the others may not have executed it yet.
         // After the int3 (ret + 1) the breakpoint event of the thread can be deferred by the engine.
+        // x32: outside the modules is a WoW64 thread in its 64-bit part (initialization, system calls).
         auto hThread = ThreadGetHandle(it->first);
         auto cip = it->first == GetDebugData()->dwThreadId || !hThread ? 0 : GetContextDataEx(hThread, UE_CIP);
-        if(it->first == GetDebugData()->dwThreadId || (cip && (cip == it->second.call || cip == it->second.ret || cip == it->second.ret + 1 || traceSkipAddress(cip))))
+        if(it->first == GetDebugData()->dwThreadId || (cip && (cip == it->second.call || cip == it->second.ret || cip == it->second.ret + 1 || traceSkipAddress(cip) || ArchValue(!ModBaseFromAddr(cip), false))))
         {
             excluded.push_back(it->first);
             ++it;
@@ -392,6 +397,7 @@ static void dbgtracecancelthreads()
         DeleteBPX(bp.first);
     traceSkipBreakpoints.clear();
     traceSeenThreads.clear();
+    traceThreadEntrySp.clear();
 }
 
 // Destination of the call or jmp at addr, 0 when it cannot be resolved
@@ -415,6 +421,31 @@ static duint traceBranchDestination(duint addr, unsigned char* data, Zydis & zyd
     else if(op.type != ZYDIS_OPERAND_TYPE_IMMEDIATE && op.type != ZYDIS_OPERAND_TYPE_REGISTER)
         return 0;
     return value;
+}
+
+// TraceSetThreads all with TraceSetSkip: a thread created during the trace returns from its start
+// function into the system modules (thread exit, DLL_THREAD_DETACH notifications), it runs to its end
+// at full speed. Returns false when the instruction must be stepped normally.
+static bool traceSkipThreadExit(duint cip)
+{
+    if(!traceAllThreads || traceSkipMode == TRACE_SKIP_NONE)
+        return false;
+    auto threadId = GetDebugData()->dwThreadId;
+    auto entry = traceThreadEntrySp.find(threadId);
+    if(entry == traceThreadEntrySp.end())
+        return false;
+    unsigned char data[MAX_DISASM_BUFFER];
+    Zydis zydis;
+    if(!MemRead(cip, data, sizeof(data)) || !zydis.Disassemble(cip, data) || !zydis.IsRet())
+        return false;
+    // the ret of the start function: the stack pointer is back to the one at its start address
+    auto csp = GetContextDataEx(hActiveThread, UE_CSP);
+    duint ret = 0;
+    if(csp < entry->second || !MemRead(csp, &ret, sizeof(ret)) || !traceSkipAddress(ret))
+        return false;
+    traceThreadEntrySp.erase(entry);
+    traceSkipThreads[threadId] = { cip, 0 }; // never armed again unless it comes back to traced code
+    return true;
 }
 
 // Steps over the call at cip when it goes to a module that is not traced, following the jmp thunks
@@ -1779,7 +1810,7 @@ static void __forceinline cbTraceUniversalConditionalStep(duint cip, STEPFUNCTIO
     else //continue tracing
     {
         dbgtraceexecute(cip);
-        if(!traceSkipCall(cip, callback))
+        if(!traceSkipCall(cip, callback) && !traceSkipThreadExit(cip))
             stepFunction(callback);
         dbgtracearmthreads(callback);
     }

@@ -6,6 +6,16 @@ branch; this changelog covers Fathom's own additions and branding.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed
+- `TraceSetThreads all` with `TraceSetSkip`: a thread created during the trace
+  runs its end at full speed once it returns from its start function into a
+  system module (`DLL_THREAD_DETACH` notifications, `RtlExitUserThread`). In
+  32-bit, a WoW64 thread in its 64-bit part (outside every module) is no longer
+  taken for a thread back in traced code. The `trace_all_threads` test records
+  about 2,200 instructions instead of 50,000 to 70,000 (3 s instead of 30 s).
+
 ## [1.4.1] - 2026-11-05
 
 ### Fixed

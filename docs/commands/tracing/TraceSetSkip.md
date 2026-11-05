@@ -24,7 +24,7 @@ The trace records a skipped call with user block `0x83` (see [tracefile.md](../.
 
 The code that a skipped call runs is not recorded, including the callbacks into the traced code it makes (the comparison function of `qsort`, a window procedure...) and the memory it changes. An exception raised in the called code and handled by the traced code, or a call that does not return (`ExitThread`), ends the step over without coming back to the return address: the trace stops at the next event of the thread.
 
-With [TraceSetThreads](./TraceSetThreads.md) `all`, the return address gets a breakpoint shared by the threads that wait for it, and a thread created during the trace runs its initialization by the loader at full speed until its start address when that address is in traced code.
+With [TraceSetThreads](./TraceSetThreads.md) `all`, the return address gets a breakpoint shared by the threads that wait for it, and a thread created during the trace runs its initialization by the loader at full speed until its start address when that address is in traced code; when it returns from its start function into a system module, it runs its end (`DLL_THREAD_DETACH` notifications, `RtlExitUserThread`) at full speed too.
 
 ## example
 
