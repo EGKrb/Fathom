@@ -6,7 +6,7 @@ branch; this changelog covers Fathom's own additions and branding.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [1.5.0] - 2026-11-20
 
 ### Added
 - **Emulator** (`emu.*` commands of ExtraCmds, `emulator/`): code of the
@@ -215,6 +215,7 @@ First release under the Fathom name.
 Fathom is a modified distribution of x64dbg; see [NOTICE](NOTICE) and
 [CONTRIBUTING](CONTRIBUTING.md).
 
+[1.5.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.5.0
 [1.4.1]: https://github.com/EGKrb/Fathom/releases/tag/v1.4.1
 [1.4.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.4.0
 [1.3.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.3.0
