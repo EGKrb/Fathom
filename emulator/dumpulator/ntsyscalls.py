@@ -18,8 +18,6 @@ def syscall(func):
     syscall_functions["Nt" + name[2:]] = func
     return func
 
-STATUS_NO_TOKEN = 0xC000007C  # Fathom
-
 @syscall
 def ZwAcceptConnectPort(dp: Dumpulator,
                         PortHandle: Annotated[P[HANDLE], SAL("_Out_")],
@@ -320,21 +318,21 @@ def ZwAllocateVirtualMemory(dp: Dumpulator,
             dp.memory.reserve(base, size, protect)
             BaseAddress.write_ptr(base)
             RegionSize.write_ptr(size)
-        print(f"commit({hex(base)}[{hex(size)}], {protect})")
+        dp.info(f"commit({hex(base)}[{hex(size)}], {protect})")
         dp.memory.commit(base, size, protect)
     elif AllocationType == MEM_RESERVE:
         if base == 0:
             base = dp.memory.find_free(size)
             BaseAddress.write_ptr(base)
             RegionSize.write_ptr(size)
-        print(f"reserve({hex(base)}[{hex(size)}], {protect})")
+        dp.info(f"reserve({hex(base)}[{hex(size)}], {protect})")
         dp.memory.reserve(base, size, protect)
     elif AllocationType == MEM_COMMIT | MEM_RESERVE:
         if base == 0:
             base = dp.memory.find_free(size)
             BaseAddress.write_ptr(base)
             RegionSize.write_ptr(size)
-        print(f"reserve+commit({hex(base)}[{hex(size)}], {protect})")
+        dp.info(f"reserve+commit({hex(base)}[{hex(size)}], {protect})")
         dp.memory.reserve(base, size, protect)
         dp.memory.commit(base, size)
     else:
@@ -908,7 +906,7 @@ def ZwCreateFile(dp: Dumpulator,
                  ):
     assert ObjectAttributes.ptr != 0
     file_name = ObjectAttributes[0].ObjectName[0].read_str()
-    print(f"create/open {file_name}")
+    dp.info(f"create/open {file_name}")
     assert FileHandle.ptr != 0
     assert IoStatusBlock.ptr != 0
     #assert EaBuffer.ptr == 0
@@ -964,7 +962,7 @@ def ZwCreateFile(dp: Dumpulator,
         handle = dp.handles.open_file(file_name)
         if handle is None:
             return STATUS_NO_SUCH_FILE
-        print(f"Created handle {hex(handle)}")
+        dp.info(f"Created handle {hex(handle)}")
         FileHandle.write_ptr(handle)
         IO_STATUS_BLOCK.write(IoStatusBlock, STATUS_SUCCESS, FILE_OPENED)
         return STATUS_SUCCESS
@@ -1298,7 +1296,7 @@ def ZwCreateThreadEx(dp: Dumpulator,
     # TODO: sanity check AttributeList
     thread = ThreadObject(StartRoutine.ptr, Argument.ptr)
     handle = dp.handles.new(thread)
-    print(f"Started new thread {thread}, handle: {hex(handle)}")
+    dp.info(f"Started new thread {thread}, handle: {hex(handle)}")
     dp.write_ptr(ThreadHandle, handle)
     return STATUS_SUCCESS
 
@@ -1821,14 +1819,14 @@ def ZwFreeVirtualMemory(dp: Dumpulator,
     base = BaseAddress.read_ptr()
     size = RegionSize.read_ptr()
     if FreeType == MEM_RELEASE:
-        print(f"release {hex(base)}[{hex(size)}]")
+        dp.info(f"release {hex(base)}[{hex(size)}]")
         region = dp.memory.find_region(base)
         if region is None:
             return STATUS_MEMORY_NOT_ALLOCATED
         dp.memory.release(base, size)
         return STATUS_SUCCESS
     elif FreeType == MEM_DECOMMIT:
-        print(f"decommit {hex(base)}[{hex(size)}]")
+        dp.info(f"decommit {hex(base)}[{hex(size)}]")
         region = dp.memory.find_region(base)
         if region is None:
             return STATUS_MEMORY_NOT_ALLOCATED
@@ -2066,7 +2064,7 @@ def ZwListenPort(dp: Dumpulator,
 def ZwLoadDriver(dp: Dumpulator,
                  DriverServiceName: Annotated[P[UNICODE_STRING], SAL("_In_")]
                  ):
-    print(f"Starting service: {DriverServiceName[0].read_str()}")
+    dp.info(f"Starting service: {DriverServiceName[0].read_str()}")
     return STATUS_SUCCESS
 
 @syscall
@@ -2505,7 +2503,7 @@ def ZwOpenProcessToken(dp: Dumpulator,
     assert DesiredAccess == 0x20
     # TODO: TokenHandle should be -6 or something
     handle = dp.handles.new(ProcessTokenObject(ProcessHandle))
-    print(f"process token: {hex(handle)}")
+    dp.info(f"process token: {hex(handle)}")
     TokenHandle.write_ptr(handle)
     return STATUS_SUCCESS
 
@@ -2576,9 +2574,7 @@ def ZwOpenThreadToken(dp: Dumpulator,
                       OpenAsSelf: Annotated[BOOLEAN, SAL("_In_")],
                       TokenHandle: Annotated[P[HANDLE], SAL("_Out_")]
                       ):
-    # Fathom: the emulated thread never impersonates, so it has no token of its own (what
-    # Windows answers for such a thread; callers then open the process token)
-    return STATUS_NO_TOKEN
+    raise NotImplementedError()
 
 @syscall
 def ZwOpenThreadTokenEx(dp: Dumpulator,
@@ -2588,9 +2584,7 @@ def ZwOpenThreadTokenEx(dp: Dumpulator,
                         HandleAttributes: Annotated[ULONG, SAL("_In_")],
                         TokenHandle: Annotated[P[HANDLE], SAL("_Out_")]
                         ):
-    # Fathom: the emulated thread never impersonates, so it has no token of its own (what
-    # Windows answers for such a thread; callers then open the process token)
-    return STATUS_NO_TOKEN
+    raise NotImplementedError()
 
 @syscall
 def ZwOpenTimer(dp: Dumpulator,
@@ -2725,7 +2719,7 @@ def ZwProtectVirtualMemory(dp: Dumpulator,
     size = round_to_pages(RegionSize.read_ptr())
     protect = MemoryProtect(NewProtect)
 
-    print(f"protect {hex(base)}[{hex(size)}] = {protect}")
+    dp.info(f"protect {hex(base)}[{hex(size)}] = {protect}")
     old_protect = dp.memory.protect(base, size, protect)
     OldProtect.write_ulong(old_protect.value)
     return STATUS_SUCCESS
@@ -2744,7 +2738,7 @@ def ZwQueryAttributesFile(dp: Dumpulator,
                           ):
     assert ObjectAttributes.ptr != 0
     file_name = ObjectAttributes[0].ObjectName[0].read_str()
-    print(f"query attributes {file_name}")
+    dp.info(f"query attributes {file_name}")
     handle = dp.handles.open_file(file_name)
     assert handle is not None
     file_data = dp.handles.get(handle, AbstractFileObject)
@@ -3604,7 +3598,7 @@ def ZwReadFile(dp: Dumpulator,
         file = dp.handles.get(FileHandle, AbstractFileObject)
         buffer = file.read(Length)
 
-        print(f"reading {file.path}: {buffer}")
+        dp.info(f"reading {file.path}: {buffer}")
 
         assert len(buffer) <= Length
 
@@ -4089,19 +4083,19 @@ def ZwSetInformationFile(dp: Dumpulator,
             # https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/e3ce4a39-327e-495c-99b6-6b61606b6f16
             info = FileInformation.read(Length)
             file_offset = struct.unpack("<Q", info)[0]
-            print(f"setting file pos of {handle_data.path} to {file_offset}")
+            dp.info(f"setting file pos of {handle_data.path} to {file_offset}")
             handle_data.file_offset = file_offset
 
             return STATUS_SUCCESS
 
     if FileInformationClass == FILE_INFORMATION_CLASS.FileDispositionInformationEx:
-        print(f"Delete file {hex(FileHandle)}")
+        dp.info(f"Delete file {hex(FileHandle)}")
         assert IoStatusBlock.ptr != 0
         assert FileInformation.ptr != 0
         assert Length == 4
         return STATUS_SUCCESS
     elif FileInformationClass == FILE_INFORMATION_CLASS.FileDispositionInformation:
-        print(f"Delete file {hex(FileHandle)}")
+        dp.info(f"Delete file {hex(FileHandle)}")
         assert IoStatusBlock.ptr != 0
         assert FileInformation.ptr != 0
         assert Length == 1
@@ -4791,7 +4785,7 @@ def ZwWriteFile(dp: Dumpulator,
         file = dp.handles.get(FileHandle, AbstractFileObject)
         buffer = bytes(Buffer.read(Length))
 
-        print(f"writing {file.path}: {buffer}")
+        dp.info(f"writing {file.path}: {buffer}")
         file.write(buffer, Length)
 
         dp.write_ptr(IoStatusBlock.ptr, STATUS_SUCCESS)

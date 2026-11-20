@@ -343,6 +343,11 @@ class Dumpulator(Architecture):
         self._exception = UnicornExceptionInfo()
         self._last_exception: Optional[UnicornExceptionInfo] = None
         self._exception_hook: Optional[Callable[[ExceptionInfo], Optional[int]]] = None
+        # Fathom: several threads and a virtual clock (threads.py)
+        from .threads import Scheduler
+        self._fathom_initial_tid = self.thread_id
+        self._fathom_trace_switch = None
+        self.scheduler = Scheduler(self)
         if not self._quiet:
             print("Memory map:")
             self.print_memory()
@@ -1111,7 +1116,24 @@ rsp in KiUserExceptionDispatcher:
         self._exception = UnicornExceptionInfo()
         emu_begin = begin
         emu_until = end
-        emu_count = count
+        emu_count = 0
+        # Fathom: the instructions run in slices (count, the time slices of the threads, the clock).
+        # With a count, the instructions of a slice cut short (a thread switch in a system call, an
+        # exception) are counted per translation block, which ends at those instructions.
+        count_left = count if count else None
+        self._fathom_executed = 0
+        count_hook = None
+        if count_left is not None:
+            if not hasattr(self, "_fathom_block_icount"):
+                self._fathom_block_icount = {}
+            count_hook = self._uc.hook_add(UC_HOOK_BLOCK, _fathom_count_block, self)
+        try:
+            self._fathom_start_loop(emu_begin, emu_until, emu_count, end, count_left)
+        finally:
+            if count_hook is not None:
+                self._uc.hook_del(count_hook)
+
+    def _fathom_start_loop(self, emu_begin, emu_until, emu_count, end, count_left):
         while not self.stopped:
             try:
                 if self._exception.type != ExceptionType.NoException:
@@ -1152,8 +1174,29 @@ rsp in KiUserExceptionDispatcher:
                         emu_until = 0xffffffffffffffff
                         emu_count = self._exception.tb_icount + 1
 
-                self.info(f"emu_start({hex(emu_begin)}, {hex(emu_until)}, {emu_count})")
-                self._uc.emu_start(emu_begin, until=emu_until, count=emu_count)
+                if count_left is not None and count_left <= 0:
+                    self.info(f"instruction count reached, cip = {hex(self.regs.cip)}")
+                    break
+                run_count = emu_count
+                sliced = False
+                self._fathom_executed = 0
+                if run_count == 0:
+                    run_count = self.scheduler.QUANTUM
+                    if count_left is not None:
+                        run_count = min(run_count, count_left)
+                    sliced = True
+                self.debug(f"emu_start({hex(emu_begin)}, {hex(emu_until)}, {run_count})")
+                self._uc.emu_start(emu_begin, until=emu_until, count=run_count)
+                if sliced and not self.stopped and (self.regs.cip & self.addr_mask) != (emu_until & self.addr_mask):
+                    # the slice is over: the clock advances, another thread may run
+                    self.scheduler.advance_instructions(run_count)
+                    if count_left is not None:
+                        count_left -= run_count
+                    if count_left is None or count_left > 0:
+                        self.scheduler.preempt()
+                        emu_begin = self.regs.cip
+                        emu_count = 0
+                        continue
                 self.info(f'emulation finished, cip = {hex(self.regs.cip)}')
                 if self.exit_code is not None:
                     self.info(f"exit code: {hex(self.exit_code)}")
@@ -1161,6 +1204,10 @@ rsp in KiUserExceptionDispatcher:
             except UcError as err:
                 if self.kill_exception is not None and type(self.kill_exception) is not UcError:
                     raise self.kill_exception from None
+                if count_left is not None:
+                    # a slice cut short: the instructions of the blocks it entered
+                    count_left -= self._fathom_executed
+                    self.scheduler.advance_instructions(self._fathom_executed)
                 if self._exception.type != ExceptionType.NoException:
                     # Handle the exception outside of the except handler
                     continue
@@ -1198,7 +1245,7 @@ rsp in KiUserExceptionDispatcher:
     def map_module(self, file_data: bytes, file_path: str = "", requested_base: int = 0, resolve_imports=True):
         if not file_path:
             file_path = "<unnamed>"
-        print(f"Mapping module {file_path}")
+        self.info(f"Mapping module {file_path}")
         pe = PE(name=None, data=bytearray(file_data))
         image_size = pe.OPTIONAL_HEADER.SizeOfImage
         section_alignment = pe.OPTIONAL_HEADER.SectionAlignment
@@ -1264,7 +1311,7 @@ rsp in KiUserExceptionDispatcher:
         pe.header = pe.__data__[:len(pe.header)]
         # TODO: map the header properly (figure out how the system assigns the size)
         header_size = pe.sections[0].VirtualAddress_adj
-        print(f"Mapping header {hex(image_base)}[{hex(header_size)}]")
+        self.info(f"Mapping header {hex(image_base)}[{hex(header_size)}]")
         self.memory.commit(image_base, header_size, MemoryProtect.PAGE_READONLY)
         self.write(image_base, bytes(pe.header))
 
@@ -1285,7 +1332,7 @@ rsp in KiUserExceptionDispatcher:
                 protect = MemoryProtect.PAGE_READWRITE
             if execute:
                 protect = MemoryProtect(protect.value << 4)
-            print(f"Mapping section '{name.decode()}' {hex(rva)}[{hex(rva)}] -> {hex(va)} as {protect}")
+            self.info(f"Mapping section '{name.decode()}' {hex(rva)}[{hex(rva)}] -> {hex(va)} as {protect}")
             self.memory.commit(va, size, protect)
             self.write(va, data)
 
@@ -1309,9 +1356,9 @@ rsp in KiUserExceptionDispatcher:
             assert False # TODO
         self.write(argument_ptr, argument_data)
 
-        print(f"LdrLoadDll({file_name})")
+        self.info(f"LdrLoadDll({file_name})")
         status = self.call(self.LdrLoadDll, [1, image_type, image_file_name, image_base_address])
-        print(f"status = {hex(status)}")
+        self.info(f"status = {hex(status)}")
         return self.read_ptr(image_base_address)
 
 def _hook_code_exception(uc: Uc, address, size, dp: Dumpulator):
@@ -1324,6 +1371,18 @@ def _hook_code_exception(uc: Uc, address, size, dp: Dumpulator):
     except UcError as err:
         dp.error(f"Exception during unicorn hook, please report this as a bug")
         raise err
+
+def _fathom_count_block(uc: Uc, address, size, dp: Dumpulator):
+    # Fathom: the number of instructions of a translation block, for start(count=...)
+    key = (address, size)
+    icount = dp._fathom_block_icount.get(key)
+    if icount is None:
+        try:
+            icount = sum(1 for _ in dp.cs.disasm_lite(bytes(uc.mem_read(address, size)), address)) or 1
+        except Exception:
+            icount = 1
+        dp._fathom_block_icount[key] = icount
+    dp._fathom_executed += icount
 
 def _request_tb(uc: Uc, address: int):
     # The translation block of an address: (start, size, instruction count). unicorn 2.0 returns an
@@ -1630,7 +1689,7 @@ def _hook_syscall(uc: Uc, dp: Dumpulator):
                     return dp.regs.r10
                 return dp.args[index]
 
-            dp.info(f"[{dp.sequence_id}] {table_prefix}syscall: {name}( /* index: {hex(service_number)} */")
+            dp.info(f"[{dp.sequence_id}] {table_prefix}syscall: {name}( /* index: {hex(service_number)}, thread: {dp.thread_id} */")
             for i in range(0, argcount):
                 argname = argspec.args[1 + i]
                 argtype = argspec.annotations[argname]
@@ -1669,7 +1728,7 @@ def _hook_syscall(uc: Uc, dp: Dumpulator):
             try:
                 status = syscall_impl(dp, *args)
                 if isinstance(status, ExceptionInfo):
-                    print("context switch, stopping emulation")
+                    dp.info("context switch, stopping emulation")
                     dp._exception = status
                     raise UcError(UC_ERR_EXCEPTION)
                 else:

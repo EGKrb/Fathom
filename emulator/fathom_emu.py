@@ -114,12 +114,13 @@ class TraceWriter:
         self.mask = (1 << (self.ptr * 8)) - 1
         self.user_limit = 0x800000000000 if self.x64 else 0x100000000
         self.limit = limit
-        self.thread_id = dp.thread_id
         self.path = path
         self.count = 0
-        self.pending = None  # [address, opcode, registers, memory [[address, old], ...]]
+        # per thread: [address, opcode, registers, memory [[address, old], ...]], written when the
+        # same thread starts its next instruction (as x64dbg's recorder does)
+        self.pending = {}
         self.written = None  # the registers of the last block written
-        self.thread_written = False
+        self.written_thread = None  # the thread of the last block written
         self.closed = False
 
         gprs = ["RAX", "RCX", "RDX", "RBX", "RSP", "RBP", "RSI", "RDI"]
@@ -263,8 +264,9 @@ class TraceWriter:
     def _on_code(self, uc, address, size, _user_data):
         if self.closed or (self.limit and self.count >= self.limit):
             return
+        thread = self.dp.thread_id
         registers = None
-        pending = self.pending
+        pending = self.pending.get(thread)
         if pending is not None:
             registers = self._registers()
             if address == pending[0] and registers == pending[2]:
@@ -272,8 +274,8 @@ class TraceWriter:
                 # instruction that raised an exception to find its exact state
                 pending[3] = []
                 return
-            self._write(pending, registers)
-            self.pending = None
+            self._write(pending, registers, thread)
+            del self.pending[thread]
         if address >= self.user_limit:
             return
         if registers is None:
@@ -282,10 +284,10 @@ class TraceWriter:
             opcode = bytes(uc.mem_read(address, min(size, 15)))
         except self._UcError:
             return
-        self.pending = [address, opcode, registers, []]
+        self.pending[thread] = [address, opcode, registers, []]
 
     def _on_memory(self, uc, access, address, size, value, _user_data):
-        pending = self.pending
+        pending = self.pending.get(self.dp.thread_id)
         if pending is None:
             return
         accesses = pending[3]
@@ -301,7 +303,7 @@ class TraceWriter:
                 accesses.append([word, value])
 
     # -- blocks
-    def _write(self, block, after: tuple):
+    def _write(self, block, after: tuple, thread: int):
         address, opcode, registers, accesses = block
         full = self.written is None or self.count % FULL_DUMP_INTERVAL == 0
         written = self.written
@@ -317,11 +319,11 @@ class TraceWriter:
                     or registers[after_flags:] != written[after_flags:] or registers[after_flags:] != after[after_flags:]):
                 changed = sorted(set(changed) | {i for i in range(len(registers))
                                                  if registers[i] != written[i] or registers[i] != after[i]})
-        write_thread = full or not self.thread_written
+        write_thread = full or thread != self.written_thread
         out = self.buffer
         out += bytes((0, len(changed), len(accesses), (0x80 if write_thread else 0) | len(opcode)))
         if write_thread:
-            out += struct.pack("<I", self.thread_id)
+            out += struct.pack("<I", thread)
         out += opcode
         last = -1
         for i in changed:
@@ -343,7 +345,7 @@ class TraceWriter:
             if old != new:
                 out += pack(new)
         self.written = registers
-        self.thread_written = True
+        self.written_thread = thread
         self.count += 1
         if len(out) >= 1 << 20:
             self.file.write(out)
@@ -354,9 +356,14 @@ class TraceWriter:
         Returns the number of instructions recorded."""
         if self.closed:
             return self.count
-        if self.pending is not None and not (self.limit and self.count >= self.limit):
-            self._write(self.pending, self._registers())
-        self.pending = None
+        # the last instruction of each thread: its state after is the current one for the running
+        # thread; the other threads stopped in a system call, their registers did not change since
+        for thread, pending in list(self.pending.items()):
+            if self.limit and self.count >= self.limit:
+                break
+            after = self._registers() if thread == self.dp.thread_id else pending[2]
+            self._write(pending, after, thread)
+        self.pending = {}
         self.closed = True
         for hook in self.hooks:
             try:
@@ -477,6 +484,15 @@ class Session:
         if dp.trace:
             dp.trace.close()
             self.result["text_trace"] = os.path.abspath(dp.trace.name)
+        scheduler = getattr(dp, "scheduler", None)
+        if scheduler is not None:
+            self.result["threads"] = [dict(tid=t.tid, state=t.state, exit_code=t.exit_code)
+                                      for t in scheduler.threads.values() if t.state != "frozen"]
+            if scheduler.stop_reason:
+                self.result["stop_reason"] = scheduler.stop_reason
+        console = getattr(dp, "_fathom_console", None)
+        if console:
+            self.result["console"] = "".join(console)
 
 
 def _emulate(session: Session, function):
@@ -486,8 +502,15 @@ def _emulate(session: Session, function):
     value, error = None, None
     try:
         value = function()
-    except NotImplementedError:
-        error = "stopped by a system call dumpulator does not implement (the last syscall above, see --syscalls)"
+    except NotImplementedError as e:
+        import traceback
+        frames = traceback.extract_tb(e.__traceback__)
+        where = frames[-1] if frames else None
+        if where is not None and where.name.startswith(("Zw", "Nt")):
+            error = f"stopped by a system call dumpulator does not implement: {where.name} (see --syscalls)"
+        else:
+            traceback.print_exc()
+            error = f"stopped: not implemented in the emulator ({e or 'see above'})"
     except Exception as e:  # an error of the emulated code or of the emulator
         import traceback
         traceback.print_exc()
@@ -507,6 +530,12 @@ def _print_result(result: dict):
         print(f"argument {buffer['index'] + 1} ({buffer['kind']} at {buffer['address']}, {buffer['size']} bytes, {state}): {buffer['text']!r}")
         if buffer["kind"] in ("buf", "bytes"):
             print(f"  hex: {buffer['hex'][:512]}{'...' if len(buffer['hex']) > 512 else ''}")
+    threads = result.get("threads", [])
+    if len(threads) > 1:
+        print(f"threads: " + ", ".join(f"{t['tid']} {t['state']}" + (f" ({t['exit_code']:#x})" if t['exit_code'] is not None else "")
+                                      for t in threads))
+    if result.get("stop_reason"):
+        print(f"stopped: {result['stop_reason']}")
     if result.get("exit_code") is not None:
         print(f"the process exited with code {result['exit_code']:#x}")
     if "trace" in result:

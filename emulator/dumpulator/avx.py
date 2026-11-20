@@ -1,4 +1,4 @@
-# Fathom addition to dumpulator: AVX / AVX2 instructions in Python. Boost Software License 1.0,
+# Fathom addition to dumpulator: AVX / AVX2 instructions in Python (and MONITOR / MWAIT). Boost Software License 1.0,
 # like the rest of dumpulator (LICENSE.dumpulator).
 #
 # Unicorn (QEMU 5) has no AVX. A process dumped on a CPU with AVX2 has its C runtime already set up
@@ -117,7 +117,11 @@ def emulate_avx(dp, instr, op_read, op_write, cip_next) -> bool:
         return ops[index].size
 
     iid = instr.id
-    if iid in _LOGIC and len(ops) == 3:
+    if iid in (INS.MONITOR, INS.MWAIT, INS.MONITORX, INS.MWAITX):
+        # wait for a write to an address (spin loops of critical sections, chosen at start-up on
+        # the CPU the process ran on): a wait that ends at once, which these instructions allow
+        pass
+    elif iid in _LOGIC and len(ops) == 3:
         bits = size(0) * 8
         write_vector(0, _LOGIC[iid](op_read(1), op_read(2)) & ((1 << bits) - 1))
     elif iid in _LANEWISE and len(ops) == 3:

@@ -2,9 +2,10 @@
 
 The debuggee (tests/trace_export.exe, stopped at its entry point) is saved to a minidump and its code
 runs in dumpulator: Windows functions called with integer, string and buffer arguments, a system
-call (VirtualAlloc), the thread run on until the process exits, a Python script, a recorded trace
-opened in Time Travel, and a minidump emulated after the debugging session has ended. The debuggee
-itself must not move.
+call (VirtualAlloc), the thread run on, a Python script, a recorded trace opened in Time Travel, a
+minidump emulated after the debugging session has ended, and a whole program with worker threads
+(src/tests/emulator_threads: critical section, events, mutex, semaphore, condition variable, TLS,
+sleeps) run from its entry point to its exit, then recorded. The debuggee itself must not move.
 
 Needs Python with the emulator's packages (emulator/requirements.txt) on the PATH.
 
@@ -103,7 +104,25 @@ emu.load "tests/emulator/saved.dmp"
 emu.call ntdll!RtlComputeCrc32, 0, str:hello, 5
 testassert $result == 0x3610A686, "a minidump emulated without debugging"
 emu.unload
+
+init tests/emulator_threads.exe
+run
+testassert $pid != 0, "emulator_threads stopped at entry"
+mov entry, cip
+emu.run
+testassert $result2 == 0, "a whole program with worker threads, from its entry point to its exit (code 0: every check passed)"
+emu.trace on
+emu.run 0, .300000
+testassert $result1 > .100000, "the instructions of several threads recorded"
+emu.trace off
+testassert cip == entry, "the debuggee did not move"
+stop
 '''
+    # the multithreaded program is right natively: its exit code is its number of failed checks
+    native = subprocess.run([str(bindir / "tests" / "emulator_threads.exe")], capture_output=True, text=True, timeout=120)
+    print("emulator_threads natively:", native.stdout.strip(), f"(exit code {native.returncode})")
+    if native.returncode != 0:
+        return 1
     final, asserts, log = run_headless(bindir, script, plugin)
     print(final, f"({asserts} assertions in the script)")
     if "status=pass" not in final or f"asserts={asserts}" not in final:

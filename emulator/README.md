@@ -2,9 +2,10 @@
 
 Run code of a Windows process **in an emulator**, from a minidump: the memory, modules and thread of
 the process are loaded in [Unicorn](https://www.unicorn-engine.org/), and what the code asks of
-Windows — the **system calls** (memory, files, registry, events, sections...) and the **exceptions**
-(SEH, VEH, unhandled exception filter) — is implemented in Python. A function of the process can be
-called with arguments of your choice, or its thread run on; the real process is never touched.
+Windows — the **system calls** (memory, files, registry, events, sections, threads...) and the
+**exceptions** (SEH, VEH, unhandled exception filter) — is implemented in Python. A function of the
+process can be called with arguments of your choice, or the program run on, **with its threads**,
+up to its exit; the real process is never touched.
 
 It is [dumpulator](https://github.com/mrexodia/dumpulator) by Duncan Ogilvie (mrexodia, the author
 of x64dbg), vendored here with the changes listed below, plus `fathom_emu.py`: a command line that
@@ -83,27 +84,71 @@ dp.call(0x140001000, [0x1234])
 print(writer.close(), "instructions")
 ```
 
+## Threads and whole programs
+
+Several threads run, one at a time (`dumpulator/threads.py`):
+
+- A thread the emulated code creates (`CreateThread`, `_beginthreadex`: `NtCreateThreadEx`) gets a
+  stack, a TEB and an initial context that enters `ntdll!LdrInitializeThunk`, as Windows starts a
+  thread: the loader gives it its static TLS and calls `DLL_THREAD_ATTACH`, then
+  `RtlUserThreadStart` calls the thread's function; when it returns, `DLL_THREAD_DETACH` and the
+  exit code. Suspended threads, `ResumeThread` / `SuspendThread`, `TerminateThread`.
+- A thread switches when it waits for something that is not signaled, and every 20,000 instructions
+  when other threads are ready. Waits: events, mutexes (recursive, abandoned), semaphores, threads,
+  `WaitForMultipleObjects` (any / all), `SignalObjectAndWait`, the alerts by thread id of critical
+  sections, SRW locks, condition variables and `WaitOnAddress`, keyed events, `Sleep`,
+  `SwitchToThread`, timeouts.
+- Time is virtual: it advances with the emulated instructions (one per nanosecond) and jumps over
+  sleeps and timeouts when every thread waits; `GetTickCount`, `QueryPerformanceCounter` and the
+  system time follow it (KUSER_SHARED_DATA). When every thread waits without a timeout, the
+  emulation stops and says which threads wait for what (deadlock).
+- The other threads of the dump stay where they are: they wait in the kernel.
+
+A program runs from its entry point to its exit, through the start-up and the end of the C
+runtime: DLLs loaded through `\KnownDlls` (read from the host's `System32` / `SysWOW64`), the
+console (`WriteConsole`, `printf`; the text is in the output and in the `console` member of the
+result), `RaiseException` (`OutputDebugString` included) dispatched to the program's handlers,
+`ExitProcess` ending the other threads before the DLLs are unloaded. The registry of the emulator only
+has the keys dumpulator sets up (and those a script adds with `dp.handles.create_key`): opening
+another one fails as for a missing key, so the code takes its defaults. The access token is that of a
+standard user, not elevated, medium integrity.
+
+`src/tests/emulator_threads` is the reference: four workers (one created suspended) contend for a
+critical section, count with interlocked instructions, wait for an event, a mutex and a semaphore,
+signal a condition variable under an SRW lock and use static TLS, while the main thread sleeps and
+waits for them; it prints its checks and exits with their number of failures. Natively and in the
+emulator (x64 and x86), it prints `12000 increments, total 30000, 0 failure(s)` and exits with 0;
+recorded, its 1.5 million instructions make a trace with five threads that the Time Travel tab
+shows (`extracmds/tests/test_emulator.py`).
+
 ## Changes to dumpulator
 
 dumpulator (v1.0.0, commit `18a64d7`) is in `dumpulator/` and its patched copy of skelsec's
-`minidump` library in `minidump/` (unchanged). Changed for unicorn 2.1 and Python 3.12+, which the
-pinned versions of dumpulator (unicorn 2.0, capstone 4) no longer install on:
+`minidump` library in `minidump/` (unchanged). Fathom's additions are in their own files, so that
+the rest stays close to dumpulator:
 
-- `dumpulator.py`: unicorn's virtual TLB mode (`ctl_set_tlb_mode(UC_TLB_VIRTUAL)`), without which
-  unicorn 2.1 cannot reach the GDT and the code stub dumpulator puts in the kernel half of the address
-  space; `hook_add` with positional arguments (`arg1` became `aux1`); `ctl_request_cache` returns a
-  tuple in unicorn 2.1.
+- `threads.py` (new): the threads, the synchronization objects, the virtual clock.
+- `fathom_nt.py` (new): the system calls added or completed (they replace the stubs of
+  `ntsyscalls.py` by name): sections of `\KnownDlls` and their mapping, image and recent memory
+  information classes, threads, waits, events, mutants, semaphores, keyed events, alerts by thread
+  id, time, the console, tokens, the registry, process cookie, Windows notification facility states,
+  `NtRaiseException`, `NtManageHotPatch`. Information classes are read as integers: recent Windows
+  versions have classes dumpulator's enumerations lack.
+- `avx.py` (new): **AVX and AVX2 instructions in Python**. Unicorn has no AVX, but the C runtime of a
+  process that ran on a recent CPU chose its AVX2 routines at start-up (`wcslen`, `memcpy`,
+  `memchr`...): the logical, comparison, minimum / maximum, add / subtract, mask, test, broadcast,
+  shuffle, align, permute, insert / extract, unpack and byte-shift forms on `xmm` and `ymm` registers
+  are emulated when unicorn rejects them, and `monitor` / `mwait` (`monitorx` / `mwaitx` on AMD) of
+  spin loops are waits that end at once. `tests/test_avx.py` runs each AVX instruction natively and
+  emulated on random values and compares the results (`python tests/test_avx.py`, needs a CPU with
+  AVX2).
+- `dumpulator.py`: unicorn 2.1 (the virtual TLB mode, `ctl_set_tlb_mode(UC_TLB_VIRTUAL)`, without
+  which unicorn 2.1 cannot reach the GDT and the code stub dumpulator puts in the kernel half of the
+  address space; `hook_add` with positional arguments, `arg1` became `aux1`; `ctl_request_cache`
+  returns a tuple), the scheduler in `start()` (time slices, the instruction count kept across
+  threads), the thread number in the system call log, its messages in its log instead of the output.
 - `ntprimitives.py`: the type annotations of a structure are read from its class (Python 3.14 no
-  longer finds them on an instance).
-- `ntsyscalls.py`: `NtOpenThreadToken` / `NtOpenThreadTokenEx` return `STATUS_NO_TOKEN` (the
-  emulated thread does not impersonate) instead of stopping the emulation.
-- `avx.py` (new) and its call in `dumpulator.py`: **AVX and AVX2 instructions in Python**. Unicorn
-  has no AVX, but the C runtime of a process that ran on a recent CPU chose its AVX2 routines at
-  start-up (`wcslen`, `memcpy`, `memchr`...): the logical, comparison, minimum / maximum, add /
-  subtract, mask, test, broadcast, shuffle, align, permute, insert / extract, unpack and byte-shift
-  forms on `xmm` and `ymm` registers are emulated when unicorn rejects them.
-  `tests/test_avx.py` runs each of them natively and emulated on random values and compares the
-  results (`python tests/test_avx.py`, needs a CPU with AVX2).
+  longer finds them on an instance). `ntsyscalls.py`: messages in the log.
 
 With these changes, dumpulator's own tests (its `Tests` DLL on the `HarnessMinimal` dumps, x64 and
 x86: handles, files, memory) pass, as does its exception test (SEH, VEH, vectored continue handler,
@@ -111,12 +156,14 @@ unhandled exception filter) run to the exit of the process.
 
 ## Limits
 
-- One thread. Code that waits for another thread, or a system call dumpulator does not implement,
-  stops the emulation (the last system call shown with `--syscalls` names it). Calling functions
-  works far better than running a whole program: the start-up of the C runtime alone makes system
-  calls dumpulator does not have.
+- One processor: the threads take turns, never run at the same instant, so a race that needs two
+  processors does not happen.
+- What the emulator does not implement stops it and is named in the output: a system call
+  (`--syscalls` shows the calls), an instruction. Files are those dumpulator handles (in memory);
+  other processes, networking, the GUI (win32k) are not emulated.
+- With several threads, `--count` is kept to within a few hundredths of a percent (the
+  instructions emulated in Python and the restart of a faulting instruction are counted by block).
 - AVX-512 instructions are not emulated (a CPU with AVX-512 makes some runtimes use them).
-- An emulated function that loops forever runs until `--count`.
 
 ## Licenses
 

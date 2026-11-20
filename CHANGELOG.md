@@ -24,6 +24,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   changes for unicorn 2.1 and Python 3.12+, `NtOpenThreadToken[Ex]`, and the
   AVX/AVX2 instructions of the C runtime emulated in Python (checked against the
   CPU by `emulator/tests/test_avx.py`). Test: `extracmds/tests/test_emulator.py`.
+- Emulator: **several threads and whole programs**. Threads the emulated code
+  creates start like on Windows (TLS, `DLL_THREAD_ATTACH`) and take turns
+  (waits, every 20,000 instructions): events, mutexes, semaphores, threads,
+  alerts by thread id (critical sections, SRW locks, condition variables),
+  keyed events, `Sleep` and timeouts on a virtual clock that
+  KUSER_SHARED_DATA follows; deadlocks are reported. A program runs from its
+  entry point to its exit: DLLs from `\KnownDlls`, console output,
+  `RaiseException`, tokens, registry lookups, WNF states, recent information
+  classes, `monitorx` / `mwaitx`. The test program `src/tests/emulator_threads`
+  gives the same result emulated as native (x64 and x86); recorded, its trace
+  has its five threads in Time Travel and the Trace tab.
 - ExtraCmds: `hvkd.log` writes the output of HvKdFusion to the log as it comes,
   not at the end.
 

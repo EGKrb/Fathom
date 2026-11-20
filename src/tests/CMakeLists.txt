@@ -187,6 +187,7 @@ set(X64DBG_STANDARD_TESTS
     bp_unloaded_module
     trace_cmd_condition
     trace_export
+    emulator_threads
     trace_threads
     trace_all_threads
     database_callbacks
