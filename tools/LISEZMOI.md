@@ -18,7 +18,7 @@ Le dossier doit être dans un emplacement où vous avez le droit d'écrire (pas 
 | ScyllaHide | masque le débogueur aux protections anti-debug (menu Plugins > ScyllaHide > Options). Le profil actif par défaut est « VMProtect x86/x64 » ; choisissez « Basic » pour un programme non protégé si celui-ci se comporte mal |
 | xAnalyzer | analyse automatique : arguments des appels d'API commentés dans le désassemblage (définitions dans `plugins\apis_def`) |
 | pybridge | pilotage depuis Python (`pybridge\README.md`) |
-| ExtraCmds | commandes `.init`, `.save`, `scylla_hide.enable` / `.disable` / `.status`, `hvkd`, `hvkd.log`, `hvkd.check`, `wineye` |
+| ExtraCmds | commandes `.init`, `.save`, `scylla_hide.enable` / `.disable` / `.status`, `hvkd`, `hvkd.log`, `hvkd.check`, `wineye`, `tt.*`, `emu.*` |
 
 **OllyDumpEx** (dump de processus en PE) n'a pas de licence de redistribution : installez-le avec
 
@@ -59,5 +59,14 @@ powershell -ExecutionPolicy Bypass -File .\install-plugins.ps1 -Plugins OllyDump
   wineye --live --vm 0            VM live (gel, reprise, registres)
   ```
 
+- Émulateur (dossier `emulator\`, [dumpulator](https://github.com/mrexodia/dumpulator)) : le code du processus débogué s'exécute dans un émulateur à partir d'un minidump de son état, avec les appels système de Windows implémentés en Python ; le processus ne bouge pas. Python 3.9+ requis, puis `emu.setup` (installe unicorn, capstone et pefile).
+  ```
+  emu.call ntdll.RtlComputeCrc32, 0, str:hello, 5     $result = valeur de retour
+  emu.call module.dechiffre, buf:256, 0x140017000     le tampon est affiché après l'appel
+  emu.trace on                                        les émulations suivantes s'ouvrent dans Time Travel
+  emu.run 0, .10000                                   le thread courant, 10 000 instructions plus loin
+  emu.load "C:\dumps\autre.dmp"                       n'importe quel minidump, même sans déboguer
+  ```
+
 Documentation complète : <https://github.com/EGKrb/x64dbg#readme>
-Licences : dossier `licenses\` (x64dbg, ScyllaHide et HvKdFusion : GPL-3.0, xAnalyzer : MIT).
+Licences : dossier `licenses\` (x64dbg, ScyllaHide et HvKdFusion : GPL-3.0, xAnalyzer : MIT, dumpulator : BSL-1.0).

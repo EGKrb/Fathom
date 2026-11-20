@@ -13,7 +13,7 @@ Steps:
   1. downloads the x64dbg translations (like the official CI)
   2. runs cmake\release.cmake (official layout: release\, pluginsdk\, pdb\)
   3. adds ScyllaHide and xAnalyzer (official downloads, SHA-256 checked) and pybridge
-  4. adds the Python client, examples, headless templates, HvKdFusion, licenses and LISEZMOI.md
+  4. adds the Python client, examples, headless templates, HvKdFusion, the emulator, licenses and LISEZMOI.md
   5. writes dist\<Name>_<Version>.zip and dist\<Name>_<Version>_symbols.zip (Name defaults to Fathom)
 
 OllyDumpEx is not redistributable: the archive contains install-plugins.ps1 to download it.
@@ -93,6 +93,14 @@ foreach ($item in 'hvkdfusion.py', 'wineye.py', 'hvkd.ps1', 'config.example.json
     Copy-Item -Recurse (Join-Path $root "hvkdfusion\$item") $hvkd
 }
 
+# Emulator (dumpulator, used by the emu.* commands of ExtraCmds and by pybridge's Debugger.emulator)
+$emulator = Join-Path $main 'emulator'
+New-Item -ItemType Directory -Force $emulator | Out-Null
+foreach ($item in 'fathom_emu.py', 'requirements.txt', 'README.md', 'LICENSE.dumpulator', 'LICENSE.minidump', 'dumpulator', 'minidump', 'examples') {
+    Copy-Item -Recurse (Join-Path $root "emulator\$item") $emulator
+}
+Get-ChildItem -Recurse -Directory $emulator -Filter '__pycache__' | Remove-Item -Recurse -Force
+
 # Licenses
 $licenses = Join-Path $main 'licenses'
 New-Item -ItemType Directory -Force $licenses | Out-Null
@@ -100,6 +108,8 @@ Copy-Item (Join-Path $root 'LICENSE') (Join-Path $licenses 'x64dbg-LICENSE.txt')
 Invoke-Download 'https://raw.githubusercontent.com/x64dbg/ScyllaHide/master/LICENSE' (Join-Path $licenses 'ScyllaHide-LICENSE.txt')
 Invoke-Download 'https://raw.githubusercontent.com/ThunderCls/xAnalyzer/master/LICENSE' (Join-Path $licenses 'xAnalyzer-LICENSE.txt')
 Copy-Item (Join-Path $root 'plugins\THIRD-PARTY.md') $licenses
+Copy-Item (Join-Path $root 'emulator\LICENSE.dumpulator') (Join-Path $licenses 'dumpulator-LICENSE.txt')
+Copy-Item (Join-Path $root 'emulator\LICENSE.minidump') (Join-Path $licenses 'dumpulator-minidump-LICENSE.txt')
 # Libraries linked into minidump.exe
 $viewerLicenses = @{ 'json' = 'LICENSE.MIT'; 'cpp-httplib' = 'LICENSE'; 'linux-pe' = 'LICENSE.md'; 'udmp-parser' = 'LICENSE' }
 foreach ($name in $viewerLicenses.Keys) {

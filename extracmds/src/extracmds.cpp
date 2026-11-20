@@ -21,9 +21,14 @@
 //   tt.find address / tt.findback ...   next / previous execution of an address
 //   tt.write address[, size]            previous write to memory (tt.writenext: next one)
 //   tt.show                             bring the Time Travel tab to the front (GUI)
+//   emu.call address[, argument ...]    call a function of the debuggee in an emulator (dumpulator)
+//   emu.run / emu.script / emu.trace    run the thread on / a Python script / record the emulated code
+//   emu.dump / emu.load / emu.info      the minidump the emulator runs (see emucmds.cpp)
 
 #include "_plugins.h"
 
+#include "common.h"
+#include "emucmds.h"
 #include "hvkdpanel.h"
 #include "ttmodel.h"
 #include "ttpanel.h"
@@ -35,6 +40,8 @@
 #define PLUGIN_VERSION 2
 #define LOG_PREFIX "[" PLUGIN_NAME "] "
 
+using namespace extracmds;
+
 namespace
 {
     int gPluginHandle;
@@ -43,64 +50,6 @@ namespace
     const char* const ScyllaHidePluginName = "ScyllaHideX64DBGPlugin";
     const wchar_t* const ScyllaHideDisabledProfile = L"Disabled";
     const wchar_t* const ScyllaHideDefaultProfile = L"Basic";
-
-    std::wstring Utf8ToUtf16(const std::string & text)
-    {
-        if(text.empty())
-            return {};
-        int size = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), (int)text.size(), nullptr, 0);
-        std::wstring result(size, L'\0');
-        MultiByteToWideChar(CP_UTF8, 0, text.c_str(), (int)text.size(), &result[0], size);
-        return result;
-    }
-
-    std::string Utf16ToUtf8(const std::wstring & text)
-    {
-        if(text.empty())
-            return {};
-        int size = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), (int)text.size(), nullptr, 0, nullptr, nullptr);
-        std::string result(size, '\0');
-        WideCharToMultiByte(CP_UTF8, 0, text.c_str(), (int)text.size(), &result[0], size, nullptr, nullptr);
-        return result;
-    }
-
-    // Quote an argument for an x64dbg command (same rules as Command::Escape)
-    std::string Quote(const std::string & argument)
-    {
-        std::string result = "\"";
-        size_t i = 0;
-        while(i < argument.size())
-        {
-            char ch = argument[i];
-            if(ch != '\\')
-            {
-                if(ch == '"' || ch == '{')
-                    result.push_back('\\');
-                result.push_back(ch);
-                i++;
-                continue;
-            }
-            size_t start = i;
-            while(i < argument.size() && argument[i] == '\\')
-                i++;
-            size_t count = i - start;
-            if(i == argument.size())
-                result.append(count * 2, '\\');
-            else if(argument[i] == '"' || argument[i] == '{')
-            {
-                result.append(count * 2 + 1, '\\');
-                result.push_back(argument[i++]);
-            }
-            else
-                result.append(count, '\\');
-        }
-        return result + "\"";
-    }
-
-    bool Exec(const std::string & command)
-    {
-        return DbgCmdExecDirect(command.c_str());
-    }
 
     bool HasExtension(const std::string & file, std::initializer_list<const char*> extensions)
     {
@@ -117,22 +66,6 @@ namespace
     bool IsDumpFile(const std::string & file)
     {
         return HasExtension(file, { ".dmp", ".mdmp", ".hdmp" });
-    }
-
-    // Folder that contains x32\ and x64\ (parent of the folder of the running executable)
-    std::wstring X64dbgRoot()
-    {
-        wchar_t path[MAX_PATH] = L"";
-        GetModuleFileNameW(nullptr, path, _countof(path));
-        std::wstring result = path;
-        for(int i = 0; i < 2; i++)
-        {
-            auto slash = result.find_last_of(L'\\');
-            if(slash == std::wstring::npos)
-                return L".";
-            result.resize(slash);
-        }
-        return result;
     }
 
     std::wstring ArchFolder()
@@ -160,37 +93,6 @@ namespace
         bool ok = ReadFile(hFile, signature, sizeof(signature), &read, nullptr) && read == sizeof(signature);
         CloseHandle(hFile);
         return ok && (memcmp(signature, "PAGEDUMP", 8) == 0 || memcmp(signature, "PAGEDU64", 8) == 0);
-    }
-
-    // Quote an argument for a Windows command line (CommandLineToArgvW rules)
-    std::wstring QuoteArgument(const std::wstring & argument)
-    {
-        if(!argument.empty() && argument.find_first_of(L" \t\"") == std::wstring::npos)
-            return argument;
-        std::wstring result = L"\"";
-        size_t backslashes = 0;
-        for(auto ch : argument)
-        {
-            if(ch == L'\\')
-            {
-                backslashes++;
-                continue;
-            }
-            result.append(ch == L'"' ? backslashes * 2 + 1 : backslashes, L'\\');
-            backslashes = 0;
-            result.push_back(ch);
-        }
-        result.append(backslashes * 2, L'\\');
-        return result + L"\"";
-    }
-
-    std::wstring FullPath(const std::string & file)
-    {
-        auto path = Utf8ToUtf16(file);
-        wchar_t full[MAX_PATH] = L"";
-        if(GetFullPathNameW(path.c_str(), _countof(full), full, nullptr))
-            return full;
-        return path;
     }
 
     // Everything after the command name, as typed (argv[0] is the whole command line)
@@ -246,15 +148,6 @@ namespace
         return true;
     }
 
-    std::wstring FindPython()
-    {
-        wchar_t path[MAX_PATH] = L"";
-        for(auto name : { L"python.exe", L"py.exe" })
-            if(SearchPathW(nullptr, name, nullptr, _countof(path), path, nullptr))
-                return path;
-        return {};
-    }
-
     // hvkdfusion.py without a window, its output written to the log. Standard input is NUL, so an
     // interactive action (menu, wineye REPL) stops at its first prompt instead of blocking x64dbg
     bool RunHvKdToLog(const std::wstring & arguments)
@@ -262,64 +155,7 @@ namespace
         auto folder = HvKdFusionDir();
         if(folder.empty())
             return false;
-        auto python = FindPython();
-        if(python.empty())
-        {
-            _plugin_logputs(LOG_PREFIX "Python not found on the PATH (python.exe or py.exe)");
-            return false;
-        }
-        std::wstring commandLine = QuoteArgument(python) + L" -X utf8 " + QuoteArgument(folder + L"\\hvkdfusion.py") + L" " + arguments;
-        SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
-        HANDLE readPipe = nullptr, writePipe = nullptr;
-        if(!CreatePipe(&readPipe, &writePipe, &sa, 0))
-            return false;
-        SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
-        HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
-        STARTUPINFOW si = { sizeof(si) };
-        si.dwFlags = STARTF_USESTDHANDLES;
-        si.hStdInput = nul;
-        si.hStdOutput = writePipe;
-        si.hStdError = writePipe;
-        PROCESS_INFORMATION pi = {};
-        BOOL started = CreateProcessW(nullptr, &commandLine[0], nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, folder.c_str(), &si, &pi);
-        DWORD error = GetLastError();
-        CloseHandle(writePipe);
-        if(nul != INVALID_HANDLE_VALUE)
-            CloseHandle(nul);
-        if(!started)
-        {
-            CloseHandle(readPipe);
-            _plugin_logprintf(LOG_PREFIX "cannot start Python (error %u)\n", error);
-            return false;
-        }
-        std::string output;
-        char buffer[4096];
-        DWORD read = 0;
-        while(ReadFile(readPipe, buffer, sizeof(buffer), &read, nullptr) && read)
-            output.append(buffer, read);
-        CloseHandle(readPipe);
-        WaitForSingleObject(pi.hProcess, INFINITE);
-        DWORD exitCode = 1;
-        GetExitCodeProcess(pi.hProcess, &exitCode);
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        for(size_t start = 0; start < output.size();)
-        {
-            auto end = output.find('\n', start);
-            if(end == std::string::npos)
-                end = output.size();
-            auto line = output.substr(start, end - start);
-            while(!line.empty() && line.back() == '\r')
-                line.pop_back();
-            auto progress = line.find_last_of('\r'); // progress counters rewrite the line with \r: keep the last state
-            if(progress != std::string::npos)
-                line = line.substr(progress + 1);
-            _plugin_logprintf("%s\n", line.c_str());
-            start = end + 1;
-        }
-        if(exitCode != 0)
-            _plugin_logprintf(LOG_PREFIX "hvkdfusion.py exited with code %u\n", exitCode);
-        return exitCode == 0;
+        return RunPythonToLog(folder, L"hvkdfusion.py", arguments);
     }
 
     bool OpenInWineye(const std::string & imageFile)
@@ -918,6 +754,7 @@ extern "C" __declspec(dllexport) bool pluginit(PLUG_INITSTRUCT* initStruct)
     _plugin_registercommand(gPluginHandle, "tt.write", CbTtWrite, false);
     _plugin_registercommand(gPluginHandle, "tt.writenext", CbTtWriteNext, false);
     _plugin_registercommand(gPluginHandle, "tt.show", CbTtShow, false);
+    EmuRegister(gPluginHandle);
     return true;
 }
 

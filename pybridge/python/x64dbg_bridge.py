@@ -507,6 +507,67 @@ class Debugger:
                      Expr(slide) if isinstance(slide, str) else slide)
         return self.result
 
+    # ----------------------------------------------------------------- emulation (dumpulator)
+
+    def minidump(self, path: str | os.PathLike) -> Path:
+        """Save the debuggee to a minidump with full memory (the minidump command); the current thread
+        is the thread of its exception record, the one an emulator runs."""
+        path = Path(path).resolve()
+        self.command("minidump", str(path))
+        return path
+
+    def emulate_call(self, address: int | str, *args: int | str, trace: bool = False) -> int:
+        """Call a function of the debuggee in the emulator (ExtraCmds emu.call), from a minidump of its
+        current state: the debuggee itself does not run. Returns the function's return value.
+
+        address: an integer or an expression ("kernel32.lstrlenW"). args: integers, expressions, or
+        "str:TEXT" / "wstr:TEXT" (a string allocated in the emulator), "buf:SIZE" (a zeroed buffer,
+        shown in the log after the call), "bytes:HEX". trace=True records the emulated instructions
+        and opens them in the Time Travel tab (then eval("$result1") is their number).
+        """
+        self.cmd("emu.trace on" if trace else "emu.trace off")
+        values = [Expr(a) if isinstance(a, str) and not a.split(":", 1)[0].lower() in ("str", "wstr", "buf", "bytes") else a
+                  for a in args]
+        self.command("emu.call", Expr(address) if isinstance(address, str) else address, *values)
+        return self.result
+
+    def emulate_run(self, end: int | str = 0, count: int = 0, trace: bool = False) -> int:
+        """Run the current thread on in the emulator (ExtraCmds emu.run) until end (0: none) or count
+        instructions. Returns the address it stopped at; eval("$result2") is the exit code if the
+        emulated process exited (else -1)."""
+        self.cmd("emu.trace on" if trace else "emu.trace off")
+        self.command("emu.run", Expr(end) if isinstance(end, str) else end, count)
+        return self.result
+
+    @staticmethod
+    def emulator_folder() -> Path:
+        """The emulator of Fathom (dumpulator + fathom_emu.py): $FATHOM_EMULATOR, else the emulator
+        folder next to pybridge (release\\emulator, or emulator\\ in the repository)."""
+        folder = os.environ.get("FATHOM_EMULATOR")
+        return Path(folder) if folder else Path(__file__).resolve().parent.parent.parent / "emulator"
+
+    def emulator(self, dump: str | os.PathLike | None = None, **options: Any):
+        """A dumpulator.Dumpulator of the debuggee's current state, in this Python process: the whole
+        API of dumpulator (dp.call, dp.read, dp.allocate, dp.regs, @syscall...). The debuggee is saved
+        to dump (default: a file in the temporary folder). options go to Dumpulator (thread_id, trace,
+        quiet: True by default). Needs the emulator's packages: pip install -r emulator\\requirements.txt.
+        """
+        import sys
+        import tempfile
+
+        folder = self.emulator_folder()
+        if not (folder / "dumpulator").is_dir():
+            raise BridgeError(f"the emulator is not in {folder} (set FATHOM_EMULATOR)")
+        if str(folder) not in sys.path:
+            sys.path.insert(0, str(folder))
+        from dumpulator import Dumpulator  # noqa: E402 (the emulator's folder is only known now)
+
+        if dump is None:
+            dump = Path(tempfile.gettempdir()) / f"fathom-emulator-{self.eval('$pid')}.dmp"
+        path = self.minidump(dump)
+        options.setdefault("quiet", True)
+        return Dumpulator(str(path), **options)
+
 
 class Expr:
     """Marks a command argument as an unquoted expression: dbg.command("bp", Expr("kernel32.Sleep"))."""

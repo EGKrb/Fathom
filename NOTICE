@@ -22,6 +22,10 @@ Modifications in Fathom relative to upstream x64dbg
 - HvKdFusion             : Hyper-V kernel debugging and memory forensics
                            (hvkd*, and "wineye", a native WinDbg-style passive
                            memory REPL with MCP / DAP / gdbserver modes).
+- emulator               : the emu.* commands of ExtraCmds and emulator/: code of
+                           the debuggee run from a minidump in dumpulator
+                           (vendored and modified, see emulator/README.md), with
+                           emulated traces in x64dbg's trace format.
 - plugin installer       : ScyllaHide / xAnalyzer / PE-sieve / OllyDumpEx, with
                            SHA-256 verification.
 - build / release fixes  : minidump viewer CMAKE_SYSTEM_VERSION, unity build.
@@ -45,5 +49,10 @@ licenses and copyrights, and are not relicensed by Fathom:
 - Dokany                                   LGPL / MIT
 - ntoseye                                  (its own license)
 - WinDbg / kd                              Microsoft license (NOT redistributed)
+- dumpulator (emulator/dumpulator)         Boost Software License 1.0,
+                                           Copyright Duncan Ogilvie; modified
+- minidump (emulator/minidump)             MIT, Copyright Tamas Jos (skelsec)
+- Unicorn, Capstone, pefile                GPL-2.0 / BSD / MIT (installed with pip,
+                                           NOT redistributed)
 
-See plugins/THIRD-PARTY.md and hvkdfusion/LICENSE for details.
+See plugins/THIRD-PARTY.md, hvkdfusion/LICENSE and emulator/LICENSE.* for details.

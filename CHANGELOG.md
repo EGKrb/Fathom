@@ -8,6 +8,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- **Emulator** (`emu.*` commands of ExtraCmds, `emulator/`): code of the
+  debuggee run in [dumpulator](https://github.com/mrexodia/dumpulator) from a
+  minidump of its current state, with the Windows system calls and exceptions
+  implemented in Python; the debuggee does not move. `emu.call address[, args]`
+  calls a function (`str:` / `wstr:` / `buf:` / `bytes:` arguments, `$result` =
+  return value), `emu.run [end[, count]]` runs the current thread on,
+  `emu.script file.py` runs a script with dumpulator's API, `emu.load file.dmp`
+  emulates any minidump, even without debugging. `emu.trace on` records the
+  emulated instructions in x64dbg's trace format and opens them in the Time
+  Travel tab (about 40,000 instructions per second). pybridge:
+  `Debugger.emulate_call()`, `emulate_run()`, `minidump()` and `emulator()` (a
+  `Dumpulator` of the debuggee in the client). dumpulator is vendored with
+  changes for unicorn 2.1 and Python 3.12+, `NtOpenThreadToken[Ex]`, and the
+  AVX/AVX2 instructions of the C runtime emulated in Python (checked against the
+  CPU by `emulator/tests/test_avx.py`). Test: `extracmds/tests/test_emulator.py`.
+- ExtraCmds: `hvkd.log` writes the output of HvKdFusion to the log as it comes,
+  not at the end.
+
 ### Changed
 - `TraceSetThreads all` with `TraceSetSkip`: a thread created during the trace
   runs its end at full speed once it returns from its start function into a

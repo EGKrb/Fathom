@@ -8,6 +8,7 @@
 
 - **`TraceExport`** — turn execution traces into readable **JSON** or **CSV** that any tool can parse, into **Tenet** / **Frinet** text traces to explore them in IDA Pro, or into the indexed, compressed **`.ftt`** format with per-thread timelines and memory snapshots;
 - a **Time Travel** tab and `tt.*` commands — navigate a trace **backward and forward** without leaving the debugger: any thread at any instant, registers, memory rebuilt at that instant, who wrote this address;
+- an **emulator** (`emu.*` commands, [dumpulator](https://github.com/mrexodia/dumpulator)) — **call a function of the debugged process, or run its thread on, in an emulator** with the Windows system calls and exceptions implemented in Python, from a snapshot of its current state: the process does not move, and the emulated code can be recorded for the Time Travel tab;
 - **pybridge** — drive Fathom **from Python** (breakpoints, single-stepping, registers, memory, traces);
 - ready-to-use **script templates** for **`headless.exe`** (Fathom with no GUI);
 - a **memory dump viewer** (`.dmp`) and handy commands: **`.init`** (executable or dump), **`.save`**, **`scylla_hide.enable` / `.disable` / `.status`**;
@@ -72,14 +73,15 @@ TraceExport C:\traces\sample.trace64, C:\traces\sample.json
 3. [How x64dbg works](#how-x64dbg-works)
 4. [TraceExport: exporting traces](#traceexport-exporting-traces)
 5. [Time Travel: exploring a trace backward](#time-travel-exploring-a-trace-backward)
-6. [pybridge: driving x64dbg from Python](#pybridge-driving-x64dbg-from-python)
-7. [Templates for headless.exe](#templates-for-headlessexe)
-8. [Added commands and memory dumps](#added-commands-and-memory-dumps)
-9. [HvKdFusion: Hyper-V kernel debugging and memory forensics](#hvkdfusion-hyper-v-kernel-debugging-and-memory-forensics)
-10. [Bundled plugins](#bundled-plugins)
-11. [Building it yourself](#building-it-yourself)
-12. [Repository layout](#repository-layout)
-13. [Licenses and credits](#licenses-and-credits)
+6. [Emulator: running the debuggee's code without running it](#emulator-running-the-debuggees-code-without-running-it)
+7. [pybridge: driving x64dbg from Python](#pybridge-driving-x64dbg-from-python)
+8. [Templates for headless.exe](#templates-for-headlessexe)
+9. [Added commands and memory dumps](#added-commands-and-memory-dumps)
+10. [HvKdFusion: Hyper-V kernel debugging and memory forensics](#hvkdfusion-hyper-v-kernel-debugging-and-memory-forensics)
+11. [Bundled plugins](#bundled-plugins)
+12. [Building it yourself](#building-it-yourself)
+13. [Repository layout](#repository-layout)
+14. [Licenses and credits](#licenses-and-credits)
 
 ---
 
@@ -108,6 +110,7 @@ release\
   translations\              translated UI (French included: Options > Language)
   themes\                    dark theme
   pybridge\                  Python client, examples, headless templates
+  emulator\                  emulator of the emu.* commands (dumpulator, Python)
   install-plugins.ps1        installs/updates ScyllaHide, xAnalyzer, OllyDumpEx
   licenses\                  x64dbg and plugin licenses
   LISEZMOI.md                quick start
@@ -126,10 +129,11 @@ A second file, `Fathom_<version>_symbols.zip`, contains the debug symbols (`.pdb
 | Code base | published releases (e.g. 2026.05.27) | recent `development` branch (features and fixes not yet in an official release) |
 | Trace export | binary `.trace64`, readable only by x64dbg; CSV export only from the GUI | `TraceExport` command → JSON, CSV, Tenet, Frinet or `.ftt`, extended registers, per-thread timelines, also in scripts and `headless.exe` |
 | Time travel | trace view (forward list of instructions) | Time Travel tab and `tt.*` commands: any thread at any instant, memory rebuilt at that instant, previous execution / write |
+| Emulation | — | `emu.*` commands: a function of the debuggee called, or its thread run on, in an emulator with the Windows system calls (dumpulator), from a minidump of its current state; emulated traces in Time Travel |
 | Automation | x64dbg script language, C/C++ SDK | + Python client (pybridge) + headless templates with a launcher |
 | Memory dumps (`.dmp`) | creation only (`minidump`) | + dump viewer (`minidump.exe`), opened with `.init file.dmp`; kernel dumps and raw memory images open in wineye |
 | Kernel / whole machine | — (user-mode only) | HvKdFusion: Hyper-V VM memory read/write/dump, WinDbg/kd on a VM, MemProcFS mount, wineye REPL (`hvkd`, `wineye`) |
-| Commands | — | `.init`, `.save`, `scylla_hide.enable` / `.disable` / `.status`, `hvkd`, `hvkd.log`, `hvkd.check`, `wineye`, `tt.*` (ExtraCmds plugin) |
+| Commands | — | `.init`, `.save`, `scylla_hide.enable` / `.disable` / `.status`, `hvkd`, `hvkd.log`, `hvkd.check`, `wineye`, `tt.*`, `emu.*` (ExtraCmds plugin) |
 | Plugins | none | ScyllaHide and xAnalyzer bundled, pybridge and ExtraCmds bundled, OllyDumpEx via `install-plugins.ps1` |
 | Build | — | fixes a `using namespace std` that broke the *unity build* (`patternfind.cpp`) |
 
@@ -341,6 +345,48 @@ By default (`TraceSetThreads current`), the recorder steps one thread while the 
 
 ---
 
+## Emulator: running the debuggee's code without running it
+
+The **emulator** ([`emulator/`](emulator/README.md)) brings [dumpulator](https://github.com/mrexodia/dumpulator), by mrexodia (the author of x64dbg), into Fathom. The debuggee is saved to a minidump (the `minidump` command) and its code runs in an emulator (Unicorn) **from that copy**: the memory, the modules and the thread are those of the process at the instant it is paused, the **Windows system calls are implemented in Python** (memory, files, registry, events, sections...), and so are **exceptions** (SEH, VEH, unhandled exception filter). The debugged process **does not move**.
+
+What for: call a decryption routine on any input, get the string a function computes, see what a function does with arguments of your choice, explore a branch without changing the program — and record it as a trace for the Time Travel tab.
+
+```
+emu.call ntdll.RtlComputeCrc32, 0, str:hello, 5     // $result = 0x3610A686
+emu.call mymodule.decrypt, buf:256, 0x140017000     // the 256-byte buffer is written to the log after the call
+emu.trace on
+emu.call kernel32.lstrlenW, wstr:Fathom             // recorded and opened in Time Travel
+emu.run 0, .10000                                   // the current thread, 10,000 instructions on
+emu.script "C:\scripts\decrypt.py", 0x140001000     // dumpulator's whole API from Python
+```
+
+| Command | Effect |
+|---|---|
+| `emu.call address[, argument ...]` | calls a function (calling convention of the process); `$result` = its return value. Arguments: expressions, `str:TEXT` / `wstr:TEXT` (an ANSI / UTF-16 string allocated in the emulator), `buf:SIZE` (a zeroed buffer, written to the log after the call), `bytes:HEX` |
+| `emu.run [end[, count]]` | runs the current thread on, up to `end` (0: none) or `count` instructions; `$result` = where it stopped, `$result2` = the exit code if the emulated process exited (else -1) |
+| `emu.script file.py[, argument ...]` | runs a Python script with `dp`, the `Dumpulator` of the dump (`dp.call`, `dp.read`, `dp.write`, `dp.allocate`, `dp.regs`, system calls of your own with `@syscall`...), and `args`; `result["return"] = value` sets `$result` |
+| `emu.trace on\|off` | records the emulated instructions into a trace (`.trace64` / `.trace32`) opened in the **Time Travel** tab and x64dbg's trace view; `$result1` = the number of instructions |
+| `emu.syscalls on\|off` | writes the system calls of the emulated code, with their arguments, to the log |
+| `emu.dump [file]` | saves the debuggee for the emulator now (to a file: kept and used until `emu.unload`) |
+| `emu.load file.dmp` / `emu.unload` | emulates a minidump file (any process, even without debugging) / back to the debuggee |
+| `emu.info` | threads and modules of the dump |
+| `emu.setup` | installs the Python packages of the emulator (`pip install -r emulator\requirements.txt`) |
+
+How it works:
+
+- The dump is made **when needed and kept until the debuggee runs again** (a step, `run`): several `emu.*` in a row emulate the same state. It is a full minidump (a few hundred MB for a large process) in `%TEMP%\Fathom\emu`. The emulated thread is the debugger's current thread.
+- **Requirements**: Python 3.9 or later on the `PATH` with `unicorn` 2.1, `capstone` 5 and `pefile` — `emu.setup` installs them. The emulator runs in its own Python process; its output goes to the log as it comes.
+- **Traces**: the registers before each instruction and the memory it accessed, in x64dbg's trace format, so `TraceExport` converts them to JSON, CSV, Tenet or `.ftt` like any recorded trace, and the Time Travel tab names the addresses when the dump is the debuggee. About 40,000 instructions per second while recording (a 220,000-instruction loop: 5 s). What system calls write to memory is not in the trace, only their result in the registers.
+- **AVX**: Unicorn has no AVX, but the C runtime of a process that runs on a recent CPU uses AVX2 (`wcslen`, `memcpy`...). Fathom emulates the AVX/AVX2 instructions of those routines in Python ([`emulator/dumpulator/avx.py`](emulator/dumpulator/avx.py)), each one checked against the processor by `emulator/tests/test_avx.py`.
+- **Limits**: one thread; a system call dumpulator does not implement stops the emulation (`emu.syscalls on` shows which one). Calling functions works far better than running a whole program: the start-up of the C runtime alone makes system calls dumpulator does not have. x64dbg emulates 64-bit processes and x32dbg 32-bit ones.
+- dumpulator is vendored with changes for unicorn 2.1 and Python 3.12+ (the versions it pins no longer install on them), `NtOpenThreadToken`, and the AVX instructions: see [`emulator/README.md`](emulator/README.md). `python emulator\fathom_emu.py` also works alone on any minidump (`call app.dmp kernel32!lstrlenA str:hi`), and pybridge's `Debugger.emulator()` returns a `Dumpulator` of the debuggee.
+
+Automated test: [`extracmds/tests/test_emulator.py`](extracmds/tests/test_emulator.py) (headless, x64 and x32: arguments, system calls, trace in Time Travel, script, minidump file after the end of the session, debuggee unchanged).
+
+> Not to be confused with `pybridge/examples/emulate_dump.py`, a plain CPU emulator that single-steps a dump and stops at the first system call (it serves the dump over the pybridge protocol).
+
+---
+
 
 ## pybridge: driving x64dbg from Python
 
@@ -398,6 +444,9 @@ with Debugger.launch(r"C:\Tools\x64dbg\release") as dbg:
 | | `set_hardware_breakpoint(addr, kind="x"/"w"/"r", size)`, `delete_breakpoint(addr)` | hardware; delete (all if `addr` omitted) |
 | Traces | `trace(file, condition, max_steps, step_over)` | trace (and record) until the condition |
 | | `export_trace(trace, output, fmt, slide)` | `TraceExport` (`fmt`: `json`, `csv`, `tenet`, `frinet`, `ftt`); returns the number of instructions |
+| Emulation | `emulate_call(addr, *args, trace=False)` | `emu.call`: the function called in the emulator; returns its return value (`args`: integers, expressions, `"str:..."`, `"wstr:..."`, `"buf:N"`, `"bytes:HEX"`) |
+| | `emulate_run(end=0, count=0, trace=False)` | `emu.run`: the current thread run on in the emulator; returns where it stopped |
+| | `minidump(path)`, `emulator(dump=None, **options)` | saves the debuggee to a minidump; `emulator()` returns a `dumpulator.Dumpulator` of it in the client process |
 | Commands | `cmd("text")`, `command(name, *args)`, `eval(expr)`, `result` | any x64dbg command; `command()` escapes text arguments |
 
 Addresses and values accept an **integer** or an **x64dbg expression** (string); results are Python integers. Errors (unreadable memory, invalid expression, refused command) raise `BridgeError` with the x64dbg message.
@@ -645,6 +694,12 @@ pybridge/
   headless/                          headless launcher and templates
 extracmds/src/extracmds.cpp          ExtraCmds plugin (.init, .save, scylla_hide.*, hvkd*, wineye)
 extracmds/src/hvkdpanel.h, .cpp      HvKdFusion dockable GUI tab (Qt, x64 only)
+extracmds/src/emucmds.cpp            emu.* commands (emulator)
+extracmds/tests/                     Time Travel and emulator tests (headless)
+emulator/                            emulator (dumpulator, Python)
+  fathom_emu.py                      command line of the emu.* commands, x64dbg trace writer
+  dumpulator/, minidump/             dumpulator (BSL-1.0) and its minidump parser (MIT), changes in README.md
+  tests/test_avx.py                  AVX/AVX2 emulation checked against the CPU
 hvkdfusion/                          HvKdFusion (Hyper-V kernel debugging / memory forensics, Python)
   hvkdfusion.py, wineye.py, hvkd.ps1 CLI, WinDbg-style REPL (incl. MCP/DAP/gdb modes), elevated launcher
   tests/test_servers.py              wineye MCP/DAP/gdbserver protocol tests
@@ -675,6 +730,7 @@ README.fr.md                         this README in French
 - **xAnalyzer**: MIT — <https://github.com/ThunderCls/xAnalyzer>, by ThunderCls.
 - **OllyDumpEx**: freeware by Low Priority — <https://low-priority.appspot.com/ollydumpex/>, not redistributed.
 - **HvKdFusion**: GPL-3.0-or-later — <https://github.com/EGKrb/HvKdFusion>. The components it drives are not redistributed: LiveCloudKd (GPL-3.0), MemProcFS and LeechCore (AGPL-3.0), Dokany (LGPL/MIT), ntoseye, WinDbg (Microsoft license).
+- **dumpulator**: Boost Software License 1.0 — <https://github.com/mrexodia/dumpulator>, by Duncan Ogilvie (mrexodia); its `minidump` parser: MIT, by Tamas Jos (skelsec). Requires Unicorn (GPL-2.0, installed with pip), Capstone (BSD) and pefile (MIT), not bundled.
 - **Dump viewer**: x64dbg code (GPL-3.0); libraries [udmp-parser](https://github.com/0vercl0k/udmp-parser) (MIT), [cpp-httplib](https://github.com/yhirose/cpp-httplib) (MIT), [linux-pe](https://github.com/can1357/linux-pe) (BSD), [nlohmann/json](https://github.com/nlohmann/json) (MIT), Qt 5.12 (LGPL-3.0, DLLs shared with x64dbg).
 
 Fathom is built on x64dbg, developed by mrexodia and contributors ([list](https://github.com/x64dbg/x64dbg/graphs/contributors)); see the [official README](README.x64dbg.md) for full credits. Fathom is neither affiliated with nor endorsed by the x64dbg team; for official x64dbg builds, go to <https://x64dbg.com>.

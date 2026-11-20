@@ -29,3 +29,22 @@ jobs:
 
       - name: HvKdFusion readiness report
         run: python hvkdfusion/hvkdfusion.py check --json
+
+  emulator:
+    name: Emulator (dumpulator)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install the emulator's packages
+        run: python -m pip install -r emulator/requirements.txt
+
+      - name: Command line
+        run: python emulator/fathom_emu.py --help
+
+      - name: AVX / AVX2 instructions emulated in Python, against the CPU
+        run: python emulator/tests/test_avx.py --rounds 100
