@@ -13,6 +13,15 @@
 //   ($result1: the number of instructions recorded when emu.trace is on)
 //   emu.trace on|off                   record the emulated instructions (opened in Time Travel)
 //   emu.syscalls on|off                show the system calls and exceptions of the emulated code
+//   emu.strict on|off                  stop at a system call or instruction the emulator lacks (off: it
+//                                      fails in the program, and the emulation goes on)
+//   emu.cpus [n]                       processors of the emulated machine (0: those of the dump)
+//   emu.seed [n]                       seed of the interleaving of the threads (the same run every time)
+//   emu.network simulated|real         the network of the emulated program: simulated (names resolve to
+//                                      192.0.2.x, connections succeed, HTTP answers 200), or real (the
+//                                      host's network: only for a program you trust)
+//   emu.screenshots on|off             save images of the windows of the emulated program (PNG, their
+//                                      paths in the log)
 //   emu.dump [file]                    save the debuggee for the emulator now (a file: keep it)
 //   emu.load file / emu.unload         emulate a minidump from a file instead of the debuggee
 //   emu.info                           threads and modules of the dump
@@ -40,6 +49,11 @@ namespace
         bool owned = false;   // a dump of the debuggee made by these commands: deleted when the debuggee runs again
         bool trace = false;
         bool syscalls = false;
+        bool strict = false;
+        unsigned cpus = 0;    // 0: the processors of the dump
+        unsigned seed = 1;
+        bool realNetwork = false;
+        bool screenshots = false;
         unsigned traces = 0;
     };
     EmuState gEmu;
@@ -186,12 +200,17 @@ namespace
                 return false;
             dumpArgument = L" " + QuoteArgument(Utf8ToUtf16(dump));
         }
-        bool trace, syscalls;
-        unsigned index;
+        bool trace, syscalls, strict, realNetwork, screenshots;
+        unsigned index, cpus, seed;
         {
             std::lock_guard<std::mutex> guard(gEmu.lock);
             trace = gEmu.trace;
             syscalls = gEmu.syscalls;
+            strict = gEmu.strict;
+            cpus = gEmu.cpus;
+            seed = gEmu.seed;
+            realNetwork = gEmu.realNetwork;
+            screenshots = gEmu.screenshots;
             index = ++gEmu.traces;
         }
         auto work = WorkDir();
@@ -208,6 +227,15 @@ namespace
             }
             if(syscalls)
                 commandLine += L" --syscalls";
+            if(strict)
+                commandLine += L" --strict";
+            if(cpus)
+                commandLine += L" --cpus " + std::to_wstring(cpus);
+            commandLine += L" --seed " + std::to_wstring(seed);
+            if(realNetwork)
+                commandLine += L" --network real";
+            if(screenshots)
+                commandLine += L" --screenshots " + QuoteArgument(Utf8ToUtf16(work + "\\screenshots"));
             if(debuggee)
             {
                 // the trace belongs to the debugged process: Time Travel names its addresses
@@ -421,6 +449,70 @@ namespace
         return Toggle(argc, argv, gEmu.syscalls, "emu.syscalls", "system calls of the emulated code in the log");
     }
 
+    bool CbEmuStrict(int argc, char* argv[])
+    {
+        std::lock_guard<std::mutex> guard(gEmu.lock);
+        return Toggle(argc, argv, gEmu.strict, "emu.strict", "stop at what the emulator lacks (system call, instruction)");
+    }
+
+    // emu.cpus [n] / emu.seed [n]: a number option; without an argument, its value
+    bool NumberOption(int argc, char* argv[], unsigned & option, const char* name, const char* description)
+    {
+        if(argc > 1)
+        {
+            bool success = false;
+            duint value = DbgEval(argv[1], &success);
+            if(!success || value > 0xFFFFFFFF)
+            {
+                _plugin_logprintf(LOG_PREFIX "usage: %s [n]\n", name);
+                return false;
+            }
+            option = (unsigned)value;
+        }
+        _plugin_logprintf(LOG_PREFIX "%s: %u\n", description, option);
+        SetResult("$result", option);
+        return true;
+    }
+
+    bool CbEmuCpus(int argc, char* argv[])
+    {
+        std::lock_guard<std::mutex> guard(gEmu.lock);
+        return NumberOption(argc, argv, gEmu.cpus, "emu.cpus", "processors of the emulated machine (0: those of the dump)");
+    }
+
+    bool CbEmuSeed(int argc, char* argv[])
+    {
+        std::lock_guard<std::mutex> guard(gEmu.lock);
+        return NumberOption(argc, argv, gEmu.seed, "emu.seed", "seed of the interleaving of the emulated threads");
+    }
+
+    bool CbEmuScreenshots(int argc, char* argv[])
+    {
+        std::lock_guard<std::mutex> guard(gEmu.lock);
+        return Toggle(argc, argv, gEmu.screenshots, "emu.screenshots", "images of the windows of the emulated program");
+    }
+
+    bool CbEmuNetwork(int argc, char* argv[])
+    {
+        std::lock_guard<std::mutex> guard(gEmu.lock);
+        if(argc > 1)
+        {
+            if(_stricmp(argv[1], "simulated") == 0)
+                gEmu.realNetwork = false;
+            else if(_stricmp(argv[1], "real") == 0)
+                gEmu.realNetwork = true;
+            else
+            {
+                _plugin_logputs(LOG_PREFIX "usage: emu.network simulated|real");
+                return false;
+            }
+        }
+        _plugin_logprintf(LOG_PREFIX "network of the emulated program: %s\n",
+                          gEmu.realNetwork ? "real (the host's network)" : "simulated");
+        SetResult("$result", gEmu.realNetwork ? 1 : 0);
+        return true;
+    }
+
     bool CbEmuDump(int argc, char* argv[])
     {
         bool keep = argc > 1;
@@ -489,6 +581,11 @@ void EmuRegister(int pluginHandle)
     _plugin_registercommand(pluginHandle, "emu.script", CbEmuScript, false);
     _plugin_registercommand(pluginHandle, "emu.trace", CbEmuTrace, false);
     _plugin_registercommand(pluginHandle, "emu.syscalls", CbEmuSyscalls, false);
+    _plugin_registercommand(pluginHandle, "emu.strict", CbEmuStrict, false);
+    _plugin_registercommand(pluginHandle, "emu.cpus", CbEmuCpus, false);
+    _plugin_registercommand(pluginHandle, "emu.seed", CbEmuSeed, false);
+    _plugin_registercommand(pluginHandle, "emu.network", CbEmuNetwork, false);
+    _plugin_registercommand(pluginHandle, "emu.screenshots", CbEmuScreenshots, false);
     _plugin_registercommand(pluginHandle, "emu.dump", CbEmuDump, true);
     _plugin_registercommand(pluginHandle, "emu.load", CbEmuLoad, false);
     _plugin_registercommand(pluginHandle, "emu.unload", CbEmuUnload, false);

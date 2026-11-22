@@ -461,6 +461,11 @@ class Session:
         thread_id = parse_int(args.thread) if args.thread else None
         self.dp = dumpulator.Dumpulator(args.dump, quiet=True, thread_id=thread_id, trace=bool(args.text_trace))
         self.dp._quiet = not args.syscalls  # the system calls and exceptions in the output, not the memory map
+        self.dp.strict = bool(getattr(args, "strict", False))
+        configure(self.dp, cpus=getattr(args, "cpus", None), seed=getattr(args, "seed", None),
+                  network=getattr(args, "network", None), http_body=getattr(args, "http_body", None),
+                  child_limit=getattr(args, "child_limit", None), screenshots=getattr(args, "screenshots", None))
+        self.files_out = getattr(args, "files_out", None)
         self.result.update(arch="x64" if self.dp._x64 else "x86", thread=self.dp.thread_id,
                            load_seconds=round(time.perf_counter() - started, 3))
         self.writer = None
@@ -490,9 +495,91 @@ class Session:
                                       for t in scheduler.threads.values() if t.state != "frozen"]
             if scheduler.stop_reason:
                 self.result["stop_reason"] = scheduler.stop_reason
+        missing = getattr(dp, "_fathom_unimplemented", None)
+        if missing:
+            self.result["not_implemented"] = dict(missing)
         console = getattr(dp, "_fathom_console", None)
         if console:
             self.result["console"] = "".join(console)
+        self.result.update(world(dp, self.files_out))
+
+
+def configure(dp, cpus=None, seed=None, network=None, http_body=None, child_limit=None, screenshots=None):
+    """The options of the emulated machine: processors, interleaving seed, network, child processes,
+    images of the windows."""
+    import random
+    scheduler = dp.scheduler
+    if cpus:
+        scheduler.cpus = max(1, int(cpus))
+    if seed is not None:
+        scheduler.rng = random.Random(int(seed))
+    net = getattr(dp, "network", None)
+    if net is not None:
+        if network:
+            net.mode = network
+        if http_body:
+            with open(http_body, "rb") as f:
+                net.body = f.read()
+    processes = getattr(dp, "processes", None)
+    if processes is not None and child_limit:
+        processes.instruction_limit = int(child_limit)
+    gui = getattr(dp, "gui", None)
+    if gui is not None and screenshots:
+        gui.drawing.directory = os.path.abspath(screenshots)
+
+
+def world(dp, files_out=None) -> dict:
+    """What the program did outside of its process: network, windows, child processes, registry,
+    files, shared objects, COM / RPC / services."""
+    result = {}
+    net = getattr(dp, "network", None)
+    if net is not None and net.events:
+        result["network"] = list(net.events)
+    shared_world = getattr(dp, "world", None)
+    everyone = [dp] + [c.dp for c in (shared_world.children if shared_world is not None else []) if c.dp is not None]
+    shots = []
+    for process in everyone:
+        gui = getattr(process, "gui", None)
+        if gui is not None and gui.drawing.directory:
+            try:
+                shots += gui.save_screenshots()
+            except Exception as e:
+                print(f"images of the windows: {type(e).__name__}: {e}")
+    gui = getattr(dp, "gui", None)
+    if gui is not None and gui.events:
+        result["gui"] = list(gui.events)
+    if shots:
+        result["screenshots"] = sorted(set(shots))
+    processes = getattr(dp, "processes", None)
+    if processes is not None and processes.children:
+        result["processes"] = [child.summary() for child in processes.children]
+    com = getattr(dp, "com", None)
+    if com is not None and com.events:
+        result["com"] = list(com.events)
+    holder = shared_world if shared_world is not None else dp
+    registry = getattr(holder, "registry", None)
+    if registry is not None and registry.events:
+        result["registry"] = list(registry.events)
+    filesystem = getattr(holder, "filesystem", None)
+    if filesystem is not None:
+        changes = [e for e in filesystem.events if e["kind"] != "write"]
+        written = filesystem.written_files()
+        if changes or written:
+            result["files"] = changes + [dict(kind="written", path=s.path, size=len(s.data)) for s in written]
+        if files_out and written:
+            os.makedirs(files_out, exist_ok=True)
+            saved = []
+            for state in written:
+                name = state.path.replace(":", "").replace("\\", "_").replace("\\", "_").strip("_")
+                target = os.path.join(files_out, name)
+                with open(target, "wb") as f:
+                    f.write(bytes(state.data))
+                saved.append(target)
+            result["files_saved"] = saved
+    shared = getattr(holder, "shared", None)
+    if shared is not None and shared.events:
+        result["shared_objects"] = list(shared.events)
+    return result
 
 
 def _emulate(session: Session, function):
@@ -534,8 +621,37 @@ def _print_result(result: dict):
     if len(threads) > 1:
         print(f"threads: " + ", ".join(f"{t['tid']} {t['state']}" + (f" ({t['exit_code']:#x})" if t['exit_code'] is not None else "")
                                       for t in threads))
+    missing = result.get("not_implemented")
+    if missing:
+        print("not in the emulator (failed in the program): " + ", ".join(f"{name} x{count}" for name, count in missing.items()))
     if result.get("stop_reason"):
         print(f"stopped: {result['stop_reason']}")
+    network = result.get("network", [])
+    if network:
+        hosts = sorted({str(e.get("host") or e.get("url") or e.get("name")) for e in network
+                        if e["kind"] in ("connect", "http_request", "dns")})
+        print(f"network: {len(network)} operations" + (f" ({', '.join(hosts[:8])}{', ...' if len(hosts) > 8 else ''})" if hosts else ""))
+    gui = result.get("gui", [])
+    if gui:
+        print(f"windows: {len(gui)} operations")
+    for path in result.get("screenshots", []):
+        print(f"image of a window: {path}")
+    if result.get("registry"):
+        changes = result["registry"]
+        print(f"registry: {len(changes)} changes (in the emulator): " + ", ".join(
+            sorted({e["key"].split("\\")[-1] for e in changes})[:6]))
+    if result.get("files"):
+        print(f"files: {len(result['files'])} changes (in the emulator)" + (
+            f", saved in {os.path.dirname(result['files_saved'][0])}" if result.get("files_saved") else ""))
+    if result.get("shared_objects"):
+        print(f"objects shared between processes: {len(result['shared_objects'])}")
+    for event in result.get("com", []):
+        if event["kind"] in ("com_create", "com_out_of_process", "rpc_call", "create_service", "start_service"):
+            detail = {k: v for k, v in event.items() if k not in ("kind",)}
+            print(f"{event['kind']}: " + ", ".join(f"{k}={v}" for k, v in detail.items()))
+    for child in result.get("processes", []):
+        state = f"exit code {child['exit_code']:#x}" if child.get("exit_code") is not None else child["state"]
+        print(f"child process {child['pid']}: {child['command_line']} ({state})" + (f", {child['note']}" if child.get("note") else ""))
     if result.get("exit_code") is not None:
         print(f"the process exited with code {result['exit_code']:#x}")
     if "trace" in result:
@@ -596,7 +712,13 @@ def action_run(args) -> dict:
     end = resolve_address(dp, args.end) if args.end else 0xFFFFFFFFFFFFFFFF
     print(f"run from 0x{begin:X} in thread {dp.thread_id}" + (f" to 0x{end:X}" if args.end else "")
           + (f", {args.count} instructions at most" if args.count else ""))
-    _, error = _emulate(session, lambda: dp.start(begin, end=end, count=args.count))
+    def run():
+        dp.start(begin, end=end, count=args.count)
+        world = getattr(dp, "world", None)
+        if world is not None and dp.exit_code is not None and world.children:
+            # the program exited: its child processes go on until they end too
+            world.finish()
+    _, error = _emulate(session, run)
     result = session.result
     result.update(ok=error is None and dp.kill_exception is None, begin=f"0x{begin:X}")
     if args.end:
@@ -661,6 +783,19 @@ def main(argv=None) -> int:
         sub.add_argument("--trace-limit", type=lambda t: parse_int(t), default=0, help="record at most this many instructions")
         sub.add_argument("--text-trace", action="store_true", help="also write dumpulator's text trace (<dump>.trace)")
         sub.add_argument("--syscalls", action="store_true", help="show the system calls and exceptions")
+        sub.add_argument("--strict", action="store_true",
+                         help="stop at a system call or an instruction the emulator lacks (default: it fails in the program)")
+        sub.add_argument("--cpus", type=int, help="processors of the emulated machine (default: those of the dumped machine)")
+        sub.add_argument("--seed", type=int, help="seed of the interleaving of the threads (default 1: the same run every time)")
+        sub.add_argument("--network", choices=("simulated", "real"),
+                         help="simulated (default): names resolve to 192.0.2.x, connections succeed, HTTP answers 200; "
+                              "real: through the host's network (only for a program you trust)")
+        sub.add_argument("--http-body", metavar="FILE", help="the body of the simulated HTTP responses")
+        sub.add_argument("--child-limit", type=lambda t: parse_int(t),
+                         help="instructions a child process runs at most (default 50000000)")
+        sub.add_argument("--screenshots", metavar="DIR", help="save images (PNG) of the windows of the program in DIR")
+        sub.add_argument("--files-out", metavar="DIR",
+                         help="save the files the program wrote (they stay in the emulator otherwise) in DIR")
         sub.add_argument("--hash", help=argparse.SUPPRESS)  # module hash of the debugged process (trace header)
         sub.add_argument("--module-path", help=argparse.SUPPRESS)  # main module path (trace header)
 

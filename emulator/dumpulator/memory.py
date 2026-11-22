@@ -284,16 +284,30 @@ class MemoryManager:
                 self._committed[page] = MemoryRegion(page, PAGE_SIZE, protect, parent_region.type)
                 parent_region.commit_count += 1
         else:
+            # Fathom: the runs of pages not committed yet are committed at once (one mapping in
+            # unicorn per run: one per page made mapping a DLL take seconds)
+            run_start = None
+            run_pages = 0
+
+            def flush():
+                if run_start is not None:
+                    self._page_manager.commit(run_start, run_pages * PAGE_SIZE, protect)
+
             for page in region.pages():
                 if page in self._committed:
+                    flush()
+                    run_start, run_pages = None, 0
                     page_region = self._committed[page]
                     if page_region.protect != protect:
                         self._page_manager.protect(page, PAGE_SIZE, protect)
                         page_region.protect = protect
                 else:
-                    self._page_manager.commit(page, PAGE_SIZE, protect)
+                    if run_start is None:
+                        run_start = page
+                    run_pages += 1
                     self._committed[page] = MemoryRegion(page, PAGE_SIZE, protect, parent_region.type)
                     parent_region.commit_count += 1
+            flush()
 
     def decommit(self, start: int, size: int) -> None:
         assert size > 0 and self.align_page(size) == size

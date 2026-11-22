@@ -197,6 +197,18 @@ foreach(test_name IN LISTS X64DBG_STANDARD_TESTS)
     x64dbg_add_test(NAME "${test_name}")
 endforeach()
 
+# the emulator's test programs (extracmds/tests/test_emulator.py)
+x64dbg_add_test(
+    NAME emulator_world
+    TARGET_LINK_LIBRARIES ws2_32 wininet user32 gdi32 ole32 oleaut32 shell32 advapi32
+)
+
+# the host of the emulator's child processes of the other architecture (emulator/hosts in a release)
+x64dbg_add_test(
+    NAME emulator_host
+    TARGET_LINK_LIBRARIES ws2_32 wininet user32 gdi32 ole32 oleaut32 shell32 advapi32 comctl32
+)
+
 x64dbg_add_test(
     NAME attach_pause
     TARGET_LINK_LIBRARIES user32

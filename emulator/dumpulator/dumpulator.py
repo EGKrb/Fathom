@@ -93,6 +93,11 @@ class UnicornPageManager(PageManager):
     def protect(self, addr: int, size: int, protect: MemoryProtect) -> None:
         self._uc.mem_protect(addr, size, map_unicorn_perms(protect))
 
+    def commit_shared(self, addr: int, size: int, protect: MemoryProtect, host: int) -> None:
+        # Fathom: memory of the host mapped as is (a view of a section: the emulated processes that
+        # map it share it)
+        self._uc.mem_map_ptr(addr, size, map_unicorn_perms(protect), host)
+
     def read(self, addr: int, size: int) -> bytearray:
         return self._uc.mem_read(addr, size)
 
@@ -146,11 +151,28 @@ class LazyPageManager(PageManager):
                 if page is None:
                     continue
                 if not page.committed:
-                    self.child.commit(page.addr, page.size, page.protect)
-                    page.committed = True
-                    if page.data is not None:
-                        self.child.write(page.addr, page.data)
-                        page.data = None
+                    # Fathom: the run of lazy pages around it with the same protection, mapped at once
+                    # (unicorn's mem_map gets slow with many mappings: one per page made loading a
+                    # DLL take seconds)
+                    first = page.addr
+                    while first - PAGE_SIZE >= page.addr - 256 * PAGE_SIZE:
+                        before = self.pages.get(first - PAGE_SIZE)
+                        if before is None or before.committed or before.protect != page.protect:
+                            break
+                        first -= PAGE_SIZE
+                    last = page.addr
+                    while last + PAGE_SIZE < page.addr + 256 * PAGE_SIZE:
+                        after = self.pages.get(last + PAGE_SIZE)
+                        if after is None or after.committed or after.protect != page.protect:
+                            break
+                        last += PAGE_SIZE
+                    self.child.commit(first, last + PAGE_SIZE - first, page.protect)
+                    for run_addr in range(first, last + PAGE_SIZE, PAGE_SIZE):
+                        run_page = self.pages[run_addr]
+                        run_page.committed = True
+                        if run_page.data is not None:
+                            self.child.write(run_page.addr, run_page.data)
+                            run_page.data = None
                     result = True
             return result
         except UcError as err:
@@ -160,6 +182,17 @@ class LazyPageManager(PageManager):
     def commit(self, addr: int, size: int, protect: MemoryProtect) -> None:
         assert addr & 0xFFF == 0
         assert size & 0xFFF == 0
+
+        shared = getattr(self, "fathom_shared", None)
+        if shared is not None:
+            # Fathom: a view of a shared section (the next commit maps this host memory)
+            self.fathom_shared = None
+            self.child.commit_shared(addr, size, protect, shared)
+            for page_addr in self.iter_pages(addr, size):
+                assert page_addr not in self.pages
+                self.pages[page_addr] = LazyPage(page_addr, protect, True)
+            self.total_commit += size
+            return
 
         if not self.lazy:
             self.child.commit(addr, size, protect)
@@ -269,7 +302,7 @@ class SimpleTimer:
         print(f"{name}: {diff*1000:.0f}ms")
 
 class Dumpulator(Architecture):
-    def __init__(self, minidump_file, *, trace=False, quiet=False, thread_id=None, debug_logs=False):
+    def __init__(self, minidump_file, *, trace=False, quiet=False, thread_id=None, debug_logs=False, world=None):
         self._quiet = quiet
         self._debug = debug_logs
         self.sequence_id = 0
@@ -347,7 +380,37 @@ class Dumpulator(Architecture):
         from .threads import Scheduler
         self._fathom_initial_tid = self.thread_id
         self._fathom_trace_switch = None
+        # Fathom: what the emulator lacks (a system call, an instruction) fails in the program as on
+        # a Windows or a processor without it, instead of stopping the emulation; strict = stop
+        self.strict = False
+        self._fathom_unimplemented = {}
         self.scheduler = Scheduler(self)
+        self._fathom_dump_path = minidump_file
+        from .fathom_nt import commit_stack
+        commit_stack(self)
+        # Fathom: the emulated process is not debugged. The dump comes from a debugger: its PEB says
+        # BeingDebugged and NtGlobalFlag has the heap checking flags; the loader breaks into the
+        # debugger on its errors, and programs look at both.
+        pebs = [(self.peb, 0xBC if self._x64 else 0x68)]
+        if self.wow64:
+            pebs.append((self.peb - PAGE_SIZE, 0xBC))
+        for peb, global_flag in pebs:
+            try:
+                self.write(peb + 2, b"\0")
+                self.write_ulong(peb + global_flag, self.read_ulong(peb + global_flag) & ~0x70)
+            except Exception:
+                pass
+        # Fathom: functions of DLLs implemented in Python: windows, network, child processes
+        from .apihooks import ApiHooks
+        from . import gui as _gui
+        self.apihooks = ApiHooks(self)
+        _gui.install(self)
+        from . import network as _network
+        _network.install(self)
+        from . import processes as _processes
+        _processes.install(self, world)  # world: the processes of the run (a child joins its parent's)
+        from . import com as _com
+        _com.install(self)
         if not self._quiet:
             print("Memory map:")
             self.print_memory()
@@ -465,7 +528,10 @@ class Dumpulator(Architecture):
             memory.move(seg.start_virtual_address)
             assert memory.current_position == seg.start_virtual_address
             data = memory.read(seg.size)
-            self._pages.write(emu_addr, data)
+            try:
+                self._pages.write(emu_addr, data)
+            except IndexError:
+                self._fathom_write_segment(emu_addr, data)
         self._pages.lazy = False
 
         self.memory.set_region_info(0x7ffe0000, "KUSER_SHARED_DATA")
@@ -473,6 +539,26 @@ class Dumpulator(Architecture):
             self.memory.set_region_info(potential_hv[0], "HYPERVISOR_SHARED_DATA")
         elif len(potential_hv) > 1:
             self.debug(f"Unexpected unaligned addresses: {' '.join([hex(x) for x in potential_hv])}")
+
+    def _fathom_write_segment(self, address: int, data: bytes):
+        """Fathom: a memory segment of the dump that goes past the committed pages of its memory
+        information (a heap that grew while the dump was written): its pages are committed when their
+        region is reserved, skipped otherwise."""
+        skipped = 0
+        for offset in range(0, len(data), PAGE_SIZE):
+            page = address + offset
+            chunk = data[offset:offset + PAGE_SIZE]
+            if page not in self._pages.pages:
+                try:
+                    if self.memory.query(page).state == MemoryState.MEM_RESERVE:
+                        self.memory.commit(page, PAGE_SIZE, MemoryProtect.PAGE_READWRITE)
+                except Exception:
+                    pass
+            if page in self._pages.pages:
+                self._pages.write(page, chunk)
+            else:
+                skipped += 1
+        self.debug(f"segment {hex(address)}[{hex(len(data))}]: {skipped} pages outside of the memory map")
 
     def _setup_pebteb(self, thread):
         self.teb = thread.Teb & 0xFFFFFFFFFFFFF000
@@ -929,9 +1015,19 @@ class Dumpulator(Architecture):
 
         # set up arguments
         if self._x64:
-            for index, value in enumerate(args):
+            # Fathom: a frame of the x64 convention below the current stack: the home space of the four
+            # register arguments, the others above it, and rsp = 8 modulo 16 at the entry (the return
+            # address pushed below); code that keeps aligned SSE data on its stack (fxsave, movaps)
+            # faults otherwise
+            stack_args = list(args[4:])
+            sp = ((self.regs.rsp - 0x80 - 0x20 - 8 * len(stack_args)) & ~0xF)
+            self.regs.rsp = sp
+            for index, value in enumerate(args[:4]):
                 self.args[index] = value
+            for index, value in enumerate(stack_args):
+                self.write_ptr(sp + 0x20 + 8 * index, value)
         else:
+            self.regs.esp = (self.regs.esp - 0x80) & ~0xF
             for value in reversed(args):
                 self.push(value)
         # push return address
@@ -1031,6 +1127,8 @@ rsp in KiUserExceptionDispatcher:
             context_type = WOW64_CONTEXT
 
         csp = self.regs.csp - allocation_size
+        if self._x64:
+            csp &= ~0xF  # Fathom: the CONTEXT is 16-byte aligned (fxsave in RtlCaptureContext2 faults otherwise)
         self.write(csp, allocation_size * b"\x69")  # fill stuff with 0x69 for debugging
         self.info(f"old csp: {hex(self.regs.csp)}, new csp: {hex(csp)}")
         context_size = ctypes.sizeof(context_type)
@@ -1119,14 +1217,12 @@ rsp in KiUserExceptionDispatcher:
         emu_count = 0
         # Fathom: the instructions run in slices (count, the time slices of the threads, the clock).
         # With a count, the instructions of a slice cut short (a thread switch in a system call, an
-        # exception) are counted per translation block, which ends at those instructions.
+        # exception, an instruction emulated in Python) are counted one by one.
         count_left = count if count else None
         self._fathom_executed = 0
         count_hook = None
         if count_left is not None:
-            if not hasattr(self, "_fathom_block_icount"):
-                self._fathom_block_icount = {}
-            count_hook = self._uc.hook_add(UC_HOOK_BLOCK, _fathom_count_block, self)
+            count_hook = self._uc.hook_add(UC_HOOK_CODE, _fathom_count_instruction, self)
         try:
             self._fathom_start_loop(emu_begin, emu_until, emu_count, end, count_left)
         finally:
@@ -1181,7 +1277,7 @@ rsp in KiUserExceptionDispatcher:
                 sliced = False
                 self._fathom_executed = 0
                 if run_count == 0:
-                    run_count = self.scheduler.QUANTUM
+                    run_count = self.scheduler.slice_length()
                     if count_left is not None:
                         run_count = min(run_count, count_left)
                     sliced = True
@@ -1189,13 +1285,16 @@ rsp in KiUserExceptionDispatcher:
                 self._uc.emu_start(emu_begin, until=emu_until, count=run_count)
                 if sliced and not self.stopped and (self.regs.cip & self.addr_mask) != (emu_until & self.addr_mask):
                     # the slice is over: the clock advances, another thread may run
-                    self.scheduler.advance_instructions(run_count)
                     if count_left is not None:
                         count_left -= run_count
                     if count_left is None or count_left > 0:
-                        self.scheduler.preempt()
+                        self.scheduler.preempt(run_count)
                         emu_begin = self.regs.cip
                         emu_count = 0
+                        if self.scheduler.yield_requested:
+                            # Fathom: the slice of this process is over (several processes run in turn)
+                            self.scheduler.yield_requested = False
+                            break
                         continue
                 self.info(f'emulation finished, cip = {hex(self.regs.cip)}')
                 if self.exit_code is not None:
@@ -1337,7 +1436,11 @@ rsp in KiUserExceptionDispatcher:
             self.write(va, data)
 
         # Add the module to the module manager
-        return self.modules.add(pe, file_path)
+        module = self.modules.add(pe, file_path)
+        # Fathom: the API hooks of this module
+        if getattr(self, "apihooks", None) is not None:
+            self.apihooks.module_mapped(module)
+        return module
 
     def load_dll(self, file_name: str, file_data: bytes):
         self.handles.map_file("\\??\\" + file_name, FileObject(file_name, file_data))
@@ -1372,17 +1475,9 @@ def _hook_code_exception(uc: Uc, address, size, dp: Dumpulator):
         dp.error(f"Exception during unicorn hook, please report this as a bug")
         raise err
 
-def _fathom_count_block(uc: Uc, address, size, dp: Dumpulator):
-    # Fathom: the number of instructions of a translation block, for start(count=...)
-    key = (address, size)
-    icount = dp._fathom_block_icount.get(key)
-    if icount is None:
-        try:
-            icount = sum(1 for _ in dp.cs.disasm_lite(bytes(uc.mem_read(address, size)), address)) or 1
-        except Exception:
-            icount = 1
-        dp._fathom_block_icount[key] = icount
-    dp._fathom_executed += icount
+def _fathom_count_instruction(uc: Uc, address, size, dp: Dumpulator):
+    # Fathom: the instructions run, for start(count=...)
+    dp._fathom_executed += 1
 
 def _request_tb(uc: Uc, address: int):
     # The translation block of an address: (start, size, instruction count). unicorn 2.0 returns an
@@ -1396,6 +1491,10 @@ def _request_tb(uc: Uc, address: int):
 def _hook_mem(uc: Uc, access, address, size, value, dp: Dumpulator):
     if dp._pages.handle_lazy_page(address, min(size, PAGE_SIZE)):
         dp.debug(f"committed lazy page {hex(address)}[{hex(size)}] (cip: {hex(dp.regs.cip)})")
+        return True
+    # Fathom: guard pages (the growth of a thread's stack)
+    from .fathom_nt import handle_guard_page
+    if handle_guard_page(dp, access, address):
         return True
 
     fetch_accesses = [UC_MEM_FETCH, UC_MEM_FETCH_PROT, UC_MEM_FETCH_UNMAPPED]
@@ -1726,7 +1825,10 @@ def _hook_syscall(uc: Uc, dp: Dumpulator):
                 dp.info(f"    {sal_pretty}{_arg_type_string(argvalue)} {argname} = {_arg_to_string(dp, argvalue)}{comma}")
             dp.info(")")
             try:
-                status = syscall_impl(dp, *args)
+                # Fathom: a system call on a handle of a child process (processes.py)
+                status = dp.processes.syscall(name, args) if getattr(dp, "processes", None) is not None else None
+                if status is None:
+                    status = syscall_impl(dp, *args)
                 if isinstance(status, ExceptionInfo):
                     dp.info("context switch, stopping emulation")
                     dp._exception = status
@@ -1742,15 +1844,51 @@ def _hook_syscall(uc: Uc, dp: Dumpulator):
                         dp.regs.eip += 2
             except UcError as err:
                 raise err
+            except (NotImplementedError, AssertionError) as exc:
+                if dp.strict:
+                    dp.error(f"Exception thrown during syscall implementation, stopping emulation!")
+                    raise dp.raise_kill(exc) from None
+                _fathom_syscall_not_implemented(dp, f"{table_prefix}{name}", exc)
             except Exception as exc:
-                dp.error(f"Exception thrown during syscall implementation, stopping emulation!")
-                raise dp.raise_kill(exc) from None
+                if dp.strict:
+                    dp.error(f"Exception thrown during syscall implementation, stopping emulation!")
+                    raise dp.raise_kill(exc) from None
+                # Fathom: an error of the emulator's implementation fails in the program too (named in
+                # the summary with the error), instead of stopping the emulation
+                traceback.print_exc()
+                _fathom_syscall_not_implemented(dp, f"{table_prefix}{name}", exc)
             finally:
                 dp.sequence_id += 1
         else:
-            raise dp.raise_kill(NotImplementedError(f"{table_prefix}syscall {hex(service_number)} -> {name} not implemented!")) from None
+            if dp.strict:
+                raise dp.raise_kill(NotImplementedError(f"{table_prefix}syscall {hex(service_number)} -> {name} not implemented!")) from None
+            dp.info(f"[{dp.sequence_id}] {table_prefix}syscall: {name}( /* index: {hex(service_number)}, thread: {dp.thread_id} */ ... )")
+            dp.sequence_id += 1
+            _fathom_syscall_not_implemented(dp, f"{table_prefix}{name}", None)
     else:
-        raise dp.raise_kill(IndexError(f"{table_prefix}syscall {hex(service_number)} (index: {hex(function_index)}) out of range")) from None
+        if dp.strict:
+            raise dp.raise_kill(IndexError(f"{table_prefix}syscall {hex(service_number)} (index: {hex(function_index)}) out of range")) from None
+        _fathom_syscall_not_implemented(dp, f"{table_prefix}syscall {hex(service_number)}", None)
+
+
+STATUS_NOT_IMPLEMENTED_FATHOM = 0xC0000002
+
+
+def _fathom_syscall_not_implemented(dp: Dumpulator, name: str, exc):
+    """Fathom: a system call the emulator does not have (or only for other arguments) returns
+    STATUS_NOT_IMPLEMENTED to the program, as on a Windows version without it."""
+    first = name not in dp._fathom_unimplemented
+    dp._fathom_unimplemented[name] = dp._fathom_unimplemented.get(name, 0) + 1
+    if first:
+        detail = f" ({type(exc).__name__}{': ' + str(exc) if str(exc) else ''})" if exc is not None else ""
+        dp.error(f"system call {name} is not implemented in the emulator{detail}: it returns STATUS_NOT_IMPLEMENTED")
+    dp.info(f"status = {hex(STATUS_NOT_IMPLEMENTED_FATHOM)} (not implemented)")
+    dp.regs.cax = STATUS_NOT_IMPLEMENTED_FATHOM
+    if dp.x64:
+        dp.regs.rcx = dp.regs.cip + 2
+        dp.regs.r11 = dp.regs.eflags
+    else:
+        dp.regs.eip += 2
 
 def _emulate_unsupported_instruction(dp: Dumpulator, instr: CsInsn):
     # Get address mask
@@ -1902,4 +2040,10 @@ def _hook_invalid(uc: Uc, dp: Dumpulator):
         print(f"Unexpected exception {type(err)}")
         traceback.print_exc()
     dp.error(f"invalid instruction at {hex(address)}")
+    if not dp.strict:
+        # Fathom: an illegal instruction exception in the program, as a processor without the
+        # instruction raises; the program's handlers decide
+        from .fathom_nt import raise_illegal_instruction
+        if raise_illegal_instruction(dp, address):
+            return False
     raise NotImplementedError("TODO: throw invalid instruction exception")

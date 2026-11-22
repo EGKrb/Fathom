@@ -6,6 +6,75 @@ branch; this changelog covers Fathom's own additions and branding.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.6.0] - 2026-11-22
+
+### Added
+- Emulator: **several processors**. The emulated machine has the processors of
+  the dumped one (`emu.cpus`, `--cpus`): the threads on processors run
+  interleaved in short slices drawn from a fixed seed (`emu.seed`, `--seed`),
+  so a race between threads happens as natively and the same run comes out
+  every time.
+- Emulator: **windows, network and child processes**. user32 windows,
+  messages, timers, message boxes and dialogs in a headless window manager
+  with a simulated user; Winsock, WinINet, WinHTTP and `URLDownloadToFile` on
+  a simulated network (192.0.2.x addresses, HTTP 200 answers, everything
+  recorded) or the host's (`emu.network real`, `--network real`);
+  `CreateProcess` runs the child in an emulator of its own, and the parent's
+  `VirtualAllocEx`, `WriteProcessMemory`, `ReadProcessMemory`,
+  `Get/SetThreadContext`, `ResumeThread`, waits and `GetExitCodeProcess` act on
+  it. The result of `fathom_emu.py` lists them (`gui`, `network`, `processes`).
+  New in dumpulator: `apihooks.py`, `gui.py`, `network.py`, `processes.py`;
+  `NtCompareObjects`, `NtFlushInstructionCache`.
+- Test program `src/tests/emulator_world` (race, illegal instruction, windows,
+  network, child processes), run by `extracmds/tests/test_emulator.py` in x64
+  and x32.
+- Emulator: **processes that run at the same time**. The emulated processes of
+  a run take turns by slices and whenever one waits for another, with clocks
+  that move together: pipes (anonymous on a child's redirected standard input
+  and output, named, `PeekNamedPipe`, `TransactNamedPipe`), shared sections,
+  named events / mutexes / semaphores, inherited and duplicated handles work
+  between them as natively. Children keep running after their parent exits.
+- Emulator: **children of the other architecture**, started from a dump of
+  `emulator_host` of that architecture (made once by Fathom's headless of that
+  architecture, shipped in `emulator\hosts`).
+- Emulator: **COM, ShellExecute, RPC, services**. In-process COM objects run in
+  the emulator (`CoCreateInstance`, `CoGetClassObject`: their DLL loaded,
+  `DllGetClassObject` and `IClassFactory::CreateInstance` called);
+  out-of-process servers and RPC to other processes are answered as
+  unavailable and recorded (CLSID, interface, procedure); `ShellExecute(Ex)`
+  runs programs and batch files in the emulator (documents and URLs are
+  recorded); the service manager is emulated.
+- Emulator: **windows drawn**. `WM_PAINT` and gdi32 (text, colors, brushes,
+  pens, shapes, controls) are drawn into images; `emu.screenshots on` /
+  `--screenshots DIR` save a PNG of each window and message box.
+- Emulator: **registry and files from the host**, read-only: the program's
+  writes stay in the emulator (`--files-out DIR` saves the files it wrote).
+  `LoadLibrary` loads any DLL from the disk with its dependencies, TLS and
+  `DllMain`.
+- `emu.screenshots`; `emulator_world` modes `pipe`, `shm`, `namedpipe`,
+  `cross`, `shell`, `com`, `system`; `src/tests/emulator_host`.
+
+### Changed
+- Emulator: what it lacks no longer stops it. A system call it does not
+  implement returns `STATUS_NOT_IMPLEMENTED` to the program, an instruction it
+  does not emulate raises `STATUS_ILLEGAL_INSTRUCTION` in it; both are named in
+  the summary. `emu.strict on` (`--strict`) stops at them as before.
+
+### Fixed
+- Emulator: `emu.run 0, n` (`--count`) runs exactly `n` instructions with
+  several threads (300,409 recorded for 300,000 asked before).
+- Emulator: a 32-bit program whose stack grows through its guard page
+  (`_chkstk`) crashed unicorn; the stack of the dumped thread is now committed
+  when the dump is loaded.
+- Emulator: `NtProtectVirtualMemory` on a range that starts inside a page (an
+  import table across two pages stayed read-only), `NtAllocateVirtualMemory`
+  on unaligned ranges and committed pages, `dp.call` without an aligned x64
+  frame, an exception frame not 16-byte aligned, the loader's TLS for a DLL
+  loaded late, `BeingDebugged` of the dump's debugger, a dump segment past its
+  memory information (a dump made in the GUI could not be loaded).
+- Emulator: loading a DLL or a child process maps runs of pages at once (a
+  child that loaded DLLs took minutes).
+
 ## [1.5.0] - 2026-11-20
 
 ### Added

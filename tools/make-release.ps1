@@ -100,6 +100,15 @@ foreach ($item in 'fathom_emu.py', 'requirements.txt', 'README.md', 'LICENSE.dum
     Copy-Item -Recurse (Join-Path $root "emulator\$item") $emulator
 }
 Get-ChildItem -Recurse -Directory $emulator -Filter '__pycache__' | Remove-Item -Recurse -Force
+# the host of the child processes of the other architecture (dumped by the headless of that
+# architecture when a child needs it): built with the tests
+$hosts = Join-Path $emulator 'hosts'
+New-Item -ItemType Directory -Force $hosts | Out-Null
+foreach ($arch in 'x32', 'x64') {
+    $hostExe = Join-Path $root "bin\$arch\tests\emulator_host.exe"
+    if (-not (Test-Path $hostExe)) { throw "$hostExe is missing: build the tests (emulator_host)" }
+    Copy-Item $hostExe (Join-Path $hosts "emulator_host_$arch.exe")
+}
 
 # Licenses
 $licenses = Join-Path $main 'licenses'

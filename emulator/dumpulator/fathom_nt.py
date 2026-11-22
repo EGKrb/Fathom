@@ -199,6 +199,16 @@ def ZwCreateEvent(dp: Dumpulator,
     return STATUS_SUCCESS
 
 
+def _signal_world(dp):
+    # an object changed: the waiting threads of every emulated process check their waits (another
+    # process may wait for it)
+    world = getattr(dp, "world", None)
+    if world is not None:
+        world.signal_all()
+    else:
+        _scheduler(dp).signal()
+
+
 def _event_set(dp, handle, previous, state, pulse=False):
     event = _object(dp, handle)
     if not isinstance(event, EventObject):
@@ -206,7 +216,7 @@ def _event_set(dp, handle, previous, state, pulse=False):
     _write_long(previous, 1 if event.signalled else 0)
     event.signalled = state or pulse
     if event.signalled:
-        _scheduler(dp).signal()
+        _signal_world(dp)
     if pulse:
         event.signalled = False
     return STATUS_SUCCESS
@@ -268,7 +278,7 @@ def _release_mutant(dp, handle, previous):
     mutant.count -= 1
     if mutant.count == 0:
         mutant.owner = None
-        _scheduler(dp).signal()
+        _signal_world(dp)
     return STATUS_SUCCESS
 
 
@@ -305,7 +315,7 @@ def _release_semaphore(dp, handle, count, previous):
         return STATUS_SEMAPHORE_LIMIT_EXCEEDED
     _write_long(previous, semaphore.count)
     semaphore.count += count
-    _scheduler(dp).signal()
+    _signal_world(dp)
     return STATUS_SUCCESS
 
 
@@ -692,7 +702,14 @@ def ZwManageHotPatch(dp: Dumpulator,
                      HotPatchInformationLength: Annotated[ULONG, SAL("_In_")],
                      ReturnLength: Annotated[P[ULONG], SAL("_Out_opt_")]
                      ):
-    return STATUS_NOT_SUPPORTED  # no hot patches
+    # no hot patches. The loader asks for the patches of each image it maps (class 8): an answer of
+    # zeros (none) lets it go on, an error makes LoadLibrary fail.
+    if HotPatchInformation.ptr and int(HotPatchInformationLength):
+        dp.write(HotPatchInformation.ptr, bytes(int(HotPatchInformationLength)))
+        if ReturnLength != 0:
+            ReturnLength.write_ulong(int(HotPatchInformationLength))
+        return STATUS_SUCCESS
+    return STATUS_NOT_SUPPORTED
 
 
 def _wnf_states(dp: Dumpulator) -> dict:
@@ -858,6 +875,22 @@ def ZwQueryInformationToken(dp: Dumpulator,
 
     if klass == 1:      # TokenUser
         data = sid_and_attributes(_USER_SID, 0)
+    elif klass in (4, 5):  # TokenOwner, TokenPrimaryGroup: {PSID}, the user
+        data = struct.pack(pointer, address + ptr) + _USER_SID
+    elif klass == 6:    # TokenDefaultDacl: {PACL}, full access for the user
+        ace_size = 8 + len(_USER_SID)
+        acl = struct.pack("<BBHHH", 2, 0, 8 + ace_size, 1, 0) + struct.pack("<BBHI", 0, 0, ace_size, 0x10000000) + _USER_SID
+        data = struct.pack(pointer, address + ptr) + acl
+    elif klass == 2:    # TokenGroups: Everyone, Users
+        sids = [bytes.fromhex("010100000000000100000000"), bytes.fromhex("01020000000000052000000021020000")]
+        header = 8 if ptr == 8 else 4
+        entry = 2 * ptr
+        offset = address + header + entry * len(sids)
+        entries, blobs = b"", b""
+        for sid in sids:
+            entries += struct.pack(pointer, offset + len(blobs)) + struct.pack(pointer, 0x7)  # mandatory, enabled
+            blobs += sid
+        data = struct.pack("<I", len(sids)) + bytes(header - 4) + entries + blobs
     elif klass == 8:    # TokenType: TokenPrimary
         data = struct.pack("<I", 1)
     elif klass == 10:   # TokenStatistics
@@ -988,7 +1021,6 @@ def _dispatch_exception(dp: Dumpulator, record_ptr: int, context_ptr: int):
     caller's CONTEXT and EXCEPTION_RECORD, on the stack layout dumpulator uses for its own exceptions
     (Dumpulator.handle_exception). Returns the context switch for the system call hook."""
     import ctypes
-    from .dumpulator import UnicornExceptionInfo, ExceptionType
     x64 = dp._x64
     context_type = CONTEXT if x64 else WOW64_CONTEXT
     record_type = EXCEPTION_RECORD64 if x64 else EXCEPTION_RECORD32
@@ -1001,6 +1033,17 @@ def _dispatch_exception(dp: Dumpulator, record_ptr: int, context_ptr: int):
     else:
         dp.regs.fs_base = dp.teb
     record = bytes(dp.read(record_ptr, ctypes.sizeof(record_type)))
+    return _dispatch_from_registers(dp, record)
+
+
+def _dispatch_from_registers(dp: Dumpulator, record: bytes):
+    """The exception record goes to KiUserExceptionDispatcher with the current registers as its
+    context. Returns the context switch to give dumpulator."""
+    import ctypes
+    from .dumpulator import UnicornExceptionInfo, ExceptionType
+    x64 = dp._x64
+    context_type = CONTEXT if x64 else WOW64_CONTEXT
+    context_size = ctypes.sizeof(context_type)
     if x64:
         allocation_size, context_flags = 0x720, 0x10005F
     else:
@@ -1095,3 +1138,511 @@ def ZwWriteFile(dp: Dumpulator,
         return STATUS_SUCCESS
     return _original["ZwWriteFile"](dp, FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, Buffer, Length,
                                     ByteOffset, Key)
+
+
+STATUS_ILLEGAL_INSTRUCTION = 0xC000001D
+
+
+def raise_illegal_instruction(dp: Dumpulator, address: int) -> bool:
+    """An instruction the emulator does not have: STATUS_ILLEGAL_INSTRUCTION in the program, as a
+    processor without it raises (#UD). Called from dumpulator's invalid instruction hook."""
+    try:
+        code = bytes(dp.read(address, 15))
+        instruction = next(dp.cs.disasm(code, address, 1))
+        name = f"instruction {instruction.mnemonic}"
+    except Exception:
+        name = "instruction ?"
+    first = name not in dp._fathom_unimplemented
+    dp._fathom_unimplemented[name] = dp._fathom_unimplemented.get(name, 0) + 1
+    if first:
+        dp.error(f"{name} at {hex(address)} is not emulated: STATUS_ILLEGAL_INSTRUCTION in the program")
+    dp.regs.cip = address
+    if dp._x64:
+        record = struct.pack("<IIQQII", STATUS_ILLEGAL_INSTRUCTION, 0, 0, address, 0, 0) + bytes(15 * 8)
+    else:
+        record = struct.pack("<IIIII", STATUS_ILLEGAL_INSTRUCTION, 0, 0, address, 0) + bytes(15 * 4)
+    dp._exception = _dispatch_from_registers(dp, record)
+    return True
+
+
+# ---------------------------------------------------------------------------------- guard pages
+
+def commit_stack(dp: Dumpulator):
+    """The stack of the dumped thread, committed down to its last page before the emulation starts.
+    Natively it grows through its guard page; changing the protection of a page inside unicorn's
+    protection fault hook crashes unicorn (32-bit), so the whole reserve is committed here, outside
+    of the emulation. The last page of the reserve stays reserved: the hard limit."""
+    ptr = dp.ptr_size()
+    teb = dp.teb
+    try:
+        stack_base = dp.read_ptr(teb + ptr)
+        limit = dp.read_ptr(teb + 2 * ptr)
+        deallocation = dp.read_ptr(teb + (0x1478 if dp._x64 else 0xE0C))
+    except Exception:
+        return
+    if not (deallocation and deallocation < limit <= stack_base):
+        return
+    page = deallocation + PAGE_SIZE
+    lowest = None
+    while page < stack_base:
+        try:
+            info = dp.memory.query(page)
+        except Exception:
+            break
+        size = min(info.base + info.region_size, stack_base) - page
+        if size <= 0:
+            break
+        if info.state == MemoryState.MEM_RESERVE:
+            dp.memory.commit(page, size, MemoryProtect.PAGE_READWRITE)
+        elif info.state == MemoryState.MEM_COMMIT and info.protect is not None and info.protect & MemoryProtect.PAGE_GUARD:
+            dp.memory.protect(page, size, MemoryProtect(info.protect & ~MemoryProtect.PAGE_GUARD))
+        elif info.state != MemoryState.MEM_COMMIT:
+            break
+        if lowest is None:
+            lowest = page
+        page += size
+    if lowest is not None:
+        dp.write_ptr(teb + 2 * ptr, lowest)  # NtTib.StackLimit
+        dp.debug(f"stack of thread {dp.thread_id} committed down to {hex(lowest)}")
+
+
+def handle_guard_page(dp: Dumpulator, access: int, address: int) -> bool:
+    """An access to a PAGE_GUARD page. The guard page of a thread's stack: the stack grows, as the
+    kernel does it (the guard goes to the page below, StackLimit of the TEB follows) and the access
+    goes on. Another guard page loses its guard (one-shot) and the access goes on. Returns True when
+    handled (called from dumpulator's invalid memory hook)."""
+    from unicorn import UC_MEM_READ_PROT, UC_MEM_WRITE_PROT, UC_MEM_FETCH_PROT
+    if access not in (UC_MEM_READ_PROT, UC_MEM_WRITE_PROT, UC_MEM_FETCH_PROT):
+        return False
+    page = address & ~0xFFF
+    try:
+        info = dp.memory.query(page)
+    except Exception:
+        return False
+    if info.protect is None or not (info.protect & MemoryProtect.PAGE_GUARD) or info.state != MemoryState.MEM_COMMIT:
+        return False
+    plain = MemoryProtect(info.protect & ~MemoryProtect.PAGE_GUARD)
+    dp.memory.protect(page, PAGE_SIZE, plain)
+    ptr = dp.ptr_size()
+    teb = dp.teb
+    stack_base = dp.read_ptr(teb + ptr)
+    deallocation = dp.read_ptr(teb + (0x1478 if dp._x64 else 0xE0C))
+    if deallocation <= page < stack_base:
+        below = page - PAGE_SIZE
+        if below >= deallocation + PAGE_SIZE:  # the last page of the reserve stays the hard limit
+            try:
+                below_info = dp.memory.query(below)
+                if below_info.state == MemoryState.MEM_RESERVE:
+                    dp.memory.commit(below, PAGE_SIZE, MemoryProtect(plain | MemoryProtect.PAGE_GUARD))
+            except Exception:
+                pass
+        dp.write_ptr(teb + 2 * ptr, page)  # NtTib.StackLimit
+        dp.debug(f"stack of thread {dp.thread_id} grown to {hex(page)}")
+    else:
+        dp.info(f"guard page {hex(page)} touched at {hex(dp.regs.cip)}: guard removed")
+    return True
+
+
+@syscall
+def ZwCompareObjects(dp: Dumpulator,
+                     FirstObjectHandle: Annotated[HANDLE, SAL("_In_")],
+                     SecondObjectHandle: Annotated[HANDLE, SAL("_In_")]
+                     ):
+    # STATUS_SUCCESS when both handles lead to the same object (WriteProcessMemory compares its
+    # process handle with the current process)
+    def identity(handle):
+        handle = int(handle)
+        if _is_pseudo(dp, handle, dp.NtCurrentProcess()):
+            return "process"
+        obj = _object(dp, handle)
+        return id(obj) if obj is not None else ("handle", handle)
+    return STATUS_SUCCESS if identity(FirstObjectHandle) == identity(SecondObjectHandle) else 0xC00001AC
+
+
+@syscall
+def ZwFlushInstructionCache(dp: Dumpulator,
+                            ProcessHandle: Annotated[HANDLE, SAL("_In_")],
+                            BaseAddress: Annotated[PVOID, SAL("_In_opt_")],
+                            Length: Annotated[SIZE_T, SAL("_In_")]
+                            ):
+    # nothing to flush: unicorn retranslates the code that is written
+    return STATUS_SUCCESS
+
+
+@syscall
+def ZwProtectVirtualMemory(dp: Dumpulator,
+                           ProcessHandle: Annotated[HANDLE, SAL("_In_")],
+                           BaseAddress: Annotated[P[PVOID], SAL("_Inout_")],
+                           RegionSize: Annotated[P[SIZE_T], SAL("_Inout_")],
+                           NewProtect: Annotated[ULONG, SAL("_In_")],
+                           OldProtect: Annotated[P[ULONG], SAL("_Out_")]
+                           ):
+    # the pages from the address to the address + size (dumpulator rounded the size alone: an
+    # import address table that crosses a page boundary stayed read-only on its second page)
+    address = BaseAddress.read_ptr()
+    base = address & ~(PAGE_SIZE - 1)
+    end = (address + max(RegionSize.read_ptr(), 1) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1)
+    protect = MemoryProtect(int(NewProtect))
+    dp.info(f"protect {hex(base)}[{hex(end - base)}] = {protect}")
+    try:
+        old_protect = dp.memory.protect(base, end - base, protect)
+    except (KeyError, AssertionError):
+        return STATUS_CONFLICTING_ADDRESSES
+    BaseAddress.write_ptr(base)
+    RegionSize.write_ptr(end - base)
+    OldProtect.write_ulong(old_protect.value)
+    return STATUS_SUCCESS
+
+
+STATUS_CONFLICTING_ADDRESSES = 0xC0000018
+
+
+@syscall
+def ZwReleaseWorkerFactoryWorker(dp: Dumpulator,
+                                 WorkerFactoryHandle: Annotated[HANDLE, SAL("_In_")]
+                                 ):
+    # the thread pool asks the kernel for a worker: none is started, the threads that queued the
+    # work do it themselves (the loader drains its queue on the loading thread)
+    return STATUS_SUCCESS
+
+
+@syscall
+def ZwSetInformationProcess(dp: Dumpulator,
+                            ProcessHandle: Annotated[HANDLE, SAL("_In_")],
+                            ProcessInformationClass: Annotated[ULONG, SAL("_In_")],
+                            ProcessInformation: Annotated[PVOID, SAL("_In_reads_bytes_(ProcessInformationLength)")],
+                            ProcessInformationLength: Annotated[ULONG, SAL("_In_")]
+                            ):
+    klass = int(ProcessInformationClass)
+    if klass == 35:  # ProcessTlsInformation: the TLS of a DLL loaded after the threads started
+        return _set_process_tls(dp, ProcessInformation.ptr, int(ProcessInformationLength))
+    return _original["ZwSetInformationProcess"](dp, ProcessHandle, PROCESSINFOCLASS(klass), ProcessInformation,
+                                                ProcessInformationLength)
+
+
+def _set_process_tls(dp: Dumpulator, pointer: int, length: int) -> int:
+    """PROCESS_TLS_INFORMATION {Flags, OperationType, ThreadDataCount, TlsIndex / PreviousCount,
+    THREAD_TLS_INFORMATION {Flags, NewTlsData / OldTlsData, ThreadId}[]}: the loader gives a TLS
+    block per thread (operation 0, ProcessTlsReplaceIndex: it goes in the slot TlsIndex of the
+    thread's vector) or a new vector (operation 1, ProcessTlsReplaceVector: the first PreviousCount
+    slots are copied from the old one). The old value comes back in the entry, whose Flags get 2
+    (used): the loader frees the old values of the used entries and its own allocations of the
+    others. The current thread first, then the others that have a TLS vector, as many as there are
+    entries (the loader counts the threads it initialized)."""
+    ptr = dp.ptr_size()
+    entry_size = 3 * ptr if dp._x64 else 12
+    _, operation, count, index = struct.unpack("<IIII", bytes(dp.read(pointer, 16)))
+    if length < 16 + count * entry_size or operation not in (0, 1):
+        return STATUS_INFO_LENGTH_MISMATCH if length < 16 + count * entry_size else STATUS_INVALID_PARAMETER
+    vector_offset = 0x58 if dp._x64 else 0x2C
+    scheduler = dp.scheduler
+    current = scheduler.current
+    threads = [current] + [t for t in scheduler.threads.values() if t is not current and t.state != "terminated"]
+    slot = 0
+    for thread in threads:
+        if slot >= count:
+            break
+        vector = dp.read_ptr(thread.teb + vector_offset)
+        if not vector and thread is not current:
+            continue
+        entry = pointer + 16 + slot * entry_size
+        new = dp.read_ptr(entry + ptr)
+        if operation == 0:  # ProcessTlsReplaceIndex
+            if not vector:
+                continue
+            old = dp.read_ptr(vector + index * ptr)
+            dp.write_ptr(vector + index * ptr, new)
+        else:  # ProcessTlsReplaceVector
+            for i in range(index if vector else 0):
+                dp.write_ptr(new + i * ptr, dp.read_ptr(vector + i * ptr))
+            dp.write_ptr(thread.teb + vector_offset, new)
+            old = vector
+        dp.write_ptr(entry + ptr, old)
+        dp.write_ptr(entry + 2 * ptr, thread.tid)
+        # Flags: 2 = used (the loader frees the old value; an entry without it is freed as unused)
+        dp.write_ulong(entry, dp.read_ulong(entry) | 2)
+        slot += 1
+    return STATUS_SUCCESS
+
+
+@syscall
+def ZwApphelpCacheControl(dp: Dumpulator,
+                          Type: Annotated[ULONG, SAL("_In_")],
+                          ServiceData: Annotated[PVOID, SAL("_Inout_opt_")]
+                          ):
+    # the application compatibility cache is empty: the image is looked up nowhere else
+    return 0xC0000225  # STATUS_NOT_FOUND
+
+
+@syscall
+def ZwQuerySecurityObject(dp: Dumpulator,
+                          Handle: Annotated[HANDLE, SAL("_In_")],
+                          SecurityInformation: Annotated[ULONG, SAL("_In_")],
+                          SecurityDescriptor: Annotated[PVOID, SAL("_Out_writes_bytes_opt_(Length)")],
+                          Length: Annotated[ULONG, SAL("_In_")],
+                          LengthNeeded: Annotated[P[ULONG], SAL("_Out_")]
+                          ):
+    # a self-relative descriptor without owner, group or ACL (a NULL DACL: everyone has access)
+    data = struct.pack("<BBHIIII", 1, 0, 0x8004, 0, 0, 0, 0)
+    if LengthNeeded != 0:
+        LengthNeeded.write_ulong(len(data))
+    if int(Length) < len(data):
+        return STATUS_BUFFER_TOO_SMALL
+    dp.write(SecurityDescriptor.ptr, data)
+    return STATUS_SUCCESS
+
+
+@syscall
+def ZwQuerySecurityAttributesToken(dp: Dumpulator,
+                                   TokenHandle: Annotated[HANDLE, SAL("_In_")],
+                                   Attributes: Annotated[PVOID, SAL("_In_reads_opt_(NumberOfAttributes)")],
+                                   NumberOfAttributes: Annotated[ULONG, SAL("_In_")],
+                                   Buffer: Annotated[PVOID, SAL("_Out_writes_bytes_(Length)")],
+                                   Length: Annotated[ULONG, SAL("_In_")],
+                                   ReturnLength: Annotated[P[ULONG], SAL("_Out_")]
+                                   ):
+    # TOKEN_SECURITY_ATTRIBUTES_INFORMATION {Version 1, Reserved, AttributeCount 0, pAttributeV1 NULL}
+    data = struct.pack("<HHI", 1, 0, 0) + bytes(dp.ptr_size())
+    if ReturnLength != 0:
+        ReturnLength.write_ulong(len(data))
+    if int(Length) < len(data):
+        return STATUS_BUFFER_TOO_SMALL
+    dp.write(Buffer.ptr, data)
+    return STATUS_SUCCESS
+
+
+@syscall
+def ZwQueryEvent(dp: Dumpulator,
+                 EventHandle: Annotated[HANDLE, SAL("_In_")],
+                 EventInformationClass: Annotated[ULONG, SAL("_In_")],
+                 EventInformation: Annotated[PVOID, SAL("_Out_writes_bytes_(EventInformationLength)")],
+                 EventInformationLength: Annotated[ULONG, SAL("_In_")],
+                 ReturnLength: Annotated[P[ULONG], SAL("_Out_opt_")]
+                 ):
+    event = _object(dp, EventHandle)
+    if not isinstance(event, EventObject):
+        return STATUS_OBJECT_TYPE_MISMATCH
+    if int(EventInformationLength) < 8:
+        return STATUS_INFO_LENGTH_MISMATCH
+    kind = event.event_type.value if hasattr(event.event_type, "value") else int(event.event_type)
+    dp.write(EventInformation.ptr, struct.pack("<Ii", kind, 1 if event.signalled else 0))
+    if ReturnLength != 0:
+        ReturnLength.write_ulong(8)
+    return STATUS_SUCCESS
+
+
+@syscall
+def ZwAllocateVirtualMemory(dp: Dumpulator,
+                            ProcessHandle: Annotated[HANDLE, SAL("_In_")],
+                            BaseAddress: Annotated[P[PVOID], SAL("_Inout_")],
+                            ZeroBits: Annotated[ULONG_PTR, SAL("_In_")],
+                            RegionSize: Annotated[P[SIZE_T], SAL("_Inout_")],
+                            AllocationType: Annotated[ULONG, SAL("_In_")],
+                            Protect: Annotated[ULONG, SAL("_In_")]
+                            ):
+    # as Windows: an address inside a page (the pages it touches), a commit of pages already
+    # committed, ZeroBits, MEM_TOP_DOWN / MEM_WRITE_WATCH (ignored), MEM_RESET (nothing to do)
+    if not _is_pseudo(dp, int(ProcessHandle), dp.NtCurrentProcess()):
+        return STATUS_INVALID_HANDLE
+    kind = int(AllocationType)
+    address = dp.read_ptr(BaseAddress.ptr)
+    size = dp.read_ptr(RegionSize.ptr)
+    if size == 0:
+        return STATUS_INVALID_PARAMETER
+    if kind & (0x80000 | 0x1000000):  # MEM_RESET, MEM_RESET_UNDO
+        return STATUS_SUCCESS
+    try:
+        protect = MemoryProtect(int(Protect))
+    except ValueError:
+        return 0xC0000045  # STATUS_INVALID_PAGE_PROTECTION
+    if kind & MEM_RESERVE or address == 0:
+        start = address & ~0xFFFF if address else 0
+        end = (address + size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1) if address else 0
+        length = (end - start) if address else (size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1)
+        if not start:
+            start = dp.memory.find_free(length)
+            if start is None:
+                return 0xC0000017  # STATUS_NO_MEMORY
+        try:
+            dp.memory.reserve(start, length, protect)
+        except (KeyError, AssertionError):
+            return STATUS_CONFLICTING_ADDRESSES
+        if kind & MEM_COMMIT:
+            dp.memory.commit(start, length, protect)
+    else:
+        start = address & ~(PAGE_SIZE - 1)
+        length = ((address + size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1)) - start
+        try:
+            dp.memory.commit(start, length, protect)
+        except (KeyError, AssertionError):
+            return 0xC0000018 if not dp.memory.query(start).state else STATUS_CONFLICTING_ADDRESSES
+    BaseAddress.write_ptr(start)
+    RegionSize.write_ptr(length)
+    return STATUS_SUCCESS
+
+
+# ---------------------------------------------------------------------------------- system information
+
+def _processors(dp: Dumpulator) -> int:
+    scheduler = getattr(dp, "scheduler", None)
+    return max(1, scheduler.cpus if scheduler is not None else 1)
+
+
+def _system_information(dp: Dumpulator, klass: int, native: bool) -> Optional[bytes]:
+    """SystemBasicInformation, SystemProcessorInformation; native: the 64-bit machine seen by a
+    32-bit process (NtWow64GetNativeSystemInformation, GetNativeSystemInfo)."""
+    cpus = _processors(dp)
+    if klass == 0:
+        common = struct.pack("<IIIIIII", 0, 156250, PAGE_SIZE, 0x400000, 1, 0x47FFFF, 0x10000)
+        if dp._x64:
+            return common + bytes(4) + struct.pack("<QQQB", 0x10000, 0x7FFFFFFEFFFF, (1 << cpus) - 1, cpus) + bytes(7)
+        maximum = 0xFFFEFFFF if native else 0x7FFEFFFF
+        return common + struct.pack("<IIIB", 0x10000, maximum, (1 << min(cpus, 32)) - 1, min(cpus, 32)) + bytes(3)
+    if klass == 1:
+        architecture = 9 if (dp._x64 or native) else 0  # AMD64 / INTEL
+        return struct.pack("<HHHHI", architecture, 6, 0x5507, cpus, 0x2FFFE)
+    return None
+
+
+def _write_information(dp: Dumpulator, data: bytes, buffer, length, return_length) -> int:
+    if return_length != 0:
+        return_length.write_ulong(len(data))
+    if int(length) < len(data):
+        return STATUS_INFO_LENGTH_MISMATCH
+    dp.write(buffer.ptr, data)
+    return STATUS_SUCCESS
+
+
+_previous_system = _original["ZwQuerySystemInformation"]
+
+
+@syscall
+def ZwQuerySystemInformation(dp: Dumpulator,
+                             SystemInformationClass: Annotated[ULONG, SAL("_In_")],
+                             SystemInformation: Annotated[PVOID, SAL("_Out_writes_bytes_opt_(SystemInformationLength)")],
+                             SystemInformationLength: Annotated[ULONG, SAL("_In_")],
+                             ReturnLength: Annotated[P[ULONG], SAL("_Out_opt_")]
+                             ):
+    data = _system_information(dp, int(SystemInformationClass), False)
+    if data is None:
+        raise NotImplementedError(f"NtQuerySystemInformation class {int(SystemInformationClass)}")
+    return _write_information(dp, data, SystemInformation, SystemInformationLength, ReturnLength)
+
+
+@syscall
+def ZwWow64GetNativeSystemInformation(dp: Dumpulator,
+                                      SystemInformationClass: Annotated[ULONG, SAL("_In_")],
+                                      NativeSystemInformation: Annotated[PVOID, SAL("_Out_writes_bytes_(InformationLength)")],
+                                      InformationLength: Annotated[ULONG, SAL("_In_")],
+                                      ReturnLength: Annotated[P[ULONG], SAL("_Out_opt_")]
+                                      ):
+    data = _system_information(dp, int(SystemInformationClass), True)
+    if data is None:
+        raise NotImplementedError(f"NtWow64GetNativeSystemInformation class {int(SystemInformationClass)}")
+    return _write_information(dp, data, NativeSystemInformation, InformationLength, ReturnLength)
+
+
+@syscall
+def ZwOpenProcessToken(dp: Dumpulator,
+                       ProcessHandle: Annotated[HANDLE, SAL("_In_")],
+                       DesiredAccess: Annotated[ACCESS_MASK, SAL("_In_")],
+                       TokenHandle: Annotated[P[HANDLE], SAL("_Out_")]
+                       ):
+    # the token of the process (NtQueryInformationToken answers for any token handle)
+    TokenHandle.write_ptr(dp.handles.new(ProcessTokenObject(ProcessHandle)))
+    return STATUS_SUCCESS
+
+
+@syscall
+def ZwOpenProcessTokenEx(dp: Dumpulator,
+                         ProcessHandle: Annotated[HANDLE, SAL("_In_")],
+                         DesiredAccess: Annotated[ACCESS_MASK, SAL("_In_")],
+                         HandleAttributes: Annotated[ULONG, SAL("_In_")],
+                         TokenHandle: Annotated[P[HANDLE], SAL("_Out_")]
+                         ):
+    TokenHandle.write_ptr(dp.handles.new(ProcessTokenObject(ProcessHandle)))
+    return STATUS_SUCCESS
+
+
+@syscall
+def ZwTraceEvent(dp: Dumpulator,
+                 TraceHandle: Annotated[HANDLE, SAL("_In_")],
+                 Flags: Annotated[ULONG, SAL("_In_")],
+                 FieldSize: Annotated[ULONG, SAL("_In_")],
+                 Fields: Annotated[PVOID, SAL("_In_")]
+                 ):
+    return STATUS_SUCCESS  # event tracing (ETW): nobody listens in the emulator
+
+
+@syscall
+def ZwTraceControl(dp: Dumpulator,
+                   TraceInformationClass: Annotated[ULONG, SAL("_In_")],
+                   InputBuffer: Annotated[PVOID, SAL("_In_reads_bytes_opt_(InputBufferLength)")],
+                   InputBufferLength: Annotated[ULONG, SAL("_In_")],
+                   TraceInformation: Annotated[PVOID, SAL("_Out_writes_bytes_opt_(TraceInformationLength)")],
+                   TraceInformationLength: Annotated[ULONG, SAL("_In_")],
+                   ReturnLength: Annotated[P[ULONG], SAL("_Out_")]
+                   ):
+    if ReturnLength != 0:
+        ReturnLength.write_ulong(0)
+    return STATUS_NOT_SUPPORTED  # no event tracing sessions in the emulator
+
+
+@syscall
+def ZwQueryLicenseValue(dp: Dumpulator,
+                        ValueName: Annotated[P[UNICODE_STRING], SAL("_In_")],
+                        Type: Annotated[P[ULONG], SAL("_Out_opt_")],
+                        Data: Annotated[PVOID, SAL("_Out_writes_bytes_to_opt_(DataSize, *ResultDataSize)")],
+                        DataSize: Annotated[ULONG, SAL("_In_")],
+                        ResultDataSize: Annotated[P[ULONG], SAL("_Out_")]
+                        ):
+    return STATUS_OBJECT_NAME_NOT_FOUND  # no license values: the callers take their defaults
+
+
+@syscall
+def ZwIsUILanguageComitted(dp: Dumpulator
+                           ):
+    return STATUS_SUCCESS
+
+
+@syscall
+def ZwQueryInstallUILanguage(dp: Dumpulator,
+                             InstallUILanguageId: Annotated[P[USHORT], SAL("_Out_")]
+                             ):
+    # the language of the host's Windows
+    try:
+        import ctypes
+        language = ctypes.windll.kernel32.GetSystemDefaultUILanguage() & 0xFFFF
+    except Exception:
+        language = 0x409
+    dp.write(InstallUILanguageId.ptr, struct.pack("<H", language))
+    return STATUS_SUCCESS
+
+
+@syscall
+def ZwGetMUIRegistryInfo(dp: Dumpulator,
+                         Flags: Annotated[ULONG, SAL("_In_")],
+                         DataSize: Annotated[P[ULONG], SAL("_Inout_")],
+                         Data: Annotated[PVOID, SAL("_Out_")]
+                         ):
+    return 0xC0000225  # STATUS_NOT_FOUND: no MUI registry data, the default language is used
+
+
+@dataclass
+class DirectoryObject(AbstractObject):
+    """An object directory (the session's BaseNamedObjects...): the names opened relative to it are
+    those of the run (ipc.py)."""
+    path: str
+
+    def __str__(self):
+        return self.pretty("path")
+
+
+@syscall
+def ZwOpenDirectoryObject(dp: Dumpulator,
+                          DirectoryHandle: Annotated[P[HANDLE], SAL("_Out_")],
+                          DesiredAccess: Annotated[ACCESS_MASK, SAL("_In_")],
+                          ObjectAttributes: Annotated[P[OBJECT_ATTRIBUTES], SAL("_In_")]
+                          ):
+    DirectoryHandle.write_ptr(dp.handles.new(DirectoryObject(_object_name(ObjectAttributes))))
+    return STATUS_SUCCESS

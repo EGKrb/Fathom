@@ -6,16 +6,21 @@
 # LdrInitializeThunk, like on Windows (TLS, DLL_THREAD_ATTACH), then RtlUserThreadStart. The other
 # threads of the dump stay where they are: they wait in the kernel.
 #
-# One thread runs at a time. A thread switches when it waits for something not signaled (events,
-# mutants, semaphores, threads, NtWaitForAlertByThreadId of critical sections / SRW locks /
-# condition variables, keyed events, NtDelayExecution) and every QUANTUM instructions when other
-# threads are ready. When every thread waits, the clock jumps to the first timeout; when none has
-# one, the emulation stops (deadlock).
+# Several processors: up to `cpus` threads are on a processor at once (the number of processors of
+# the dumped machine by default) and run interleaved in short slices of random length (a fixed seed:
+# the same run every time), as on a multiprocessor where their instructions mix; a race between two
+# threads happens as it does natively. A thread keeps its processor for QUANTUM instructions of its
+# own, then lets a thread that waits for a processor run. A thread leaves its processor when it waits
+# for something not signaled (events, mutants, semaphores, threads, NtWaitForAlertByThreadId of
+# critical sections / SRW locks / condition variables, keyed events, NtDelayExecution). When every
+# thread waits, the clock jumps to the first timeout; when none has one, the emulation stops
+# (deadlock).
 #
 # Time is virtual: it advances with the emulated instructions and jumps over sleeps, and
 # KUSER_SHARED_DATA (GetTickCount, the interrupt and system time) follows it.
 
 import ctypes
+import random
 import struct
 from collections import deque
 from dataclasses import dataclass, field
@@ -50,6 +55,7 @@ class Wait:
     deadline: Optional[int] = None      # virtual time (100 ns), None: infinite
     alert: bool = False                 # NtWaitForAlertByThreadId
     keyed: Optional[tuple] = None       # (keyed event, key, "wait" | "release")
+    retry: Optional[tuple] = None       # (address of the syscall instruction, eax): the call runs again
 
 
 class EmulatedThread:
@@ -64,6 +70,7 @@ class EmulatedThread:
         self.exit_code: Optional[int] = None
         self.start = 0
         self.object: Optional["ThreadObject2"] = None
+        self.quantum_left = 0
 
     def __repr__(self):
         return f"thread {self.tid} ({self.state})"
@@ -97,7 +104,8 @@ class KeyedEventObject(AbstractObject):
 
 
 class Scheduler:
-    QUANTUM = 20000         # instructions before another ready thread runs
+    QUANTUM = 20000         # instructions a thread runs on its processor before a waiting thread gets it
+    SLICE = (40, 400)       # instructions between two switches of the threads on processors
     NS_PER_INSTRUCTION = 1  # virtual time per emulated instruction (1 ns: 1 GHz, one instruction per cycle)
 
     def __init__(self, dp):
@@ -120,6 +128,20 @@ class Scheduler:
         self.start_interrupt_time = self.interrupt_time
         self.tick_multiplier = dp.read_ulong(KUSER_SHARED_DATA + 0x4) or 0x0FA00000
         self.qpc_frequency = struct.unpack("<Q", bytes(dp.read(KUSER_SHARED_DATA + 0x300, 8)))[0] or 10_000_000
+        self._clock_rest = 0
+        # processors: the number of the dumped machine (PEB.NumberOfProcessors)
+        try:
+            self.cpus = max(1, dp.read_ulong(dp.peb + (0xB8 if dp._x64 else 0x64)))
+        except Exception:
+            self.cpus = 1
+        self.on_cpu: List[EmulatedThread] = [main]
+        main.quantum_left = self.QUANTUM
+        self.rng = random.Random(1)
+        # several processes (processes.py): a child whose threads all wait pauses until another
+        # process changes something; `budget` instructions, then the emulation returns
+        self.paused = False
+        self.budget: Optional[int] = None
+        self.yield_requested = False
 
     # ------------------------------------------------------------------ time
     def _read_ksystem_time(self, offset: int) -> int:
@@ -147,7 +169,12 @@ class Scheduler:
             pass
 
     def advance_instructions(self, count: int):
-        self.advance(count * self.NS_PER_INSTRUCTION // 100)
+        """The clock after count instructions run: with several threads on processors, they ran in
+        parallel, so the time of one processor."""
+        parallel = max(1, len(self.on_cpu))
+        ns = count * self.NS_PER_INSTRUCTION + self._clock_rest
+        ticks, self._clock_rest = divmod(ns, 100 * parallel)
+        self.advance(ticks)
 
     def performance_counter(self) -> int:
         return self.interrupt_time * self.qpc_frequency // 10_000_000
@@ -166,7 +193,15 @@ class Scheduler:
         return [t for t in self.threads.values() if t.state not in ("terminated", "frozen")]
 
     def others_ready(self) -> bool:
-        return bool(self.ready)
+        return bool(self.ready) or len(self.on_cpu) > 1
+
+    def slice_length(self) -> int:
+        """The instructions to run before the next switch."""
+        if len(self.on_cpu) > 1:
+            return self.rng.randint(*self.SLICE)
+        if self.ready:
+            return max(1, self.current.quantum_left)
+        return self.QUANTUM
 
     def find(self, tid: int) -> Optional[EmulatedThread]:
         return self.threads.get(tid)
@@ -190,8 +225,28 @@ class Scheduler:
             thread.state = "suspended"
             thread.suspend_count = 1
         else:
-            thread.state = "ready"
+            self._make_ready(thread)
+
+    def _make_ready(self, thread: EmulatedThread):
+        """A thread can run: on a free processor, else it waits for one."""
+        thread.state = "ready"
+        thread.quantum_left = self.QUANTUM
+        if thread in self.on_cpu or thread in self.ready:
+            return
+        if len(self.on_cpu) < self.cpus:
+            self.on_cpu.append(thread)
+        else:
             self.ready.append(thread)
+
+    def _release(self, thread: EmulatedThread):
+        """A thread leaves its processor; the threads that wait for one take the free processors."""
+        if thread in self.on_cpu:
+            self.on_cpu.remove(thread)
+        while self.ready and len(self.on_cpu) < self.cpus:
+            waiting = self.ready.popleft()
+            if waiting.state == "ready":
+                waiting.quantum_left = self.QUANTUM
+                self.on_cpu.append(waiting)
 
     def _make_current(self, thread: EmulatedThread):
         if thread is not self.current:
@@ -211,6 +266,9 @@ class Scheduler:
             return obj.owner is None or obj.owner == tid
         if isinstance(obj, SemaphoreObject):
             return obj.count > 0
+        signaled = getattr(obj, "fathom_signaled", None)
+        if signaled is not None:  # a child process or thread (processes.py)
+            return signaled()
         return False  # process handle, objects of the dump: never signaled
 
     def _acquire(self, obj, tid: int) -> int:
@@ -302,13 +360,18 @@ class Scheduler:
         return self.block(Wait(deadline=deadline))
 
     def yield_execution(self) -> object:
-        if not self.ready:
+        if not self.ready and len(self.on_cpu) <= 1:
             return STATUS_SUCCESS
-        return self.switch_from_syscall(lambda t: self._requeue(t), STATUS_SUCCESS)
+
+        def give_way(thread):
+            thread.state = "ready"
+            if self.ready:  # the processor goes to a thread that waits for one
+                self._release(thread)
+                self.ready.append(thread)
+        return self.switch_from_syscall(give_way, STATUS_SUCCESS)
 
     def _requeue(self, thread: EmulatedThread):
-        thread.state = "ready"
-        self.ready.append(thread)
+        self._make_ready(thread)
 
     def signal(self):
         """An object changed state: wake the threads whose wait is now satisfied (in order)."""
@@ -319,13 +382,19 @@ class Scheduler:
                     self.wake(thread, status)
 
     def wake(self, thread: EmulatedThread, status: int):
+        wait = thread.wait
         thread.wait = None
-        self._set_result(thread, status)
+        if wait is not None and wait.retry is not None and status != STATUS_TIMEOUT:
+            # the system call runs again (a read of a pipe that has data now...)
+            from unicorn.x86_const import UC_X86_REG_RIP, UC_X86_REG_EIP, UC_X86_REG_RAX
+            thread.context.reg_write(UC_X86_REG_RIP if self.dp._x64 else UC_X86_REG_EIP, wait.retry[0])
+            thread.context.reg_write(UC_X86_REG_RAX, wait.retry[1])
+        else:
+            self._set_result(thread, status)
         if thread.suspend_count:
             thread.state = "suspended"
         else:
-            thread.state = "ready"
-            self.ready.append(thread)
+            self._make_ready(thread)
 
     def _set_result(self, thread: EmulatedThread, status: int):
         from unicorn.x86_const import UC_X86_REG_RAX
@@ -343,6 +412,15 @@ class Scheduler:
             regs.rcx = cip + 2
             regs.r11 = regs.eflags
         regs.cip = cip + 2
+
+    def block_and_retry(self, objects, timeout_ptr=0) -> object:
+        """The current thread waits until one of the objects is signaled (fathom_signaled), then its
+        system call runs again: for a call that blocks until something happens (reading an empty
+        pipe, waiting for a client), the implementation returns this instead of a status."""
+        dp = self.dp
+        wait = Wait(list(objects), False, self.deadline(timeout_ptr))
+        wait.retry = (dp.regs.cip, dp.regs.cax & 0xFFFFFFFF)
+        return self.block(wait)
 
     def block(self, wait: Wait) -> object:
         def save(thread):
@@ -362,6 +440,7 @@ class Scheduler:
             return
         if thread in self.ready:
             self.ready.remove(thread)
+        self._release(thread)
         thread.state = "terminated"
         thread.wait = None
         thread.exit_code = exit_code & 0xFFFFFFFF
@@ -374,15 +453,25 @@ class Scheduler:
         from .dumpulator import UnicornExceptionInfo, ExceptionType
         dp = self.dp
         current = self.current
+        index = self.on_cpu.index(current) if current in self.on_cpu else 0
         self._post_syscall_state(status)
         current.context = dp._uc.context_save()
         save_current(current)
-        nxt = self._pick_next()
+        if current.state in ("waiting", "terminated", "suspended"):
+            self._release(current)
+        nxt = self._pick_next(current, index)
         exception = UnicornExceptionInfo()
         exception.final = True
         if nxt is None:
             exception.type = ExceptionType.Terminate
             exception.context = current.context
+            world = getattr(dp, "world", None)
+            if world is not None and world.can_pause(dp) and not all(
+                    t.state in ("terminated", "frozen") for t in self.threads.values()):
+                # a child process whose threads all wait: it pauses until another process (its
+                # parent...) changes what they wait for; the world resumes it
+                self.paused = True
+                return exception
             dp.stop(self._exit_code_without_threads())
             return exception
         self._make_current(nxt)
@@ -414,39 +503,83 @@ class Scheduler:
             return ("all of " if wait.wait_all else "") + ", ".join(type(o).__name__ for o in wait.objects)
         return "delay"
 
-    def _pick_next(self) -> Optional[EmulatedThread]:
-        """The next ready thread; when none is ready, the clock jumps to the first timeout."""
-        while True:
-            while self.ready:
-                thread = self.ready.popleft()
-                if thread.state == "ready":
-                    return thread
-            timed = [t for t in self.threads.values() if t.state == "waiting" and t.wait is not None and t.wait.deadline is not None]
-            if not timed:
-                return None
-            first = min(timed, key=lambda t: t.wait.deadline)
-            self.advance(first.wait.deadline - self.interrupt_time)
-            for thread in timed:
-                if thread.wait.deadline <= self.interrupt_time:
-                    status = STATUS_SUCCESS if (thread.wait.keyed is None and not thread.wait.alert and not thread.wait.objects) else STATUS_TIMEOUT
-                    self.wake(thread, status)
+    def next_deadline(self) -> Optional[int]:
+        """The first timeout of the waiting threads (virtual time), or None."""
+        timed = [t.wait.deadline for t in self.threads.values()
+                 if t.state == "waiting" and t.wait is not None and t.wait.deadline is not None]
+        return min(timed) if timed else None
 
-    def preempt(self) -> bool:
-        """The quantum of the current thread is over (between two emu_start): the next ready
-        thread runs. Returns True when another thread was switched in."""
-        if not self.ready:
-            return False
+    def advance_to(self, when: int):
+        """The clock moves on to `when` (if later); the waits whose timeout passed end."""
+        if when > self.interrupt_time:
+            self.advance(when - self.interrupt_time)
+        for thread in list(self.threads.values()):
+            wait = thread.wait
+            if thread.state == "waiting" and wait is not None and wait.deadline is not None and wait.deadline <= self.interrupt_time:
+                status = STATUS_SUCCESS if (wait.keyed is None and not wait.alert and not wait.objects) else STATUS_TIMEOUT
+                self.wake(thread, status)
+
+    def runnable(self) -> bool:
+        """A thread can run now (after the objects it waits for are checked)."""
+        self.signal()
+        self._release(None)
+        return bool(self.on_cpu)
+
+    def _pick_next(self, after: Optional[EmulatedThread] = None, index: int = 0) -> Optional[EmulatedThread]:
+        """The next thread to run: the thread on a processor after `after` (in turn). When no
+        thread can run, the other emulated processes run (one of them may signal what this one
+        waits for); when none can, the clock of every process jumps to the first timeout."""
+        world = getattr(self.dp, "world", None)
+        while True:
+            self._release(None)  # free processors to the threads that wait for one
+            if self.on_cpu:
+                if after in self.on_cpu:
+                    return self.on_cpu[(self.on_cpu.index(after) + 1) % len(self.on_cpu)]
+                return self.on_cpu[index % len(self.on_cpu)]
+            if world is not None:
+                if world.wait_for_others(self.dp):
+                    continue
+                return None
+            first = self.next_deadline()
+            if first is None:
+                return None
+            self.advance_to(first)
+
+    def preempt(self, executed: int = 0) -> bool:
+        """A slice of the current thread is over (between two emu_start): the clock advances, and
+        the next thread on a processor runs (or a thread waiting for a processor gets this one when
+        the quantum is over). Returns True when another thread was switched in."""
         dp = self.dp
         current = self.current
+        self.advance_instructions(executed)
+        world = getattr(dp, "world", None)
+        if world is not None:
+            world.slice_done(dp, executed)
+        if self.budget is not None:
+            self.budget -= executed
+            if self.budget <= 0:
+                self.yield_requested = True
+        current.quantum_left -= executed
+        index = self.on_cpu.index(current) if current in self.on_cpu else 0
+        if current.quantum_left <= 0:
+            current.quantum_left = self.QUANTUM
+            if self.ready:
+                self._release(current)
+                current.state = "ready"
+                self.ready.append(current)
+        if current in self.on_cpu and len(self.on_cpu) == 1:
+            return False
+        nxt = self._pick_next(current, index)
+        if nxt is None or nxt is current:
+            return False
         current.context = dp._uc.context_save()
-        current.state = "ready"
-        self.ready.append(current)
-        nxt = self._pick_next()
+        if current.state == "running":
+            current.state = "ready"
         self._make_current(nxt)
         dp._uc.context_restore(nxt.context)
         if dp._fathom_trace_switch is not None:
             dp._fathom_trace_switch()
-        return nxt is not current
+        return True
 
     def resume(self, thread: EmulatedThread) -> int:
         previous = thread.suspend_count
@@ -456,15 +589,16 @@ class Scheduler:
                 if thread.wait is not None:
                     thread.state = "waiting"
                 else:
-                    thread.state = "ready"
-                    self.ready.append(thread)
+                    self._make_ready(thread)
         return previous
 
     def suspend(self, thread: EmulatedThread) -> int:
         previous = thread.suspend_count
         thread.suspend_count += 1
         if thread.state == "ready":
-            self.ready.remove(thread)
+            if thread in self.ready:
+                self.ready.remove(thread)
+            self._release(thread)
             thread.state = "suspended"
         return previous
 
