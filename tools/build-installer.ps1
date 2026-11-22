@@ -11,11 +11,11 @@ Prerequisites:
 Output: dist\Fathom_<Version>_setup.exe
 
 .EXAMPLE
-.\tools\make-release.ps1 -Version 1.5.0      # stages release\release\ (and the zips)
-.\tools\build-installer.ps1 -Version 1.5.0   # -> dist\Fathom_1.5.0_setup.exe
+.\tools\make-release.ps1 -Version 1.6.0      # stages release\release\ (and the zips)
+.\tools\build-installer.ps1 -Version 1.6.0   # -> dist\Fathom_1.6.0_setup.exe
 #>
 param(
-    [string] $Version = '1.5.0'
+    [string] $Version = '1.6.0'
 )
 
 $ErrorActionPreference = 'Stop'
