@@ -6,6 +6,60 @@ branch; this changelog covers Fathom's own additions and branding.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.7.0] - 2026-11-22
+
+### Added
+- Emulator: GDI+ draws (its flat API implemented in Python, as `gdiplus.dll`
+  needs the kernel side of GDI): graphics on DCs, windows and images, ARGB
+  colors with their alpha, world transforms, solid and linear gradient brushes,
+  pens, rectangles, ellipses, lines, polygons, arcs, Béziers, paths, text,
+  bitmaps (`LockBits`, `HBITMAP` both ways, files loaded and saved with the
+  encoders), `DrawImage`.
+- Emulator: OpenGL 1.x draws (a software rasterizer): contexts and pixel
+  formats, matrices (`glOrtho`, `glFrustum`, `gluPerspective`, `gluLookAt`...),
+  `glBegin` / `glEnd` with every primitive, vertex arrays, 2D textures, depth
+  test, culling, blending, flat or smooth shading, `glReadPixels`, the frame in
+  the window at `SwapBuffers`.
+- Emulator: Direct3D 9 draws: its fixed-function pipeline (FVF and vertex
+  declarations, transforms, lights, a texture, depth test, culling, blending),
+  `DrawPrimitive(UP)`, `DrawIndexedPrimitive(UP)`, vertex and index buffers,
+  surfaces and textures (`LockRect`), `Clear`, `StretchRect`,
+  `GetRenderTargetData`, `Present` to the window.
+- Emulator: Direct3D 11 and DXGI draw: the vertex and pixel shaders (DXBC,
+  shader models 4 and 5) run in an interpreter (`dxbc.py`) on every vertex and
+  pixel at once; buffers, 2D textures and views, input layouts, constant
+  buffers, samplers, rasterizer / blend / depth-stencil states, `Draw`
+  (indexed, instanced), clears, copies, `Map`, the swap chain and `Present`.
+- Emulator: `AlphaBlend` with an alpha per pixel (`AC_SRC_ALPHA`, a 32-bit
+  premultiplied source).
+- Emulator: processes that share memory interleave like threads on the
+  emulated processors (a race between them on that memory happens as
+  natively, interlocked instructions stay atomic).
+- Emulator: window messages between processes: one set of windows
+  (`FindWindow`, `FindWindowEx` with message-only windows,
+  `GetWindowThreadProcessId`, `RegisterWindowMessage`, `HWND_BROADCAST`),
+  `PostMessage` / `PostThreadMessage` to another process, `SendMessage` that
+  waits for the receiving thread, `WM_COPYDATA` / `WM_SETTEXT` / `WM_GETTEXT`
+  marshalled.
+- Emulator: bitmaps (memory DCs, DIB sections in the program's memory,
+  `BitBlt` / `StretchBlt` and raster operations, `StretchDIBits`,
+  `SetDIBitsToDevice`, `Get/SetDIBits`, `TransparentBlt`, `AlphaBlend`,
+  `LoadBitmap` / `LoadImage`), regions (`CombineRgn`, fills, clipping,
+  `SetWindowRgn`) and paths (`BeginPath` ... `FillPath`, `SelectClipPath`,
+  `PathToRegion`), `Polygon`, `PolyBezier`, `RoundRect`, `Arc`, `Pie`, `Chord`,
+  `SaveDC` / `RestoreDC`, `GetPixel`.
+- `emulator_world` modes `racep`, `winmsg`, `paint` (its pixels checked with
+  `GetPixel` natively and in the emulator), `gdiplus`, `opengl`, `d3d9`, `d3d11`
+  (their pixels read back natively and in the emulator, the images of their
+  windows checked by the plugin test).
+
+### Fixed
+- Emulator: a `GetMessage` that waited for a timer did not wake for a posted
+  message; the result of a run whose console output had NUL characters could
+  not be read by ExtraCmds; on x64, the 32-bit arguments that a program passes
+  on the stack had the garbage of the upper half of their slot in the emulated
+  graphics functions.
+
 ## [1.6.0] - 2026-11-22
 
 ### Added

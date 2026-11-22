@@ -252,7 +252,8 @@ namespace
         auto text = ReadTextFile(resultFile);
         DeleteFileW(Utf8ToUtf16(resultFile).c_str());
         json_error_t error;
-        json_t* root = text.empty() ? nullptr : json_loadb(text.c_str(), text.size(), 0, &error);
+        // JSON_ALLOW_NUL: what the emulated program wrote may contain NUL characters
+        json_t* root = text.empty() ? nullptr : json_loadb(text.c_str(), text.size(), JSON_ALLOW_NUL, &error);
         if(!root)
         {
             _plugin_logputs(LOG_PREFIX "the emulator gave no result");

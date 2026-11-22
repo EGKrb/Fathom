@@ -182,7 +182,46 @@ the output and in the result (`gui`, `network`, `processes`, `com`, `shared_obje
   `GetTextExtentPoint32`); buttons, labels and edit fields are drawn with their text, message boxes
   as dialogs with their buttons. `--screenshots DIR` (`emu.screenshots on` in Fathom) saves an image
   of each window (when it is destroyed, or at the end) and of each message box; the text drawn is in
-  the events too.
+  the events too. Bitmaps: memory DCs, `CreateCompatibleBitmap`, `CreateBitmap`, `CreateDIBitmap`,
+  DIB sections (their pixels are the program's memory, read and written there), `BitBlt` /
+  `StretchBlt` with the usual raster operations, `PatBlt`, `StretchDIBits`, `SetDIBitsToDevice`,
+  `Get/SetDIBits`, `TransparentBlt`, `AlphaBlend` (constant alpha and alpha per pixel), `LoadBitmap` / `LoadImage` (from
+  the resources or a file), `GetObject`, `GetPixel`. Regions: rectangles, ellipses, rounded
+  rectangles, polygons, `CombineRgn`, `OffsetRgn`, `GetRgnBox`, `PtInRegion`, `Fill` / `Paint` /
+  `Frame` / `InvertRgn`, clipping (`SelectClipRgn`, `ExtSelectClipRgn`, `IntersectClipRect`,
+  `ExcludeClipRect`), `SetWindowRgn` (the window's shape in its image). Paths: `BeginPath` ...
+  `EndPath` around lines, Béziers, arcs and shapes, `StrokePath`, `FillPath`, `StrokeAndFillPath`
+  (`SetPolyFillMode`), `SelectClipPath`, `PathToRegion`. Shapes: `Polygon`, `Polyline`, `PolyBezier`,
+  `RoundRect`, `Arc`, `Pie`, `Chord`; `SaveDC` / `RestoreDC`.
+- **GDI+, OpenGL, Direct3D** (with numpy): `gdiplus.dll`, `opengl32.dll`, `d3d9.dll`, `d3d11.dll`
+  and `dxgi.dll` need the kernel side of GDI or a graphics driver, so their functions are
+  implemented in Python and draw into the windows' images. GDI+ (`gdiplus_emu.py`, its flat API):
+  graphics on DCs, windows and images, ARGB colors with their alpha, transforms, clip, solid and
+  linear gradient brushes, pens, shapes, Béziers, paths, text, bitmaps (`LockBits`, `HBITMAP`
+  both ways, files with the encoders), `DrawImage`. OpenGL 1.x (`opengl_emu.py`): `wgl*` contexts,
+  pixel formats, `SwapBuffers`, matrices and `glu` helpers, `glBegin` / `glEnd` with every
+  primitive, vertex arrays, 2D textures, depth test, culling, blending, shading, `glReadPixels`.
+  Direct3D 9 (`d3d_emu.py`): the fixed-function pipeline (FVF and vertex declarations, transforms,
+  viewport, lights, a texture at stage 0, depth, culling, blending), `DrawPrimitive(UP)`,
+  `DrawIndexedPrimitive(UP)`, buffers, surfaces and textures, `Clear`, `ColorFill`,
+  `StretchRect`, `GetRenderTargetData`, `Present`. Direct3D 11 and DXGI: devices, swap chains,
+  buffers, 2D textures and views, input layouts, constant buffers, samplers, the fixed states,
+  `Draw` (indexed, instanced), clears, copies, `UpdateSubresource`, `Map`; the vertex and pixel
+  shaders (DXBC 4.0 to 5.0) run in an interpreter (`dxbc.py`) on all the vertices of a draw and all
+  the pixels of a triangle at once. The triangles are rasterized at the pixel centers
+  (`raster.py`), perspective-correct. The COM objects are vtables of stubs whose methods are Python
+  (`apihooks.ComRuntime`), generated with the parameter types of the SDK's headers
+  (`tools/make_graphics_tables.py` writes `graphics_tables.py`). The functions of these DLLs are
+  hooked only when a module imports them or `GetProcAddress` asks for them, so a program that does
+  not use them runs as fast as before.
+- **Window messages between processes**: the windows of the processes of a run are one set
+  (`FindWindow`, `FindWindowEx` with message-only windows, `GetWindowThreadProcessId`,
+  `RegisterWindowMessage`, `HWND_BROADCAST`). A message posted to a window or a thread of another
+  process goes to that thread's queue; a message sent to it (`SendMessage`, `SendMessageTimeout`)
+  waits until the receiving thread handles it in its `GetMessage` / `PeekMessage`, as natively;
+  `WM_COPYDATA`, `WM_SETTEXT` and `WM_GETTEXT` carry their data from one process to the other. A
+  `GetMessage` that waits for a timer also wakes for a message, and one with nothing to do waits for
+  the other processes before the simulated user closes the windows.
 - **Network** (`network.py`): Winsock (`socket`, `connect`, `send`, `recv`, `WSASend`/`WSARecv`,
   `sendto`/`recvfrom`, `getaddrinfo`, `gethostbyname`, `select`...), WinINet (`InternetOpen`,
   `InternetConnect`, `HttpOpenRequest`, `HttpSendRequest`, `InternetOpenUrl`, `InternetReadFile`,
@@ -202,10 +241,14 @@ the output and in the result (`gui`, `network`, `processes`, `com`, `shared_obje
   parameters, kernelbase, ucrtbase), image path, process and thread ids set, and its main thread
   starts at `RtlUserThreadStart(entry point, PEB)`. A document or a URL given to `ShellExecute` is
   recorded (its program is not started).
-- **Processes that run at the same time** (`processes.py`: the World of the run): the emulated
-  processes run in turn by slices of 20,000 instructions, and when one waits for something another
-  may do (a child's exit, a pipe, an event, a section), the others run until it can go on; their
-  virtual clocks move together and jump to the first timeout only when every process waits. A child
+- **Processes that run at the same time** (`processes.py`: the World of the run): when processes
+  share memory (a section mapped in two of them), their instructions interleave on the emulated
+  processors like those of threads (slices of 40 to 400 instructions drawn from the seed): a race
+  between them on that memory happens as natively, and an interlocked instruction stays atomic (one
+  process runs an instruction at a time). Processes that share no memory run by slices of 20,000
+  instructions (they can only see each other through system calls). When one waits for something
+  another may do (a child's exit, a pipe, an event, a message), the others run until it can go on;
+  their virtual clocks move together and jump to the first timeout only when every process waits. A child
   keeps running after its parent has exited (at most `--child-limit` instructions). Handles marked
   inheritable (`OBJ_INHERIT`, `SetHandleInformation`) are inherited, and the standard handles of
   `STARTUPINFO` (`STARTF_USESTDHANDLES`) become the child's: a pipe to its input or output works as
@@ -278,13 +321,15 @@ unhandled exception filter) run to the exit of the process.
 
 ## Limits
 
-- The processes of a run run in turn (slices of 20,000 instructions), not on separate processors:
-  a race between two processes on shared memory is coarser than natively. Windows messages between
-  processes (`SendMessage` to a window of another process) are not delivered.
+- The emulated processors are those of one machine, run by one host thread: the processes and
+  threads interleave (finely when they share memory), they do not use several host cores.
 - Only the functions listed above are above the system calls: out-of-process COM servers, RPC to
   other processes and services, and the shell beyond `ShellExecute` (shell folders, the namespace)
-  are answered as unavailable; GDI draws what is listed above (no bitmaps, regions or paths); a
-  service started with `StartService` is recorded, its program does not run.
+  are answered as unavailable; GDI, GDI+, OpenGL and Direct3D draw what is listed above (the
+  shaders of Direct3D 9, geometry, tessellation and compute shaders, Direct3D 10 and 12, OpenGL
+  beyond 1.1 and the GDI+ functions not listed are not run, and are named in the summary; no
+  clipping against the near plane); a service started with `StartService` is
+  recorded, its program does not run.
 - What the emulator lacks fails in the program (above): a program that needs it takes another
   path, or stops on its own error.
 - A child of the other architecture needs `emulator_host` (in `hosts\`) and Fathom's `headless.exe`

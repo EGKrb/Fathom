@@ -23,6 +23,7 @@
 # (STARTF_USESTDHANDLES) become the child's: a pipe to its output works as natively.
 
 import os
+import random
 import struct
 import subprocess
 import sys
@@ -138,6 +139,8 @@ class World:
         self.instruction_limit = 50_000_000
         self.host_dumps: Dict[str, str] = {}
         self.ids = [((root.process_id // 4) + 0x100) * 4]
+        self.sections = []                  # the shared sections mapped (ipc.py)
+        self.rng = random.Random(1)         # the slices of processes that share memory
 
     def next_id(self) -> int:
         self.ids[0] += 4
@@ -157,6 +160,18 @@ class World:
     def can_pause(self, dp) -> bool:
         return dp is not self.root
 
+    def fine(self) -> bool:
+        """Processes that run and share memory (a section mapped in two of them): their instructions
+        interleave like those of threads on processors (short slices), so a race between them on
+        that memory happens as natively; otherwise the processes run by slices of SLICE."""
+        if not any(c.state == "running" for c in self.children):
+            return False
+        live = {id(p) for p in self.live()}
+        for section in self.sections:
+            if len({id(p) for p in section.mappers if id(p) in live}) >= 2:
+                return True
+        return False
+
     def _running(self, exclude) -> List[Child]:
         return [c for c in self.children if c.state == "running" and c.dp is not None and c.dp is not exclude
                 and c.dp not in self.active]
@@ -167,15 +182,16 @@ class World:
         if not self.active or dp is not self.active[0]:
             return
         self.since_others += executed
-        if self.since_others >= SLICE and self._running(dp):
+        if (self.since_others >= SLICE or self.fine()) and self._running(dp):
             self.since_others = 0
             self.step_others(dp)
 
     def step_others(self, me) -> bool:
         """A slice for each other running process; True when one of them ran."""
         ran = False
+        fine = self.fine()
         for child in self._running(me):
-            if self.run_child(child, SLICE):
+            if self.run_child(child, self.rng.randint(40, 400) if fine else SLICE):
                 ran = True
         return ran
 
@@ -254,6 +270,9 @@ class World:
         child.parent_dp.processes._record("child_exited", pid=child.pid, exit_code=child.exit_code)
         if child.dp is not None:
             close_all_handles(child.dp)
+            gui = getattr(child.dp, "gui", None)
+            if gui is not None:
+                gui.process_exited()
         self.signal_all()
 
     def finish(self):

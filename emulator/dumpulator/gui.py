@@ -11,13 +11,20 @@
 # (DrawText, TextOut, ExtTextOut) and sets as window titles is recorded. What the windows show is
 # drawn into images (gui_draw.py): ShowWindow / UpdateWindow / InvalidateRect bring WM_PAINT, and
 # the functions of gdi32 draw on the window's canvas; PNG images are saved (--screenshots).
+#
+# The windows of the processes of a run are one set (FindWindow, FindWindowEx with message-only
+# windows, GetWindowThreadProcessId, RegisterWindowMessage): a message posted to a window or a thread
+# of another process goes to that thread's queue, a message sent to it (SendMessage) waits until the
+# receiving thread handles it in its GetMessage / PeekMessage, as natively; WM_COPYDATA, WM_SETTEXT and
+# WM_GETTEXT carry their data between the processes. A GetMessage with nothing to do waits for the
+# other processes before the simulated user closes the windows.
 
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from .apihooks import Invoke, read_string, read_wstring, to_signed
-from .gui_draw import Drawing, GdiObject, SYSTEM_COLORS
+from .gui_draw import Drawing, GdiObject, SYSTEM_COLORS, STOCK_BASE
 
 WM_CREATE, WM_DESTROY, WM_CLOSE, WM_QUIT, WM_NCCREATE, WM_NCDESTROY = 0x1, 0x2, 0x10, 0x12, 0x81, 0x82
 WM_TIMER, WM_INITDIALOG, WM_COMMAND, WM_PAINT = 0x113, 0x110, 0x111, 0xF
@@ -52,6 +59,7 @@ class Window:
     alive: bool = True
     dialog: bool = False
     dialog_result: Optional[int] = None
+    gui: object = field(default=None, repr=False, compare=False)   # the Gui of its process
 
 
 @dataclass
@@ -68,8 +76,11 @@ class Gui:
     def __init__(self, dp):
         self.dp = dp
         self.classes: Dict[str, WindowClass] = {}
-        self.windows: Dict[int, Window] = {}
+        self._windows: Dict[int, Window] = {}
         self.queues: Dict[int, deque] = {}
+        self.sent: Dict[int, deque] = {}            # thread -> messages sent by other processes
+        self.queue_events: Dict[int, tuple] = {}    # thread -> (EventObject, handle): a message came
+        self.idle_waited: Dict[int, bool] = {}
         self.quit: Dict[int, int] = {}
         self.timers: List[Timer] = []
         self.closed: set = set()          # threads whose windows the simulated user closed
@@ -88,9 +99,63 @@ class Gui:
     def _now(self) -> int:
         return self.scheduler.interrupt_time
 
+    @property
+    def world(self):
+        return getattr(self.dp, "world", None)
+
+    @property
+    def windows(self) -> Dict[int, Window]:
+        """The windows of every process of the run."""
+        world = self.world
+        if world is None:
+            return self._windows
+        if getattr(world, "windows", None) is None:
+            world.windows = {}
+        if self._windows:
+            world.windows.update(self._windows)
+            self._windows = {}
+        return world.windows
+
     def _handle(self) -> int:
+        world = self.world
+        if world is not None:
+            world.next_gui_handle = getattr(world, "next_gui_handle", 0x10020) + 4
+            return world.next_gui_handle
         self.next_handle += 4
         return self.next_handle
+
+    def _others_alive(self) -> bool:
+        world = self.world
+        return world is not None and any(p is not self.dp for p in world.live())
+
+    def _queue_event(self, thread: int):
+        """(EventObject, handle in this process) signaled when a message comes for the thread."""
+        if thread not in self.queue_events:
+            from .handles import EventObject
+            from .ntenums import EVENT_TYPE
+            event = EventObject(EVENT_TYPE.SynchronizationEvent, False)
+            self.queue_events[thread] = (event, self.dp.handles.new(event))
+        return self.queue_events[thread]
+
+    def _wake(self, thread: int):
+        event, _ = self._queue_event(thread)
+        event.signalled = True
+        world = self.world
+        if world is not None:
+            world.signal_all()
+        else:
+            self.scheduler.signal()
+
+    def _post(self, thread: int, message: tuple):
+        self._queue(thread).append(message)
+        self._wake(thread)
+
+    def _gui_of_thread(self, thread: int):
+        world = self.world
+        for process in (world.live() if world is not None else [self.dp]):
+            if thread in process.scheduler.threads:
+                return getattr(process, "gui", None)
+        return None
 
     def _record(self, kind: str, **values):
         values["kind"] = kind
@@ -189,6 +254,7 @@ class Gui:
             width, height = 640, 480
         window = Window(hwnd, class_name, cls.wndproc if cls else 0, title, style & 0xFFFFFFFF, exstyle & 0xFFFFFFFF,
                         parent, dp.thread_id, cls.wide if cls else wide, menu, (max(x, 0), max(y, 0), max(x, 0) + width, max(y, 0) + height))
+        window.gui = self
         self.windows[hwnd] = window
         self._record("create_window", hwnd=hex(hwnd), class_name=class_name, title=title)
         if not window.wndproc:
@@ -219,6 +285,10 @@ class Gui:
     def destroy_window(self, dp, hwnd):
         window = self.windows.get(hwnd)
         if window is None or not window.alive:
+            return 0
+        if window.gui is not None and window.gui is not self:
+            from .apihooks import set_last_error
+            set_last_error(dp, 5)  # ERROR_ACCESS_DENIED: a window of another process
             return 0
         self.drawing.save_window(window)
         window.alive = False
@@ -309,33 +379,199 @@ class Gui:
             dp.write(buffer, data)
         return len(text)
 
-    def find_window(self, dp, class_ptr, title_ptr, wide):
+    def find_window(self, dp, class_ptr, title_ptr, wide, parent=0, after=0, extended=False):
+        """FindWindow: the top-level windows of every process; FindWindowEx: the children of parent
+        (0: the top-level windows, HWND_MESSAGE: the message-only windows), after `after`."""
         class_name = self._class_name(class_ptr, wide).lower() if class_ptr else None
         title = read_string(dp, title_ptr, wide) if title_ptr else None
-        for window in self.windows.values():
+        message_only = (parent & 0xFFFFFFFF) == 0xFFFFFFFD
+        started = not after
+        for window in sorted(self.windows.values(), key=lambda w: w.hwnd):
+            if not started:
+                started = window.hwnd == after
+                continue
+            is_message = (window.parent & 0xFFFFFFFF) == 0xFFFFFFFD
+            if message_only:
+                if not is_message:
+                    continue
+            elif extended and parent:
+                if window.parent != parent:
+                    continue
+            elif window.parent and not is_message or (is_message and not extended):
+                continue
+            elif is_message:
+                continue
             if window.alive and (class_name is None or window.class_name.lower() == class_name) and (title is None or window.title == title):
                 return window.hwnd
         return 0
 
+    def window_thread_process(self, dp, hwnd, pid_ptr):
+        window = self.windows.get(hwnd)
+        if window is None:
+            return 0
+        if pid_ptr:
+            owner = window.gui.dp if window.gui is not None else dp
+            dp.write_ulong(pid_ptr, owner.process_id)
+        return window.thread
+
+    def register_window_message(self, dp, name_ptr, wide):
+        name = (read_string(dp, name_ptr, wide) or "").lower()
+        world = self.world
+        table = getattr(world, "window_messages", None) if world is not None else getattr(self, "_window_messages", None)
+        if table is None:
+            table = {}
+            if world is not None:
+                world.window_messages = table
+            else:
+                self._window_messages = table
+        if name not in table:
+            table[name] = 0xC000 + len(table) + 0x100
+        return table[name]
+
     # ------------------------------------------------------------------ messages
     def post_message(self, dp, hwnd, message, wparam, lparam):
+        if (hwnd & 0xFFFFFFFF) == 0xFFFF:  # HWND_BROADCAST: every top-level window of the run
+            for window in list(self.windows.values()):
+                if window.alive and not window.parent:
+                    (window.gui or self)._post(window.thread, (window.hwnd, message, wparam, lparam))
+            return 1
         window = self.windows.get(hwnd)
+        if hwnd and (window is None or not window.alive):
+            from .apihooks import set_last_error
+            set_last_error(dp, 1400)  # ERROR_INVALID_WINDOW_HANDLE
+            return 0
+        owner = window.gui if window is not None and window.gui is not None else self
         thread = window.thread if window else dp.thread_id
-        self._queue(thread).append((hwnd, message, wparam, lparam))
-        self.scheduler.signal()
+        if owner is not self:
+            self._record("post_message_to_process", hwnd=hex(hwnd), message=hex(message), pid=owner.dp.process_id)
+        owner._post(thread, (hwnd, message, wparam, lparam))
         return 1
 
     def post_thread_message(self, dp, thread, message, wparam, lparam):
-        self._queue(thread).append((0, message, wparam, lparam))
+        owner = self._gui_of_thread(thread) or self
+        owner._post(thread, (0, message, wparam, lparam))
         return 1
 
-    def send_message(self, dp, hwnd, message, wparam, lparam):
+    def send_message(self, dp, hwnd, message, wparam, lparam, wide=True):
+        if (hwnd & 0xFFFFFFFF) == 0xFFFF:  # HWND_BROADCAST: posted to the others (a send would wait for all)
+            self.post_message(dp, hwnd, message, wparam, lparam)
+            return 0
         window = self.windows.get(hwnd)
         if window is None or not window.alive:
             return 0
+        if window.gui is not None and window.gui is not self:
+            return self._send_to_process(dp, window, message, wparam, lparam, wide)
         if not window.wndproc:
             return self.def_window_proc(dp, hwnd, message, wparam, lparam)
         return self._wndproc_call(window, message, wparam, lparam)
+
+    def send_notify(self, dp, hwnd, message, wparam, lparam):
+        window = self.windows.get(hwnd)
+        if window is not None and window.gui is not None and window.gui is not self:
+            return self.post_message(dp, hwnd, message, wparam, lparam)
+        return self.send_message(dp, hwnd, message, wparam, lparam)
+
+    def send_message_timeout(self, dp, hwnd, message, wparam, lparam, flags, timeout, result_ptr, wide):
+        def done(value):
+            if result_ptr:
+                dp.write_ptr(result_ptr, value & dp.addr_mask)
+            return 1
+        result = self.send_message(dp, hwnd, message, wparam, lparam, wide)
+        if isinstance(result, Invoke):
+            original = result.then
+
+            def then(value):
+                out = original(value) if original is not None else value
+                return done(out) if not isinstance(out, Invoke) else out
+            result.then = then
+            return result
+        return done(result)
+
+    # ------------------------------------------------------------------ messages between processes
+    def _marshal(self, receiver, window, message, wparam, lparam, wide):
+        """The lparam of a message for another process (its data copied there), and a function that
+        copies an answer back (WM_GETTEXT)."""
+        dp, rdp = self.dp, receiver.dp
+        if message == 0x4A and lparam:  # WM_COPYDATA: COPYDATASTRUCT {dwData, cbData, lpData}
+            if dp._x64:
+                data_value, size, pointer = struct.unpack("<QI4xQ", bytes(dp.read(lparam, 24)))
+            else:
+                data_value, size, pointer = struct.unpack("<III", bytes(dp.read(lparam, 12)))
+            data = bytes(dp.read(pointer, size)) if size and pointer else b""
+            copy = rdp.allocate(max(1, len(data)))
+            if data:
+                rdp.write(copy, data)
+            if rdp._x64:
+                block = struct.pack("<QI4xQ", data_value, len(data), copy if data else 0)
+            else:
+                block = struct.pack("<III", data_value & 0xFFFFFFFF, len(data), copy if data else 0)
+            target = rdp.allocate(len(block))
+            rdp.write(target, block)
+            self._record("copy_data", pid=rdp.process_id, size=len(data), data=data[:256].hex())
+            return target, None
+        if message == 0xC and lparam:  # WM_SETTEXT
+            text = read_string(dp, lparam, wide) or ""
+            from .apihooks import write_string
+            return write_string(rdp, text, window.wide), None
+        if message == 0xD and lparam and wparam:  # WM_GETTEXT: a buffer there, copied back here
+            size = (wparam & 0xFFFF) * (2 if window.wide else 1)
+            buffer = rdp.allocate(size + 2)
+
+            def back():
+                text = read_string(rdp, buffer, window.wide) or ""
+                text = text[:max(0, (wparam & 0xFFFF) - 1)]
+                data = text.encode("utf-16-le") + b"\0\0" if wide else text.encode("mbcs", "replace") + b"\0"
+                dp.write(lparam, data)
+            return buffer, back
+        return lparam, None
+
+    def _send_to_process(self, dp, window, message, wparam, lparam, wide):
+        """SendMessage to a window of another process: the sender waits until the receiving thread
+        has handled it (in its GetMessage / PeekMessage), then gets its result."""
+        from .handles import EventObject
+        from .ntenums import EVENT_TYPE
+        receiver = window.gui
+        remote_lparam, copy_back = self._marshal(receiver, window, message, wparam, lparam, wide)
+        event = EventObject(EVENT_TYPE.NotificationEvent, False)
+        handle = dp.handles.new(event)
+        reply = {"event": event, "value": 0}
+        receiver.sent.setdefault(window.thread, deque()).append((window.hwnd, message, wparam, remote_lparam, reply))
+        receiver._wake(window.thread)
+        self._record("send_message_to_process", hwnd=hex(window.hwnd), message=hex(message), pid=receiver.dp.process_id)
+        wait = dp.modules.resolve_export("kernelbase.dll", "WaitForSingleObject").address
+
+        def answered(_):
+            dp.handles.close(handle)
+            if copy_back is not None:
+                copy_back()
+            return reply["value"]
+        return Invoke(wait, [handle, 0xFFFFFFFF], answered)
+
+    def _handle_sent(self, thread: int, then):
+        """A message another process sent to this thread: its window procedure, then the answer."""
+        hwnd, message, wparam, lparam, reply = self.sent[thread].popleft()
+
+        def answer(value):
+            reply["value"] = value
+            reply["event"].signalled = True
+            world = self.world
+            if world is not None:
+                world.signal_all()
+            return then()
+        window = self.windows.get(hwnd)
+        if window is None or not window.alive or not window.wndproc:
+            return answer(self.def_window_proc(self.dp, hwnd, message, wparam, lparam) if window else 0)
+        return self._wndproc_call(window, message, wparam, lparam, answer)
+
+    def process_exited(self):
+        """The process of this Gui ended: its windows are gone, the senders waiting for them get 0."""
+        for window in list(self.windows.values()):
+            if window.gui is self:
+                window.alive = False
+        for queue in self.sent.values():
+            while queue:
+                _, _, _, _, reply = queue.popleft()
+                reply["event"].signalled = True
 
     def post_quit_message(self, dp, code):
         self.quit[dp.thread_id] = code & 0xFFFFFFFF
@@ -362,6 +598,8 @@ class Gui:
             return min(t.due for t in mine) - now
         if not idle_allowed:
             return None
+        if self._others_alive() and not self.idle_waited.get(thread):
+            return "wait"  # another process may post or send something: wait for it a while
         # nothing will come: the simulated user closes the thread's windows, then ends the session
         windows = [w for w in self.windows.values() if w.alive and w.thread == thread and not w.parent]
         if windows and thread not in self.closed:
@@ -374,20 +612,40 @@ class Gui:
         return (0, WM_QUIT, 0, 0)
 
     def get_message(self, dp, msg, hwnd, first, last, wide):
-        found = self._next_message(dp.thread_id, True, True)
+        thread = dp.thread_id
+        if self.sent.get(thread):
+            return self._handle_sent(thread, lambda: self.get_message(dp, msg, hwnd, first, last, wide))
+        found = self._next_message(thread, True, True)
+        if found == "wait":
+            # nothing yet: wait up to 2 s (virtual) for a message of another process
+            event, handle = self._queue_event(thread)
+            wait = dp.modules.resolve_export("kernelbase.dll", "WaitForSingleObject").address
+
+            def waited(status):
+                if (status & 0xFFFFFFFF) == 0x102:  # WAIT_TIMEOUT: still nothing
+                    self.idle_waited[thread] = True
+                return self.get_message(dp, msg, hwnd, first, last, wide)
+            return Invoke(wait, [handle, 2000], waited)
+        self.idle_waited[thread] = False
         if isinstance(found, int):
-            # wait for the next timer: the program sleeps (the other threads run meanwhile)
-            sleep = dp.modules.resolve_export("kernel32.dll", "Sleep").address
+            # wait for the next timer, or for a message posted meanwhile (by another thread or process):
+            # the program waits on the queue's event, the other threads run meanwhile
+            _, handle_event = self._queue_event(dp.thread_id)
+            wait = dp.modules.resolve_export("kernelbase.dll", "WaitForSingleObject").address
             milliseconds = max(1, found // 10_000)
-            return Invoke(sleep, [milliseconds], lambda _: self.get_message(dp, msg, hwnd, first, last, wide))
+            return Invoke(wait, [handle_event, milliseconds], lambda _: self.get_message(dp, msg, hwnd, first, last, wide))
         handle, message, wparam, lparam = found
         self._write_msg(msg, handle, message, wparam, lparam)
         return 0 if message == WM_QUIT else 1
 
     def peek_message(self, dp, msg, hwnd, first, last, flags, wide):
         thread = dp.thread_id
+        if self.sent.get(thread):
+            return self._handle_sent(thread, lambda: self.peek_message(dp, msg, hwnd, first, last, flags, wide))
         remove = bool(flags & 1)
         found = self._next_message(thread, remove, self.idle_peeks.get(thread, 0) > 200)
+        if found == "wait":
+            found = None
         if found is None or isinstance(found, int):
             self.idle_peeks[thread] = self.idle_peeks.get(thread, 0) + 1
             return 0
@@ -425,6 +683,7 @@ class Gui:
     def dialog_box(self, dp, instance, template, parent, dlgproc, param, wide):
         hwnd = self._handle()
         window = Window(hwnd, "#32770", dlgproc, "", 0, 0, parent, dp.thread_id, wide, dialog=True)
+        window.gui = self
         self.windows[hwnd] = window
         self._record("dialog_box", hwnd=hex(hwnd), template=hex(template))
         if not dlgproc:
@@ -505,7 +764,7 @@ class Gui:
         if dc is not None:
             if point:
                 dp.write(point, struct.pack("<ii", *dc.position))
-            dc.position = (to_signed(x), to_signed(y))
+            self.drawing.move_to(hdc, to_signed(x), to_signed(y))
         return 1
 
     def save_screenshots(self):
@@ -536,7 +795,12 @@ def install(dp):
         hooks.register("user32.dll", "DispatchMessage" + suffix, 1, lambda dp, m, w=w: gui.dispatch_message(dp, m, w))
         hooks.register("user32.dll", "PostMessage" + suffix, 4, lambda dp, *a: gui.post_message(dp, *a))
         hooks.register("user32.dll", "PostThreadMessage" + suffix, 4, lambda dp, *a: gui.post_thread_message(dp, *a))
-        hooks.register("user32.dll", "SendMessage" + suffix, 4, lambda dp, *a: gui.send_message(dp, *a))
+        hooks.register("user32.dll", "SendMessage" + suffix, 4, lambda dp, *a, w=w: gui.send_message(dp, *a, w))
+        hooks.register("user32.dll", "SendNotifyMessage" + suffix, 4, lambda dp, *a: gui.send_notify(dp, *a))
+        hooks.register("user32.dll", "SendMessageTimeout" + suffix, 7, lambda dp, *a, w=w: gui.send_message_timeout(dp, *a, w))
+        hooks.register("user32.dll", "FindWindowEx" + suffix, 4,
+                       lambda dp, p, a, c, t, w=w: gui.find_window(dp, c, t, w, p, a, True))
+        hooks.register("user32.dll", "RegisterWindowMessage" + suffix, 1, lambda dp, n, w=w: gui.register_window_message(dp, n, w))
         hooks.register("user32.dll", "SetWindowText" + suffix, 2, lambda dp, h, t, w=w: gui.set_window_text(dp, h, t, w))
         hooks.register("user32.dll", "GetWindowText" + suffix, 3, lambda dp, h, b, n, w=w: gui.get_window_text(dp, h, b, n, w))
         hooks.register("user32.dll", "FindWindow" + suffix, 2, lambda dp, c, t, w=w: gui.find_window(dp, c, t, w))
@@ -548,12 +812,15 @@ def install(dp):
         hooks.register("gdi32.dll", "ExtTextOut" + suffix, 8, lambda dp, *a, w=w: gui.ext_text_out(dp, *a, w))
         hooks.register("user32.dll", "LoadIcon" + suffix, 2, lambda dp, *a: gui._handle())
         hooks.register("user32.dll", "LoadCursor" + suffix, 2, lambda dp, *a: gui._handle())
-        hooks.register("user32.dll", "LoadImage" + suffix, 6, lambda dp, *a: gui._handle())
+        # LoadImage: a bitmap (IMAGE_BITMAP, from the resources or a file with LR_LOADFROMFILE) is drawn
+        hooks.register("user32.dll", "LoadImage" + suffix, 6, lambda dp, inst, name, kind, cx, cy, flags, w=w: (
+            gui.drawing.load_bitmap(dp, inst, name, bool(flags & 0x10), w) if kind == 0 else gui._handle()))
         for name in (("GetWindowLongPtr", "GetWindowLong") if dp._x64 else ("GetWindowLong",)):
             hooks.register("user32.dll", name + suffix, 2, lambda dp, h, i: gui.window_long(dp, h, i))
         for name in (("SetWindowLongPtr", "SetWindowLong") if dp._x64 else ("SetWindowLong",)):
             hooks.register("user32.dll", name + suffix, 3, lambda dp, h, i, v: gui.window_long(dp, h, i, v))
     hooks.register("user32.dll", "DestroyWindow", 1, lambda dp, h: gui.destroy_window(dp, h))
+    hooks.register("user32.dll", "GetWindowThreadProcessId", 2, lambda dp, h, p: gui.window_thread_process(dp, h, p))
     hooks.register("user32.dll", "ShowWindow", 2, lambda dp, h, c: gui.show_window(dp, h, c))
     hooks.register("user32.dll", "UpdateWindow", 1, lambda dp, h: gui.update_window(dp, h))
     hooks.register("user32.dll", "InvalidateRect", 3, lambda dp, *a: gui.invalidate(dp, *a))
@@ -563,7 +830,7 @@ def install(dp):
     hooks.register("gdi32.dll", "SetBkMode", 2, lambda dp, h, m: gui.dc_value(h, "transparent", m == 1))
     hooks.register("gdi32.dll", "CreateSolidBrush", 1, lambda dp, c: draw.new_object(GdiObject("brush", c & 0xFFFFFF)))
     hooks.register("gdi32.dll", "CreatePen", 3, lambda dp, s, w, c: draw.new_object(GdiObject("pen", None if s == 5 else c & 0xFFFFFF, max(1, w))))
-    hooks.register("gdi32.dll", "GetStockObject", 1, lambda dp, i: i if i in (0, 1, 2, 3, 4, 5, 6, 7, 8, 18, 19) else draw.new_object(GdiObject("font")))
+    hooks.register("gdi32.dll", "GetStockObject", 1, lambda dp, i: STOCK_BASE + i if i in (0, 1, 2, 3, 4, 5, 6, 7, 8, 18, 19) else draw.new_object(GdiObject("font")))
     hooks.register("gdi32.dll", "SelectObject", 2, lambda dp, h, o: draw.select(h, o))
     hooks.register("gdi32.dll", "DeleteObject", 1, lambda dp, o: 1)
     hooks.register("gdi32.dll", "Rectangle", 5, lambda dp, h, l, t, r, b: (draw.rectangle(h, tuple(to_signed(v) for v in (l, t, r, b))), 1)[1])
@@ -604,4 +871,6 @@ def install(dp):
     hooks.register("user32.dll", "GetKeyState", 1, lambda dp, k: 0)
     metrics = {0: 1920, 1: 1080, 4: 23, 5: 1, 6: 1, 16: 1920, 17: 1040, 32: 8, 33: 8, 43: 3, 80: 1}
     hooks.register("user32.dll", "GetSystemMetrics", 1, lambda dp, i: metrics.get(to_signed(i), 0))
+    from .gui_draw import register as _register_drawing
+    _register_drawing(hooks, gui)
     return gui

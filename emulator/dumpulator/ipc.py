@@ -257,6 +257,7 @@ class SharedSection(AbstractObject):
         self.path = path
         self.memory = ctypes.create_string_buffer((size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1) or PAGE_SIZE)
         self.address = ctypes.addressof(self.memory)
+        self.mappers = []  # the emulators that map a view of it
 
     def __str__(self):
         return f"Section({self.name or self.path or hex(self.size)})"
@@ -345,6 +346,11 @@ def map_view(target: Dumpulator, section: SharedSection, base: int, offset: int,
         target.memory.commit(base, size, protection)
     finally:
         target._pages.fathom_shared = None
+    if target not in section.mappers:
+        section.mappers.append(target)
+    world = getattr(target, "world", None)
+    if world is not None and section not in world.sections:
+        world.sections.append(section)
     return base
 
 

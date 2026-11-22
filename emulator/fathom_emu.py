@@ -513,6 +513,8 @@ def configure(dp, cpus=None, seed=None, network=None, http_body=None, child_limi
         scheduler.cpus = max(1, int(cpus))
     if seed is not None:
         scheduler.rng = random.Random(int(seed))
+        if getattr(dp, "world", None) is not None:
+            dp.world.rng = random.Random(int(seed) + 1)
     net = getattr(dp, "network", None)
     if net is not None:
         if network:
@@ -845,8 +847,14 @@ def main(argv=None) -> int:
         result = dict(ok=False, error=f"{type(e).__name__}: {e}")
     finally:
         if args.result:
+            try:
+                # serialized first: a value json cannot write becomes text instead of a cut file
+                text = json.dumps(result, indent=1, default=str)
+            except Exception as e:
+                print(f"the result could not be written as JSON: {type(e).__name__}: {e}")
+                text = json.dumps(dict(ok=False, error=f"result not serializable: {e}"))
             with open(args.result, "w", encoding="utf-8") as f:
-                json.dump(result, f, indent=1)
+                f.write(text)
     sys.stdout.flush()
     return code
 

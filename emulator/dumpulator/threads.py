@@ -197,11 +197,17 @@ class Scheduler:
 
     def slice_length(self) -> int:
         """The instructions to run before the next switch."""
-        if len(self.on_cpu) > 1:
-            return self.rng.randint(*self.SLICE)
-        if self.ready:
-            return max(1, self.current.quantum_left)
-        return self.QUANTUM
+        world = getattr(self.dp, "world", None)
+        if len(self.on_cpu) > 1 or (world is not None and world.fine()):
+            # threads on several processors, or processes that share memory: short slices
+            length = self.rng.randint(*self.SLICE)
+        elif self.ready:
+            length = max(1, self.current.quantum_left)
+        else:
+            length = self.QUANTUM
+        if self.budget is not None:
+            length = min(length, max(1, self.budget))
+        return length
 
     def find(self, tid: int) -> Optional[EmulatedThread]:
         return self.threads.get(tid)

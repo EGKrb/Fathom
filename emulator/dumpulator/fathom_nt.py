@@ -780,6 +780,7 @@ def console_output(dp: Dumpulator) -> list:
 
 
 def _write_console_text(dp: Dumpulator, text: str):
+    text = text.replace("\0", "")  # a console shows nothing for NUL characters
     console_output(dp).append(text)
     import sys
     sys.stdout.write(text)
