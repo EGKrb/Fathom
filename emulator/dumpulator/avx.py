@@ -7,6 +7,10 @@
 # emulated here when unicorn reports them as invalid: the integer and logical forms those routines
 # use, on 128-bit (xmm) and 256-bit (ymm) registers.
 
+import re
+import struct
+from fractions import Fraction
+
 from capstone import CS_OP_REG
 from capstone import x86_const as _x86
 
@@ -91,6 +95,103 @@ _BROADCAST = {
     INS.VBROADCASTSS: 32,
     INS.VBROADCASTSD: 64,
 }
+
+
+# the fused multiply-adds (FMA3): vf[n]m{add,sub}{132,213,231}{ps,pd,ss,sd}
+_FMA = re.compile(r"v(fn?m)(add|sub)(132|213|231)(ps|pd|ss|sd)$")
+
+
+_FORMATS = {32: (24, 8, 127), 64: (53, 11, 1023)}  # width: (precision, exponent bits, bias)
+
+
+def _float_parts(bits: int, width: int):
+    """(kind, sign, value) of an IEEE float: kind "nan", "inf" or "num" (value a Fraction)."""
+    precision, exponent_bits, bias = _FORMATS[width]
+    fraction_bits = precision - 1
+    sign = bits >> (width - 1) & 1
+    exponent = bits >> fraction_bits & ((1 << exponent_bits) - 1)
+    fraction = bits & ((1 << fraction_bits) - 1)
+    if exponent == (1 << exponent_bits) - 1:
+        return ("nan" if fraction else "inf"), sign, None
+    if exponent == 0:
+        value = Fraction(fraction, 1 << (fraction_bits + bias - 1))
+    else:
+        value = Fraction(fraction | (1 << fraction_bits)) * Fraction(2) ** (exponent - bias - fraction_bits)
+    return "num", sign, value
+
+
+def _round_float(sign: int, value: Fraction, width: int) -> int:
+    """The float nearest to (-1)^sign * value (> 0), ties to even, with subnormals and overflow to infinity."""
+    precision, exponent_bits, bias = _FORMATS[width]
+    fraction_bits = precision - 1
+    e_min, e_max = 1 - bias, bias
+    num, den = value.numerator, value.denominator
+    e = num.bit_length() - den.bit_length()
+    # 2^e <= value < 2^(e + 1)
+    if (num << max(0, -e)) < (den << max(0, e)):
+        e -= 1
+    e = max(e, e_min)
+    shift = e - fraction_bits  # the exponent of the last bit kept
+    top, bottom = (num << -shift, den) if shift < 0 else (num, den << shift)
+    n, rest = divmod(top, bottom)
+    if 2 * rest > bottom or (2 * rest == bottom and n & 1):
+        n += 1
+    if n >> precision:  # the rounding carried into a new bit
+        n >>= 1
+        shift += 1
+    sign_bit = sign << (width - 1)
+    if n >> fraction_bits == 0:  # subnormal (or zero)
+        return sign_bit | n
+    exponent = shift + fraction_bits
+    if exponent > e_max:
+        return sign_bit | (((1 << exponent_bits) - 1) << fraction_bits)
+    return sign_bit | ((exponent + bias) << fraction_bits) | (n - (1 << fraction_bits))
+
+
+def _fma_lane(a: int, b: int, c: int, negate: bool, subtract: bool, width: int) -> int:
+    """(-)(a * b) (+/-) c rounded once, as the FMA3 instructions compute it (round to nearest)."""
+    quiet = 1 << ((22 if width == 32 else 51))
+    default_nan = ((1 << (9 if width == 32 else 12)) - 1) << (width - (9 if width == 32 else 12)) | quiet
+    parts = [_float_parts(v, width) for v in (a, b, c)]
+    for value, (kind, _, _) in zip((a, b, c), parts):
+        if kind == "nan":  # the first NaN of a, b, c, quieted
+            return value | quiet
+    (ka, sa, va), (kb, sb, vb), (kc, sc, vc) = parts
+    product_sign = sa ^ sb ^ int(negate)
+    addend_sign = sc ^ int(subtract)
+    if ka == "inf" or kb == "inf":
+        if (ka == "num" and va == 0) or (kb == "num" and vb == 0):
+            return default_nan  # infinity times zero
+        if kc == "inf" and addend_sign != product_sign:
+            return default_nan  # infinity minus infinity
+        return _round_float(product_sign, Fraction(2) ** 2000, width)  # an infinity
+    if kc == "inf":
+        return _round_float(addend_sign, Fraction(2) ** 2000, width)
+    product = va * vb
+    total = (-product if product_sign else product) + (-vc if addend_sign else vc)
+    if total == 0:
+        if product == 0 and vc == 0:
+            # +0 + +0 = +0, -0 + -0 = -0, otherwise +0 (round to nearest)
+            return (product_sign & addend_sign) << (width - 1)
+        return 0
+    return _round_float(1 if total < 0 else 0, abs(total), width)
+
+
+def _fused(match, d: int, s2: int, s3: int, size: int) -> int:
+    negate, subtract = match.group(1) == "fnm", match.group(2) == "sub"
+    order, kind = match.group(3), match.group(4)
+    width = 32 if kind in ("ps", "ss") else 64
+    count = 1 if kind in ("ss", "sd") else size * 8 // width
+    mask = (1 << width) - 1
+    lanes = []
+    for i in range(count):
+        x, y, z = ((v >> (i * width)) & mask for v in (d, s2, s3))
+        a, b, c = {"132": (x, z, y), "213": (y, x, z), "231": (y, z, x)}[order]
+        lanes.append(_fma_lane(a, b, c, negate, subtract, width))
+    out = _join(lanes, width)
+    if kind in ("ss", "sd"):  # the other lanes of the destination stay
+        out |= d & _MASK128 & ~mask
+    return out
 
 
 def emulate_avx(dp, instr, op_read, op_write, cip_next) -> bool:
@@ -226,6 +327,8 @@ def emulate_avx(dp, instr, op_read, op_write, cip_next) -> bool:
             part = (part << (shift * 8)) if iid == INS.VPSLLDQ else (part >> (shift * 8))
             result |= (part & _MASK128) << (lane * 128)
         write_vector(0, result)
+    elif _FMA.match(instr.mnemonic):
+        write_vector(0, _fused(_FMA.match(instr.mnemonic), op_read(0), op_read(1), op_read(2), size(0)))
     elif iid in (INS.VPUNPCKLBW, INS.VPUNPCKHBW):
         count = size(0)
         a = _lanes(op_read(1), 8, count)

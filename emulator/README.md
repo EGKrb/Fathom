@@ -193,27 +193,50 @@ the output and in the result (`gui`, `network`, `processes`, `com`, `shared_obje
   `EndPath` around lines, Béziers, arcs and shapes, `StrokePath`, `FillPath`, `StrokeAndFillPath`
   (`SetPolyFillMode`), `SelectClipPath`, `PathToRegion`. Shapes: `Polygon`, `Polyline`, `PolyBezier`,
   `RoundRect`, `Arc`, `Pie`, `Chord`; `SaveDC` / `RestoreDC`.
-- **GDI+, OpenGL, Direct3D** (with numpy): `gdiplus.dll`, `opengl32.dll`, `d3d9.dll`, `d3d11.dll`
-  and `dxgi.dll` need the kernel side of GDI or a graphics driver, so their functions are
-  implemented in Python and draw into the windows' images. GDI+ (`gdiplus_emu.py`, its flat API):
-  graphics on DCs, windows and images, ARGB colors with their alpha, transforms, clip, solid and
-  linear gradient brushes, pens, shapes, Béziers, paths, text, bitmaps (`LockBits`, `HBITMAP`
-  both ways, files with the encoders), `DrawImage`. OpenGL 1.x (`opengl_emu.py`): `wgl*` contexts,
-  pixel formats, `SwapBuffers`, matrices and `glu` helpers, `glBegin` / `glEnd` with every
-  primitive, vertex arrays, 2D textures, depth test, culling, blending, shading, `glReadPixels`.
-  Direct3D 9 (`d3d_emu.py`): the fixed-function pipeline (FVF and vertex declarations, transforms,
-  viewport, lights, a texture at stage 0, depth, culling, blending), `DrawPrimitive(UP)`,
-  `DrawIndexedPrimitive(UP)`, buffers, surfaces and textures, `Clear`, `ColorFill`,
-  `StretchRect`, `GetRenderTargetData`, `Present`. Direct3D 11 and DXGI: devices, swap chains,
-  buffers, 2D textures and views, input layouts, constant buffers, samplers, the fixed states,
-  `Draw` (indexed, instanced), clears, copies, `UpdateSubresource`, `Map`; the vertex and pixel
-  shaders (DXBC 4.0 to 5.0) run in an interpreter (`dxbc.py`) on all the vertices of a draw and all
-  the pixels of a triangle at once. The triangles are rasterized at the pixel centers
-  (`raster.py`), perspective-correct. The COM objects are vtables of stubs whose methods are Python
-  (`apihooks.ComRuntime`), generated with the parameter types of the SDK's headers
+- **GDI+, OpenGL, Direct3D** (with numpy): `gdiplus.dll`, `opengl32.dll`, `d3d9.dll`, `d3d10.dll`,
+  `d3d11.dll`, `d3d12.dll` and `dxgi.dll` need the kernel side of GDI or a graphics driver, so their
+  functions are implemented in Python and draw into the windows' images (their `DllMain` is not
+  run). GDI+ (`gdiplus_emu.py`, its flat API): graphics on DCs, windows and images, ARGB colors with
+  their alpha, transforms, clip, solid and linear gradient brushes, pens, shapes, Béziers, paths,
+  text, bitmaps (`LockBits`, `HBITMAP` both ways, files with the encoders), `DrawImage`.
+  OpenGL 1.x (`opengl_emu.py`): `wgl*` contexts, pixel formats, `SwapBuffers`, matrices and `glu`
+  helpers, `glBegin` / `glEnd` with every primitive, vertex arrays, 2D textures, depth test,
+  culling, blending, shading, `glReadPixels`. OpenGL 2.0 to 4.x (`gl_emu.py`): the functions and
+  extensions that `wglGetProcAddress` gives (the 2649 of `glext.h` and the 116 of `wglext.h`, with
+  their parameter types; those not implemented are named in the summary), `wglCreateContextAttribsARB`
+  (core and compatibility profiles), buffers (`glMapBufferRange`, uniform buffers in std140),
+  vertex array objects, instancing, 1D / 2D / 3D / cube / array textures with mipmaps and S3TC,
+  samplers, framebuffer objects and renderbuffers, `glBlitFramebuffer`, sRGB, queries and syncs;
+  the GLSL vertex and fragment shaders (1.10 to 4.60, `glsl.py`: preprocessor, parser and an
+  interpreter that runs every vertex of a draw and every fragment of a batch at once).
+  Direct3D 9 (`d3d9_emu.py`): the fixed-function pipeline (FVF and vertex declarations, transforms,
+  viewport, lights, the texture stages, alpha test, depth, culling, blending, wireframe) and the
+  vertex and pixel shaders of shader models 1 to 3 (`d3d9_shader.py`, with their float, int and
+  bool constants), `DrawPrimitive(UP)`, `DrawIndexedPrimitive(UP)`, buffers, surfaces, 2D, cube and
+  volume textures, several render targets, queries, `Clear`, `ColorFill`, `StretchRect`,
+  `GetRenderTargetData`, `Present`. Direct3D 10 (`d3d10_emu.py`), 11 (`d3d11_emu.py`) and DXGI
+  (`dxgi_emu.py`, factories 1 to 6, adapters, outputs, swap chains with the flip model): devices,
+  buffers, 1D / 2D / 3D textures and their views (shader resource, render target, depth stencil,
+  unordered access), input layouts, constant buffers, samplers, the fixed states, `Draw` (indexed,
+  instanced, indirect), `Dispatch`, clears, copies, `UpdateSubresource`, `Map`. Direct3D 12
+  (`d3d12_emu.py`): devices, command queues, allocators and lists (recorded, run at
+  `ExecuteCommandLists`), root signatures (serialized and parsed), descriptor heaps, pipeline
+  states, committed and placed resources at their GPU virtual address, barriers, fences with their
+  events, `CopyTextureRegion` with footprints, `GetCopyableFootprints`. The shaders of Direct3D 10,
+  11 and 12 (DXBC, shader models 4.0 to 5.1) run in an interpreter (`dxbc.py`, pipeline in
+  `d3d_pipeline.py`) at every stage: vertex, hull (its phases) and the tessellator, domain,
+  geometry (emitted strips), pixel (several targets, discard, depth output), compute (thread
+  groups, group shared memory, barriers, atomics, typed, raw and structured UAVs, append /
+  consume counters). Texture formats (`gpu.py`): the DXGI and Direct3D 9 formats, 8, 16 and 32-bit,
+  float and integer, depth, sRGB and BC1 to BC5. The triangles (`raster.py`) are clipped against
+  the near and far planes, then rasterized with numpy at the pixel centers with the top-left rule,
+  perspective-correct, in batches of about a million pixels; the depth test, blending, write masks
+  and multiple targets are merged in order (a mesh of 20000 triangles takes under a second, 30
+  times less than one triangle at a time). The COM objects are vtables of stubs whose methods are
+  Python (`apihooks.ComRuntime`), generated with the parameter types of the SDK's headers
   (`tools/make_graphics_tables.py` writes `graphics_tables.py`). The functions of these DLLs are
-  hooked only when a module imports them or `GetProcAddress` asks for them, so a program that does
-  not use them runs as fast as before.
+  hooked only when a module imports them (by name or by ordinal) or `GetProcAddress` asks for
+  them, so a program that does not use them runs as fast as before.
 - **Window messages between processes**: the windows of the processes of a run are one set
   (`FindWindow`, `FindWindowEx` with message-only windows, `GetWindowThreadProcessId`,
   `RegisterWindowMessage`, `HWND_BROADCAST`). A message posted to a window or a thread of another
@@ -325,10 +348,12 @@ unhandled exception filter) run to the exit of the process.
   threads interleave (finely when they share memory), they do not use several host cores.
 - Only the functions listed above are above the system calls: out-of-process COM servers, RPC to
   other processes and services, and the shell beyond `ShellExecute` (shell folders, the namespace)
-  are answered as unavailable; GDI, GDI+, OpenGL and Direct3D draw what is listed above (the
-  shaders of Direct3D 9, geometry, tessellation and compute shaders, Direct3D 10 and 12, OpenGL
-  beyond 1.1 and the GDI+ functions not listed are not run, and are named in the summary; no
-  clipping against the near plane); a service started with `StartService` is
+  are answered as unavailable; GDI, GDI+, OpenGL and Direct3D draw what is listed above (DXIL
+  shaders of shader model 6, GLSL geometry, tessellation and compute shaders, stream output,
+  deferred contexts, Direct3D 10 effects, Direct3D 12 ray tracing and the GDI+ functions not listed
+  are not run, and are named in the summary; shader derivatives give 0, the tessellation uses one
+  level for a whole patch, BC6H / BC7 textures are not decoded, and the rendering, in Python with
+  numpy, is far slower than a GPU); a service started with `StartService` is
   recorded, its program does not run.
 - What the emulator lacks fails in the program (above): a program that needs it takes another
   path, or stops on its own error.

@@ -411,11 +411,11 @@ class Dumpulator(Architecture):
         _processes.install(self, world)  # world: the processes of the run (a child joins its parent's)
         from . import com as _com
         _com.install(self)
-        # Fathom: GDI+, OpenGL, Direct3D 9 / 11 drawn in Python (no graphics driver in the emulator)
-        from . import gdiplus_emu as _gdiplus, opengl_emu as _opengl, d3d_emu as _d3d
-        _gdiplus.install(self)
-        _opengl.install(self)
-        _d3d.install(self)
+        # Fathom: GDI+, OpenGL, DXGI, Direct3D 9 / 10 / 11 / 12 drawn in Python (no graphics driver in the emulator)
+        from . import gdiplus_emu as _gdiplus, opengl_emu as _opengl, dxgi_emu as _dxgi, d3d9_emu as _d3d9
+        from . import d3d10_emu as _d3d10, d3d11_emu as _d3d11, d3d12_emu as _d3d12
+        for _module in (_gdiplus, _opengl, _dxgi, _d3d9, _d3d10, _d3d11, _d3d12):
+            _module.install(self)
         if not self._quiet:
             print("Memory map:")
             self.print_memory()

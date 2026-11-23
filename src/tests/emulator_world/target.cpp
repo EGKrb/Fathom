@@ -15,6 +15,8 @@ using std::min;
 #include <d3d11.h>
 #include "scene_vs.h" // compiled from scene.hlsl by fxc
 #include "scene_ps.h"
+#include <vector>
+#include <math.h>
 #include <intrin.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1200,6 +1202,8 @@ static int D3D11()
     return failures;
 }
 
+#include "graphics_more.inc"
+
 int wmain(int argc, wchar_t** argv)
 {
     if(argc < 2)
@@ -1244,6 +1248,22 @@ int wmain(int argc, wchar_t** argv)
         return D3D9();
     if(wcscmp(argv[1], L"d3d11") == 0)
         return D3D11();
+    if(wcscmp(argv[1], L"clip") == 0)
+        return GlClip();
+    if(wcscmp(argv[1], L"gl3") == 0)
+        return Gl3();
+    if(wcscmp(argv[1], L"d3d9sh") == 0)
+        return D3D9Shaders();
+    if(wcscmp(argv[1], L"d3d10") == 0)
+        return D3D10();
+    if(wcscmp(argv[1], L"d3d11gs") == 0)
+        return D3D11Stages();
+    if(wcscmp(argv[1], L"d3d11cs") == 0)
+        return D3D11Compute();
+    if(wcscmp(argv[1], L"d3d12") == 0)
+        return D3D12();
+    if(wcscmp(argv[1], L"mesh") == 0)
+        return Mesh();
     if(wcscmp(argv[1], L"race") == 0)
         return Race();
     if(wcscmp(argv[1], L"illegal") == 0)

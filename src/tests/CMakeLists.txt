@@ -200,9 +200,10 @@ endforeach()
 # the emulator's test programs (extracmds/tests/test_emulator.py)
 x64dbg_add_test(
     NAME emulator_world
-    TARGET_LINK_LIBRARIES ws2_32 wininet user32 gdi32 ole32 oleaut32 shell32 advapi32 msimg32 gdiplus opengl32 d3d9 d3d11 dxgi delayimp
+    TARGET_LINK_LIBRARIES ws2_32 wininet user32 gdi32 ole32 oleaut32 shell32 advapi32 msimg32 gdiplus opengl32 d3d9 d3d10 d3d11 d3d12 dxgi delayimp
     # the graphics DLLs are loaded by the modes that draw only (the children of the other modes start faster)
-    TARGET_LINK_OPTIONS /DELAYLOAD:gdiplus.dll /DELAYLOAD:opengl32.dll /DELAYLOAD:d3d9.dll /DELAYLOAD:d3d11.dll
+    TARGET_LINK_OPTIONS /DELAYLOAD:gdiplus.dll /DELAYLOAD:opengl32.dll /DELAYLOAD:d3d9.dll /DELAYLOAD:d3d10.dll
+        /DELAYLOAD:d3d11.dll /DELAYLOAD:d3d12.dll /DELAYLOAD:dxgi.dll
 )
 
 # the host of the emulator's child processes of the other architecture (emulator/hosts in a release)

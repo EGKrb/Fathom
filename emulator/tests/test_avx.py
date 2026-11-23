@@ -1,8 +1,8 @@
-"""Check the AVX / AVX2 instructions dumpulator emulates in Python (dumpulator/avx.py) against the CPU.
+"""Check the AVX / AVX2 / FMA3 instructions dumpulator emulates in Python (dumpulator/avx.py) against the CPU.
 
 Each instruction is encoded (VEX), run natively on random registers, then emulated on the same
 registers; the destination registers, the general register and the flags must match. Needs a 64-bit
-Windows on a CPU with AVX2 (the test is skipped otherwise).
+Windows on a CPU with AVX2 (and FMA3, which comes with it; the test is skipped otherwise).
 
     python emulator/tests/test_avx.py [--rounds 200]
 """
@@ -79,8 +79,41 @@ INSTRUCTIONS = {
     "vpslldq": (1, 1, 0, 0x73, "shift7", (0, 1)),
     "vpsrldq": (1, 1, 0, 0x73, "shift3", (0, 1)),
 }
+# the fused multiply-adds (FMA3): 0F38, 66, W = 0 for single and 1 for double precision
+for _op, _base in (("fmadd", 0x98), ("fmsub", 0x9A), ("fnmadd", 0x9C), ("fnmsub", 0x9E)):
+    for _order, _offset in (("132", 0x00), ("213", 0x10), ("231", 0x20)):
+        for _kind, _w, _scalar in (("ps", 0, 0), ("pd", 1, 0), ("ss", 0, 1), ("sd", 1, 1)):
+            INSTRUCTIONS[f"v{_op}{_order}{_kind}"] = (2, 1, _w, _base + _offset + _scalar, "rvm", (0,) if _scalar else (0, 1))
 
 DST, SRC1, SRC2 = 0, 1, 2  # ymm0 = destination, ymm1, ymm2 = sources
+
+
+def special_floats(rng: random.Random, width: int) -> int:
+    """256 bits of floats of a width, often special: NaNs (quiet, signaling, both signs), infinities,
+    zeros, subnormals, the largest, values that overflow or cancel."""
+    exponent_bits, fraction_bits = (8, 23) if width == 32 else (11, 52)
+    top = (1 << exponent_bits) - 1
+    value = 0
+    for i in range(256 // width):
+        sign = rng.getrandbits(1) << (width - 1)
+        choice = rng.randrange(10)
+        if choice == 0:
+            lane = (top << fraction_bits) | rng.getrandbits(fraction_bits) | 1   # NaN
+        elif choice == 1:
+            lane = top << fraction_bits                                           # infinity
+        elif choice == 2:
+            lane = 0                                                              # zero
+        elif choice == 3:
+            lane = rng.getrandbits(fraction_bits)                                 # subnormal
+        elif choice == 4:
+            lane = ((top - 1) << fraction_bits) | rng.getrandbits(fraction_bits)  # huge
+        elif choice == 5:
+            lane = (rng.randrange(1, 4) << fraction_bits) | rng.getrandbits(fraction_bits)  # tiny
+        else:
+            bias = top >> 1
+            lane = (rng.randrange(bias - 30, bias + 30) << fraction_bits) | rng.getrandbits(fraction_bits)
+        value |= (sign | lane) << (i * width)
+    return value
 
 
 def vex(mmmmm: int, pp: int, w: int, length: int, vvvv: int, opcode: int, reg: int, rm: int) -> bytes:
@@ -238,6 +271,9 @@ def main() -> int:
         for length in lengths:
             for round_ in range(args.rounds):
                 regs = [rng.getrandbits(256) for _ in range(3)]
+                if name.startswith("vf") and round_ % 2 == 0:
+                    width = 32 if name.endswith(("ps", "ss")) else 64
+                    regs = [special_floats(rng, width) for _ in range(3)]
                 if round_ % 4 == 1:  # equal lanes and zeros, for the compares, vptest and the minimum
                     regs[2] = regs[1] if round_ % 8 == 1 else 0
                 if round_ % 4 == 2:

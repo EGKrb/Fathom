@@ -15,7 +15,9 @@ child, a section and named events, a named pipe), a child of the other architect
 an in-process COM object (msxml6) with the service manager and an RPC, files and registry, two
 processes racing on shared memory, window messages between processes (WM_COPYDATA, a registered
 message), bitmaps, regions and paths drawn offscreen, GDI+ shapes, and frames of OpenGL, Direct3D 9
-and Direct3D 11 (shaders run by the emulator, textures). The images of the windows
+and Direct3D 11 (shaders run by the emulator, textures), then triangles clipped by the near plane,
+OpenGL 3.3 with GLSL, Direct3D 9 shaders, Direct3D 10, the geometry, tessellation and compute
+shaders of Direct3D 11, a mesh of 20000 triangles and Direct3D 12. The images of the windows
 (emu.screenshots) are checked pixel by pixel. The debuggee itself must not move.
 
 Needs Python with the emulator's packages (emulator/requirements.txt) on the PATH.
@@ -289,6 +291,46 @@ init tests/emulator_world.exe, d3d11
 run
 emu.run
 testassert $result2 == 0, "d3d11: a scene drawn by vertex and pixel shaders, read through a staging texture"
+stop
+init tests/emulator_world.exe, clip
+run
+emu.run
+testassert $result2 == 0, "clip: OpenGL triangles crossing the near plane, clipped"
+stop
+init tests/emulator_world.exe, gl3
+run
+emu.run
+testassert $result2 == 0, "gl3: an OpenGL 3.3 core context, GLSL shaders, buffers, a vertex array and a framebuffer object"
+stop
+init tests/emulator_world.exe, d3d9sh
+run
+emu.run
+testassert $result2 == 0, "d3d9sh: Direct3D 9 vertex and pixel shaders (vs_2_0, ps_2_0)"
+stop
+init tests/emulator_world.exe, d3d10
+run
+emu.run
+testassert $result2 == 0, "d3d10: a Direct3D 10 scene with shaders, read through a staging texture"
+stop
+init tests/emulator_world.exe, d3d11gs
+run
+emu.run
+testassert $result2 == 0, "d3d11gs: Direct3D 11 geometry shader and tessellation (hull and domain shaders)"
+stop
+init tests/emulator_world.exe, d3d11cs
+run
+emu.run
+testassert $result2 == 0, "d3d11cs: a Direct3D 11 compute shader writing a texture and atomics"
+stop
+init tests/emulator_world.exe, mesh
+run
+emu.run
+testassert $result2 == 0, "mesh: a Direct3D 11 grid of 20000 triangles, drawn in one call"
+stop
+init tests/emulator_world.exe, d3d12
+run
+emu.run
+testassert $result2 == 0, "d3d12: Direct3D 12 command lists, root signature, fence and flip swap chain"
 emu.screenshots off
 stop
 '''
@@ -297,9 +339,9 @@ stop
     print("emulator_threads natively:", native.stdout.strip(), f"(exit code {native.returncode})")
     if native.returncode != 0:
         return 1
-    # the modes of emulator_world that need neither the network nor a window are right natively too
+    # the modes of emulator_world that do not need the network are right natively too
     for mode in ("race", "illegal", "process", "pipe", "shm", "namedpipe", "cross", "shell", "system", "racep", "winmsg", "paint",
-                 "gdiplus", "opengl", "d3d9", "d3d11"):
+                 "gdiplus", "opengl", "d3d9", "d3d11", "clip", "gl3", "d3d9sh", "d3d10", "d3d11gs", "d3d11cs", "mesh", "d3d12"):
         native = subprocess.run([str(bindir / "tests" / "emulator_world.exe"), mode], capture_output=True, text=True, timeout=120)
         print(f"emulator_world {mode} natively:", " / ".join(native.stdout.splitlines()[:3]), f"(exit code {native.returncode})")
         if native.returncode != 0:

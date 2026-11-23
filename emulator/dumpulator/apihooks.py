@@ -43,8 +43,13 @@ class _Frame:
 
 # The DLLs whose functions are hooked only when a module imports them or GetProcAddress asks for them:
 # each hook is a code hook of unicorn, whose translation slows down with their number, and these
-# DLLs have about a thousand functions implemented (gdiplus_emu.py, opengl_emu.py, d3d_emu.py).
-LAZY_MODULES = {"gdiplus.dll", "opengl32.dll", "glu32.dll", "d3d9.dll", "d3d11.dll", "dxgi.dll"}
+# DLLs have thousands of functions implemented (gdiplus_emu.py, opengl_emu.py, gl_emu.py, d3d9_emu.py,
+# dxgi_emu.py, d3d10_emu.py, d3d11_emu.py, d3d12_emu.py).
+LAZY_MODULES = {"gdiplus.dll", "opengl32.dll", "glu32.dll", "d3d9.dll", "d3d10.dll", "d3d10_1.dll", "d3d11.dll",
+                "d3d12.dll", "dxgi.dll"}
+# the DLLs whose DllMain is not run (their API is the emulator's)
+SKIP_DLLMAIN = {"d3d9.dll", "d3d10.dll", "d3d10_1.dll", "d3d10core.dll", "d3d11.dll", "d3d12.dll", "d3d12core.dll",
+                "dxgi.dll", "opengl32.dll", "glu32.dll"}
 
 
 class ApiHooks:
@@ -56,6 +61,7 @@ class ApiHooks:
         self.trampoline = 0
         self.calls: Dict[str, int] = {}                 # name -> number of calls (statistics)
         self.wanted: Optional[Dict[str, set]] = None    # lazy module -> the names imported or asked for
+        self.ordinals: Dict[str, set] = {}              # lazy module -> the ordinals imported (named once mapped)
 
     # ------------------------------------------------------------------ registration
     def register(self, module: str, name: str, argcount: int, handler: Callable):
@@ -69,11 +75,21 @@ class ApiHooks:
         if found is not None:
             self._install(found, hook)
 
+    def _skip_entry(self, module):
+        """The DLLs whose functions the emulator implements: their DllMain returns TRUE at once (their
+        own initialization and teardown would work on state the emulated functions never create)."""
+        name = module.name.lower()
+        if name in SKIP_DLLMAIN and module.entry and module.entry != module.base:
+            self.hook_address(module.entry, f"{name}!DllMain", 3, lambda dp, *args: 1)
+
     def module_mapped(self, module):
         """A module was mapped: install the hooks registered for it (and those it imports)."""
+        self._skip_entry(module)
         if self.wanted is not None:
             self._scan_imports(module)
         name = module.name.lower()
+        for ordinal in sorted(self.ordinals.get(name, ())):
+            self.want_ordinal(name, ordinal)
         for hook in self.hooks.get(name, {}).values():
             if name not in LAZY_MODULES or hook.name in self.wanted.get(name, ()):
                 self._install(module, hook)
@@ -90,12 +106,23 @@ class ApiHooks:
         if found is not None:
             self._install(found, hook)
 
+    def want_ordinal(self, module: str, ordinal: int):
+        """A function of a lazy module imported by ordinal (d3d12!D3D12CreateDevice is ordinal 101 in
+        d3d12.lib): its name comes from the export table once the module is mapped."""
+        module = module.lower()
+        self.ordinals.setdefault(module, set()).add(ordinal)
+        found = self.dp.modules.find(module)
+        export = found.find_export(ordinal) if found is not None else None
+        if export is not None and export.ordinal == ordinal and export.name:
+            self.want(module, export.name)
+
     def _lazy_setup(self):
         if self.wanted is not None:
             return
         self.wanted = {}
         for module in list(self.dp.modules):
             self._scan_imports(module)
+            self._skip_entry(module)
         kernelbase = self.dp.modules.find("kernelbase.dll")
         if kernelbase is not None:
             hook = _Hook("kernelbase.dll", "GetProcAddress", 2, self._get_proc_address)
@@ -105,10 +132,13 @@ class ApiHooks:
     def _get_proc_address(self, dp, handle, name):
         """GetProcAddress of a function of a lazy module: hooked before the original runs."""
         module = self.dp.modules.find(handle & self.dp.addr_mask) if handle else None
-        if module is not None and module.name.lower() in LAZY_MODULES and name > 0xFFFF:
-            text = read_astring(dp, name, 256)
-            if text:
-                self.want(module.name, text)
+        if module is not None and module.name.lower() in LAZY_MODULES:
+            if name <= 0xFFFF:
+                self.want_ordinal(module.name, name)
+            else:
+                text = read_astring(dp, name, 256)
+                if text:
+                    self.want(module.name, text)
         return CALL_ORIGINAL
 
     def _scan_imports(self, module):
@@ -145,7 +175,8 @@ class ApiHooks:
                     if not value:
                         break
                     if value >> (thunk_size * 8 - 1):
-                        continue  # by ordinal
+                        self.want_ordinal(dll, value & 0xFFFF)
+                        continue
                     if value >= 0x80000000:
                         continue  # a bound address, not a name
                     function = read_astring(dp, base + value + 2, 256)
@@ -452,7 +483,10 @@ class ComRuntime:
         handler = getattr(obj.impl, name, None)
         if handler is not None and callable(handler):
             result = handler(*values[1:])
-            return 0 if result is None else result
+            result = 0 if result is None else result
+            if not dp._x64 and name in getattr(obj.impl, "WIDE", ()):
+                dp.regs.edx = (int(result) >> 32) & 0xFFFFFFFF  # a 64-bit result: edx:eax
+            return result
         if name == "AddRef":
             obj.impl.refs += 1
             return obj.impl.refs

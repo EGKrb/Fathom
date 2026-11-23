@@ -6,6 +6,45 @@ branch; this changelog covers Fathom's own additions and branding.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+- Emulator: Direct3D 9 shaders run (vertex and pixel shaders of shader models
+  1 to 3, with their float, int and bool constants), with the texture stages,
+  alpha test, cube and volume textures, several render targets and queries.
+- Emulator: every shader stage of Direct3D 10, 11 and 12 runs (DXBC up to
+  shader model 5.1): hull shaders and the tessellator, domain and geometry
+  shaders, compute shaders (`Dispatch`, thread groups, group shared memory,
+  atomics, typed, raw and structured UAVs, append / consume counters).
+- Emulator: Direct3D 10 (`D3D10CreateDevice(AndSwapChain)(1)`) and Direct3D 12
+  (command queues and lists, root signatures, descriptor heaps, pipeline
+  states, resources at their GPU virtual address, barriers, fences, copies with
+  footprints, flip-model swap chains) draw and compute.
+- Emulator: OpenGL beyond 1.1: the functions and extensions given by
+  `wglGetProcAddress` (from `glext.h` and `wglext.h`), 3.x and 4.x contexts
+  (`wglCreateContextAttribsARB`), GLSL vertex and fragment shaders (1.10 to
+  4.60, in an interpreter), buffers, vertex array objects, framebuffer objects,
+  1D / 3D / cube / array textures, mipmaps, S3TC, samplers, sRGB, syncs.
+- Emulator: texture formats of DXGI and Direct3D 9 (8, 16 and 32-bit, float,
+  integer, depth, sRGB, BC1 to BC5).
+- Emulator: FMA3 instructions (`vfmadd`, `vfmsub`, `vfnmadd`, `vfnmsub`), which
+  Unicorn lacks.
+- `emulator_world` modes `clip`, `gl3`, `d3d9sh`, `d3d10`, `d3d11gs`,
+  `d3d11cs`, `mesh` and `d3d12`, run natively and in the emulator by
+  `extracmds/tests/test_emulator.py`.
+
+### Fixed
+- Emulator: a triangle that crosses the near plane (one vertex behind the
+  camera) is clipped and drawn, in OpenGL and Direct3D.
+- Emulator: the rasterizer draws a batch of triangles at once with numpy (top-left
+  rule, perspective-correct): a mesh of 20000 triangles takes under a second
+  instead of about 25.
+- Emulator: a function of an emulated graphics DLL imported by ordinal
+  (`D3D12CreateDevice` in `d3d12.lib`) is hooked.
+- Emulator: `NtAreMappedFilesTheSame` is implemented, so `LoadLibrary` of a DLL
+  already loaded under another path (`ntdll.dll` during the unloading at exit)
+  finds it.
+
 ## [1.7.0] - 2026-11-22
 
 ### Added

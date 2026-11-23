@@ -94,6 +94,31 @@ def ZwMapViewOfSection(dp: Dumpulator,
                                            SectionOffset, ViewSize, InheritDisposition, AllocationType, Win32Protect)
 
 
+def _module_file(dp: Dumpulator, address: int):
+    module = dp.modules.find(int(address) & dp.addr_mask)
+    if module is None or not module.path:
+        return None
+    path = module.path
+    for prefix in ("\\??\\", "\\\\?\\"):
+        if path.startswith(prefix):
+            path = path[len(prefix):]
+    return os.path.normcase(os.path.normpath(path))
+
+
+@syscall
+def ZwAreMappedFilesTheSame(dp: Dumpulator,
+                            File1MappedAsAnImage: Annotated[PVOID, SAL("_In_")],
+                            File2MappedAsFile: Annotated[PVOID, SAL("_In_")]
+                            ):
+    # The loader maps a DLL it is asked for (LoadLibrary("ntdll.dll")) and asks whether a module already
+    # loaded is the same file: it then uses that module
+    first = _module_file(dp, File1MappedAsAnImage.ptr if hasattr(File1MappedAsAnImage, "ptr") else File1MappedAsAnImage)
+    second = _module_file(dp, File2MappedAsFile.ptr if hasattr(File2MappedAsFile, "ptr") else File2MappedAsFile)
+    if first is None or second is None:
+        return STATUS_INVALID_ADDRESS
+    return STATUS_SUCCESS if first == second else 0xC00000D4  # STATUS_NOT_SAME_DEVICE
+
+
 @syscall
 def ZwOpenThreadToken(dp: Dumpulator,
                       ThreadHandle: Annotated[HANDLE, SAL("_In_")],

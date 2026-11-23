@@ -21,7 +21,7 @@ from typing import Dict, List, Optional
 
 from .apihooks import read_astring
 from .graphics_tables import OPENGL
-from .raster import Framebuffer, numpy, primitives
+from .raster import Blend, Framebuffer, Output, Pipeline, Target, draw, kind_of, numpy, primitives, sample
 
 GL_POINTS, GL_LINES, GL_LINE_LOOP, GL_LINE_STRIP, GL_TRIANGLES, GL_TRIANGLE_STRIP, GL_TRIANGLE_FAN, GL_QUADS, \
     GL_QUAD_STRIP, GL_POLYGON = range(10)
@@ -33,6 +33,10 @@ GL_DEPTH_TEST, GL_CULL_FACE, GL_BLEND = 0x0B71, 0x0B44, 0x0BE2
 GL_CW, GL_CCW, GL_FRONT, GL_BACK, GL_FRONT_AND_BACK = 0x0900, 0x0901, 0x0404, 0x0405, 0x0408
 GL_FLAT = 0x1D00
 GL_TEXTURE_2D = 0x0DE1
+GL_SCISSOR_TEST = 0x0C11
+# glBlendFunc factors -> Direct3D's numbers (raster.Blend)
+BLEND_FACTORS = {0: 1, 1: 2, 0x300: 3, 0x301: 4, 0x302: 5, 0x303: 6, 0x304: 7, 0x305: 8, 0x306: 9, 0x307: 10, 0x308: 11,
+                 0x8001: 14, 0x8002: 15, 0x8003: 14, 0x8004: 15}
 
 
 class Context:
@@ -65,6 +69,13 @@ class Context:
         self.env_mode = 0x2100  # GL_MODULATE
         self.arrays = {}         # GL_VERTEX_ARRAY... -> (size, type, stride, pointer)
         self.client = set()
+        self.blend = [True, 2, 1, 1, 2, 1, 1]   # (unused), src, dst, op, src alpha, dst alpha, op alpha (Direct3D numbers)
+        self.blend_color = (0.0, 0.0, 0.0, 0.0)
+        self.depth_func = 2      # GL_LESS (Direct3D's number)
+        self.depth_mask = True
+        self.color_mask = 0xF
+        self.depth_range = (0.0, 1.0)
+        self.scissor = None
 
     @property
     def matrix(self):
@@ -310,46 +321,87 @@ class OpenGl:
         self.draw(c, KINDS.get(mode, "points"), vertices)
 
     def draw(self, c: Context, kind: str, vertices: list):
+        """Primitives of the fixed pipeline: vertices ((x, y, z, w), color, texture coordinates)."""
+        if not vertices:
+            return
         fb = c.ensure()
-        vx, vy, vw, vh = c.viewport
+        positions = numpy.array([v[0] for v in vertices], dtype=numpy.float64)
+        colors = numpy.array([v[1] for v in vertices], dtype=numpy.float64)
+        uvs = numpy.array([v[2] if len(v) > 2 else (0.0, 0.0) for v in vertices], dtype=numpy.float64)
         transform = c.stacks[GL_PROJECTION][-1] @ c.stacks[GL_MODELVIEW][-1]
-        screen = []
-        for vertex in vertices:
-            (x, y, z, w), color = vertex[0], vertex[1]
-            uv = vertex[2] if len(vertex) > 2 else (0.0, 0.0)
-            clip = transform @ numpy.array([x, y, z, w])
-            if clip[3] <= 1e-9:
-                screen.append(None)
-                continue
-            ndc = clip[:3] / clip[3]
-            sx = vx + (ndc[0] + 1) * vw / 2
-            sy = fb.height - (vy + (ndc[1] + 1) * vh / 2)
-            screen.append((sx, sy, (ndc[2] + 1) / 2, color, uv, 1 / clip[3]))
+        clip = positions @ transform.T
         texture = c.textures.get(c.bound) if GL_TEXTURE_2D in c.enabled else None
         parameters = c.texture_parameters.get(c.bound, {})
         linear = parameters.get(0x2800, 0x2601) == 0x2601  # GL_TEXTURE_MAG_FILTER: GL_LINEAR
-        address = {0x812F: "clamp", 0x2900: "clamp", 0x8370: "mirror"}.get(parameters.get(0x2802, 0x2901), "wrap")
-        cull = 0
-        if GL_CULL_FACE in c.enabled and c.cull != GL_FRONT_AND_BACK:
-            # a front face (counterclockwise in GL with y up) is clockwise on the screen (y down)
-            front_clockwise = c.front == GL_CCW
-            cull_back = c.cull == GL_BACK
-            cull = 1 if front_clockwise == cull_back else 2
-        for indices in primitives(kind, len(screen)):
-            points = [screen[i] for i in indices]
-            if any(p is None for p in points):
-                continue
-            if len(points) == 3:
-                corners = [p[:4] for p in points]
-                if texture is not None and c.env_mode == 0x1E01:  # GL_REPLACE: the texel alone
-                    corners = [p[:3] + ((1.0, 1.0, 1.0, 1.0),) for p in points]
-                fb.triangle(*corners, smooth=not c.flat, depth_test=GL_DEPTH_TEST in c.enabled, blend=GL_BLEND in c.enabled,
-                            cull=cull, uvs=[p[4] for p in points] if texture is not None else None, texture=texture,
-                            linear=linear, address=address, inv_w=[p[5] for p in points])
-            elif len(points) == 2:
-                fb.lines([(p[0], p[1]) for p in points], points[1][3], c.line_width)
-            else:
-                fb.points([(points[0][0], points[0][1])], points[0][3], c.point_size)
+        address = tuple({0x812F: "clamp", 0x2900: "clamp", 0x8370: "mirror", 0x812D: "border"}.get(parameters.get(name, 0x2901), "wrap")
+                        for name in (0x2802, 0x2803))
+        mode = c.env_mode
+
+        def fragment(frags):
+            color = frags.attrs[:, :4]
+            if texture is not None:
+                texel = sample(texture, frags.attrs[:, 4], frags.attrs[:, 5], linear, address)
+                if mode == 0x1E01:      # GL_REPLACE
+                    color = texel
+                elif mode == 0x2101:    # GL_DECAL
+                    color = numpy.concatenate([color[:, :3] * (1 - texel[:, 3:]) + texel[:, :3] * texel[:, 3:], color[:, 3:]], 1)
+                elif mode == 0x0104:    # GL_ADD
+                    color = numpy.concatenate([color[:, :3] + texel[:, :3], color[:, 3:] * texel[:, 3:]], 1)
+                else:                   # GL_MODULATE
+                    color = color * texel
+            return [color], None, None
+
+        flat = numpy.zeros(6, dtype=bool)
+        flat[:4] = c.flat
+        self.render(c, kind, clip, numpy.concatenate([colors, uvs], axis=1), fragment, flat)
+
+    def render(self, c: Context, kind: str, clip, attrs, fragment, flat=None, targets=None):
+        """Draws primitives of a primitive kind (KINDS) with the state of the context."""
+        fb = c.ensure()
+        prims = primitives(kind, len(clip))
+        raster_kind = kind_of(kind)
+        if raster_kind == "triangles" and GL_CULL_FACE in c.enabled and c.cull == GL_FRONT_AND_BACK:
+            return
+        cull = "none"
+        if GL_CULL_FACE in c.enabled:
+            cull = "back" if c.cull == GL_BACK else "front"
+        x, y, w, h = c.viewport
+        pipeline = Pipeline((x, y, w, h), "gl", c.depth_range, cull=cull, front_cw=c.front == GL_CCW, provoking="last",
+                            point_size=c.point_size, line_width=c.line_width,
+                            scissor=self.scissor_rect(c, fb.height))
+        blend = Blend(GL_BLEND in c.enabled, *c.blend[1:], write_mask=c.color_mask)
+        if targets is None:
+            targets = [Target(fb.color, blend)]
+            depth = fb.depth
+        else:
+            targets, depth = targets
+        output = Output(targets, depth, c.depth_func if GL_DEPTH_TEST in c.enabled else 0, c.depth_mask, c.blend_color)
+        draw(output, pipeline, raster_kind, prims, attrs, fragment, clip=clip, flat_mask=flat)
+
+    def scissor_rect(self, c: Context, height: int):
+        if GL_SCISSOR_TEST not in c.enabled or c.scissor is None:
+            return None
+        x, y, w, h = c.scissor
+        return (x, height - (y + h), x + w, height - y)
+
+    def _glBlendFunc(self, c, src, dst):
+        c.blend = [c.blend[0], BLEND_FACTORS.get(src, 2), BLEND_FACTORS.get(dst, 1), c.blend[3],
+                   BLEND_FACTORS.get(src, 2), BLEND_FACTORS.get(dst, 1), c.blend[6]]
+
+    def _glDepthFunc(self, c, func):
+        c.depth_func = func - 0x1FF if 0x200 <= func <= 0x207 else 2
+
+    def _glDepthMask(self, c, flag):
+        c.depth_mask = bool(flag)
+
+    def _glColorMask(self, c, r, g, b, a):
+        c.color_mask = (1 if r else 0) | (2 if g else 0) | (4 if b else 0) | (8 if a else 0)
+
+    def _glDepthRange(self, c, near, far):
+        c.depth_range = (max(0.0, min(1.0, near)), max(0.0, min(1.0, far)))
+
+    def _glScissor(self, c, x, y, w, h):
+        c.scissor = (_i(x), _i(y), _i(w), _i(h))
 
     # ------------------------------------------------------------------ textures
     def _glGenTextures(self, c, count, out):
@@ -590,7 +642,6 @@ def install(dp):
         hooks.register_signature(module, "wglGetCurrentContext", "", lambda dp: gl.current.get(dp.thread_id, 0))
         hooks.register_signature(module, "wglGetCurrentDC", "", lambda dp: gl.contexts[gl.current[dp.thread_id]].hdc
                                  if dp.thread_id in gl.current else 0)
-        hooks.register_signature(module, "wglGetProcAddress", "p", lambda dp, name: _no_extension(dp, name))
         hooks.register_signature(module, "wglShareLists", "pp", lambda dp, a, b: 1)
         hooks.register_signature(module, "wglSwapBuffers", "p", gl.swap)
         hooks.register_signature(module, "wglChoosePixelFormat", "pp", lambda dp, hdc, pfd: 1)
@@ -611,6 +662,8 @@ def install(dp):
     hooks.register_signature(glu, "gluOrtho2D", "dddd", lambda dp, l, r, b, t: gl.call("glOrtho", l, r, b, t, -1.0, 1.0))
     hooks.register_signature(glu, "gluLookAt", "ddddddddd", lambda dp, *v: gl.call("look_at", *v))
     gl._look_at = _look_at
+    from . import gl_emu  # OpenGL 1.2 to 4.x, GLSL; wglGetProcAddress
+    gl_emu.install(gl)
     return gl
 
 
