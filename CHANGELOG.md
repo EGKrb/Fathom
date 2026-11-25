@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-11-25
+
 ### Added
 - Emulator: the hull, domain and geometry stages in shader model 6 (DXIL), and
   the rarer DXIL operations: wave and quad operations (`WaveMatch`,
@@ -436,6 +438,7 @@ First release under the Fathom name.
 Fathom is a modified distribution of x64dbg; see [NOTICE](NOTICE) and
 [CONTRIBUTING](CONTRIBUTING.md).
 
+[1.9.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.9.0
 [1.8.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.8.0
 [1.7.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.7.0
 [1.6.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.6.0
