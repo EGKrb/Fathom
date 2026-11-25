@@ -13,7 +13,9 @@
 # raw / structured buffers and unordered access views, group shared memory, atomics, the geometry
 # shader's emit / cut (strips of points, lines, triangles; instancing), the hull shader's phases
 # (control point, fork, join). Not covered: doubles, interfaces (fcall), DXIL (shader model 6, the
-# LLVM bitcode of dxc); the derivatives (deriv_rtx / rty) give 0.
+# LLVM bitcode of dxc, is dxil.py). The derivatives (deriv_rtx / rty, coarse and fine) and the mip level of
+# sample / sample_b / sample_c / lod come from the 2x2 quads of the pixel stage (raster.derivative); the
+# helper lanes of the quads write no unordered access view.
 
 import struct
 from typing import Dict, List, Optional
@@ -472,6 +474,7 @@ class Machine:
         self.active = numpy.ones(n, dtype=bool)
         self.dead = numpy.zeros(n, dtype=bool)
         self.discarded = numpy.zeros(n, dtype=bool)
+        self.helper = numpy.zeros(n, dtype=bool)   # the helper lanes of the quads (no side effects)
 
     # ------------------------------------------------------------------ operands
     def _index(self, index):
@@ -624,9 +627,20 @@ class Machine:
         target = self._raw(op)
         if not target.flags.writeable:
             raise Unsupported(f"write to operand type {op.type}")
+        mask = op.mask & 15
+        if not mask:
+            return
+        low, high = (mask & -mask).bit_length() - 1, mask.bit_length()
+        if mask == (1 << high) - (1 << low):    # contiguous components: one copy (all the lanes: no mask)
+            part = slice(low, high)
+            if active.all():
+                target[:, part] = value[:, part]
+            else:
+                numpy.copyto(target[:, part], value[:, part], where=active[:, None])
+            return
         for c in range(4):
-            if op.mask >> c & 1:
-                target[active, c] = value[active, c]
+            if mask >> c & 1:
+                numpy.copyto(target[:, c], value[:, c], where=active)
 
     # ------------------------------------------------------------------ execution
     def run(self) -> Result:
@@ -803,11 +817,19 @@ class Machine:
         sampler = self._sampler(ops[3])
         lod = None
         compare = None
+        bias = None
+        gradients = None
         if code == OPS["SAMPLE_L"]:
             lod = self.read(ops[4])[:, 0]
+        elif code == OPS["SAMPLE_B"]:
+            bias = self.read(ops[4])[:, 0].astype(numpy.float64)
+        elif code == OPS["SAMPLE_D"]:
+            gradients = (self.read(ops[4]).astype(numpy.float64), self.read(ops[5]).astype(numpy.float64))
         elif code in (OPS["SAMPLE_C"], OPS["SAMPLE_C_LZ"]):
             compare = self.read(ops[4])[:, 0]
-        value = sample_view(view, sampler, coord, lod, compare, ins.offsets[:2]) if view is not None \
+            if code == OPS["SAMPLE_C_LZ"]:
+                lod = numpy.zeros(self.n)
+        value = sample_view(view, sampler, coord, lod, compare, ins.offsets[:2], bias, gradients) if view is not None \
             else numpy.zeros((self.n, 4), dtype=numpy.float32)
         self.write(ops[0], value[:, list(ops[2].swizzle)].astype(numpy.float32), ins.saturate)
 
@@ -955,7 +977,7 @@ class Machine:
         memory, rows = self._dwords(target)
         if memory is None:
             return
-        lanes = numpy.nonzero(self.active)[0]
+        lanes = numpy.nonzero(self.active & ~self.helper)[0]
         dword = address // 4
         written = 0
         for c in range(4):
@@ -989,7 +1011,7 @@ class Machine:
         integer = view.kind == "buffer" and is_integer(view.fmt) or \
             view.images and view.level(0, 0) is not None and is_integer(view.level(0, 0).kind)
         values = self.read(ops[2], "u").astype(numpy.float64) if integer else self.read(ops[2]).astype(numpy.float64)
-        store_view(view, coord, values, numpy.nonzero(self.active)[0])
+        store_view(view, coord, values, numpy.nonzero(self.active & ~self.helper)[0])
         view.dirty = True
 
     def atomic(self, ins: Instruction):
@@ -998,7 +1020,7 @@ class Machine:
         immediate = code >= OPS["IMM_ATOMIC_ALLOC"]
         if code in (OPS["IMM_ATOMIC_ALLOC"], OPS["IMM_ATOMIC_CONSUME"]):
             view = self.b.uavs.get(self._slot(ops[1]))
-            lanes = numpy.nonzero(self.active)[0]
+            lanes = numpy.nonzero(self.active & ~self.helper)[0]
             counter = view.counter if view is not None and view.counter is not None else [0]
             out = numpy.zeros(self.n, dtype=numpy.int64)
             for lane in lanes:
@@ -1016,7 +1038,7 @@ class Machine:
         address_op = ops[2] if immediate else ops[1]
         values = ops[3:] if immediate else ops[2:]
         view = None if target.type == TGSM else (self._srv(target) if target.type == RESOURCE else self.b.uavs.get(self._slot(target)))
-        lanes = numpy.nonzero(self.active)[0]
+        lanes = numpy.nonzero(self.active & ~self.helper)[0]
         operand_values = [self.read(v, "u")[:, 0].astype(numpy.int64) for v in values]
         if view is not None and view.kind in ("texture", "buffer"):
             memory, index, rows = self._typed_cells(view, address_op)
@@ -1296,8 +1318,13 @@ def _bfrev(value):
 
 
 def _deriv(m, ins):
+    from .raster import derivative
     o = ins.operands
-    m.write(o[0], numpy.zeros((m.n, 4), dtype=numpy.float32), ins.saturate)
+    code = ins.opcode
+    axis = "x" if code in (OPS["DERIV_RTX"], OPS["DERIV_RTX_COARSE"], OPS["DERIV_RTX_FINE"]) else "y"
+    fine = code in (OPS["DERIV_RTX_FINE"], OPS["DERIV_RTY_FINE"], OPS["DERIV_RTX"], OPS["DERIV_RTY"])
+    value = m.read(o[1]).astype(numpy.float64)
+    m.write(o[0], derivative(value, axis, fine).astype(numpy.float32), ins.saturate)
 
 
 def _eval(m, ins):
@@ -1306,8 +1333,24 @@ def _eval(m, ins):
 
 
 def _lod(m, ins):
+    """lod dest, coords, t#, s#: (clamped level, unclamped level, 0, 0) from the quads' derivatives."""
     o = ins.operands
-    m.write(o[0], numpy.zeros((m.n, 4), dtype=numpy.float32))
+    out = numpy.zeros((m.n, 4), dtype=numpy.float32)
+    if ins.opcode == OPS["LOD"] and len(o) >= 4:
+        from .gpu import view_lod, view_levels, Sampler
+        view = m._srv(o[2])
+        sampler = m._sampler(o[3])
+        if view is not None and view.images:
+            raw = view_lod(view, Sampler(sampler.linear, sampler.address, mip_linear=sampler.mip_linear),
+                           m.read(o[1]).astype(numpy.float64))
+            if raw is not None:
+                count = len(view_levels(view, 0))
+                clamped = numpy.clip(raw + sampler.lod_bias, max(sampler.min_lod, 0), min(sampler.max_lod, count - 1))
+                if not sampler.mip_linear:
+                    clamped = numpy.floor(clamped + 0.5)
+                out[:, 0], out[:, 1] = clamped, raw
+        out = out[:, list(o[2].swizzle)]
+    m.write(o[0], out)
 
 
 def _sample_info(m, ins):
@@ -1372,13 +1415,35 @@ _SUPPORTED = set(_HANDLERS) | set(_FLOAT2) | set(_FLOAT1) | set(_FCOMPARE) | set
 
 # ------------------------------------------------------------------ the stages
 def run_vertex(shader: Shader, n: int, inputs, bindings: Bindings, system=None) -> Result:
+    if getattr(shader, "dxil", False):
+        from . import dxil
+        return dxil.run_vertex(shader, n, inputs, bindings, system)
     shader.check()
     return Machine(shader, shader.main, n, inputs=inputs, system=system, bindings=bindings).run()
 
 
-def run_pixel(shader: Shader, n: int, inputs, bindings: Bindings, system=None) -> Result:
+def run_pixel(shader: Shader, n: int, inputs, bindings: Bindings, system=None, helper=None) -> Result:
+    if getattr(shader, "dxil", False):
+        from . import dxil
+        return dxil.run_pixel(shader, n, inputs, bindings, system, helper)
     shader.check()
-    return Machine(shader, shader.main, n, inputs=inputs, system=system, bindings=bindings).run()
+    machine = Machine(shader, shader.main, n, inputs=inputs, system=system, bindings=bindings)
+    if helper is not None:
+        machine.helper = numpy.asarray(helper, dtype=bool)
+    return machine.run()
+
+
+def needs_quads(shader: Shader, mipmaps: bool = True) -> bool:
+    """Whether a pixel shader takes derivatives: ddx / ddy, or (when a bound texture has mip levels) the
+    mip level of sample, sample_b, sample_c, lod."""
+    if getattr(shader, "dxil", False):
+        from . import dxil
+        return dxil.needs_quads(shader, mipmaps)
+    names = ["DERIV_RTX", "DERIV_RTY", "DERIV_RTX_COARSE", "DERIV_RTX_FINE", "DERIV_RTY_COARSE", "DERIV_RTY_FINE"]
+    if mipmaps:
+        names += ["SAMPLE", "SAMPLE_B", "SAMPLE_C", "LOD"]
+    codes = {OPS[name] for name in names}
+    return any(ins.opcode in codes for phase in shader.phases for ins in phase.program)
 
 
 GS_INPUT_VERTICES = {1: 1, 2: 2, 3: 3, 6: 4, 7: 6}
@@ -1433,6 +1498,9 @@ def run_domain(shader: Shader, n: int, domain, vicp, vpc, bindings: Bindings, pr
 
 def run_compute(shader: Shader, groups, bindings: Bindings, limit=1 << 22):
     """A dispatch of groups (x, y, z): the threads of several groups at once (lanes), groups in order."""
+    if getattr(shader, "dxil", False):
+        from . import dxil
+        return dxil.run_compute(shader, groups, bindings)
     shader.check()
     tx, ty, tz = (max(1, v) for v in shader.thread_group)
     per_group = tx * ty * tz
@@ -1465,43 +1533,187 @@ def _vec(values):
 
 
 # ------------------------------------------------------------------ the tessellator
+def _edge_points(factor: float, partitioning: int):
+    """The parameters (0..1, both ends included, symmetric) of the points of an edge of a factor:
+    partitioning 1 integer, 2 pow2, 3 fractional_odd, 4 fractional_even (the numbers of dxbc)."""
+    f = float(factor)
+    if partitioning == 3:
+        f = min(max(f, 1.0), 63.0)
+        n = int(numpy.ceil(f))
+        if n % 2 == 0:
+            n += 1
+    elif partitioning == 4:
+        f = min(max(f, 2.0), 64.0)
+        n = int(numpy.ceil(f))
+        if n % 2:
+            n += 1
+    else:
+        f = min(max(f, 1.0), 64.0)
+        n = int(numpy.ceil(f))
+        if partitioning == 2:
+            n = 1 << (n - 1).bit_length()
+        f = float(n)
+    if n <= 1:
+        return numpy.array([0.0, 1.0])
+    if partitioning in (3, 4) and n > f:
+        # n - 2 segments of 1 / f and two shorter ones, next to the middle, that grow with the factor
+        full, short = 1.0 / f, (f - (n - 2)) / (2.0 * f)
+        side = (n - 2) // 2
+        middle = [short, full, short] if n % 2 else [short, short]
+        segments = [full] * side + middle + [full] * side
+    else:
+        segments = [1.0 / n] * n
+    points = numpy.concatenate([[0.0], numpy.cumsum(segments)])
+    points[-1] = 1.0
+    return points
+
+
+def _segments(factor: float, partitioning: int) -> int:
+    return len(_edge_points(factor, partitioning)) - 1
+
+
+def _zipper(outer, inner, out):
+    """Triangles between two rows of points (indices with parameters 0..1 along the row): outer (k + 1) and
+    inner (m + 1), each step advancing on the row whose next point comes first."""
+    i = j = 0
+    (op, oi), (ip, ii) = outer, inner
+    while i < len(oi) - 1 or j < len(ii) - 1:
+        if j >= len(ii) - 1 or (i < len(oi) - 1 and op[i + 1] <= ip[j + 1]):
+            out.append((oi[i], oi[i + 1], ii[j]))
+            i += 1
+        else:
+            out.append((oi[i], ii[j + 1], ii[j]))
+            j += 1
+
+
+def _oriented(points, tris):
+    """Triangles made counter-clockwise in the (u, v) plane, the orientation the hull shader's triangle_cw
+    output keeps (triangle_ccw swaps it)."""
+    tris = numpy.asarray(tris, dtype=numpy.int64).reshape(-1, 3)
+    if len(tris) == 0:
+        return tris
+    a, b, c = points[tris[:, 0]], points[tris[:, 1]], points[tris[:, 2]]
+    area = (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0])
+    tris = tris[numpy.abs(area) > 1e-12]
+    area = area[numpy.abs(area) > 1e-12]
+    return numpy.where((area < 0)[:, None], tris[:, [0, 2, 1]], tris)
+
+
 def tessellate(domain: int, factors, inside, partitioning: int = 1):
-    """The points (k, 3) in the domain (barycentric u, v, w for triangles, u, v for quads, u, v for lines)
-    and the primitives (indices) of a patch. Edges and inside are tessellated at one level, the largest of
-    the factors (rounded up as with integer partitioning), so that neighbouring patches meet."""
-    values = [float(v) for v in list(factors) + list(inside)]
+    """The points (k, 3) in the domain (barycentric u, v, w for triangles, u, v for quads and lines) and the
+    primitives (indices) of a patch, as the fixed tessellator of Direct3D 11 makes them: each edge cut at its
+    own factor, the inside at the inside factors in concentric rings (quads: a grid) stitched to the edges,
+    with the integer, pow2, fractional_odd and fractional_even partitionings. A factor <= 0 or NaN culls."""
+    factors = [float(v) for v in factors]
+    inside = [float(v) for v in inside]
     if any(not numpy.isfinite(v) or v <= 0 for v in factors):
         return numpy.zeros((0, 3)), numpy.zeros((0, 3), dtype=numpy.int64), "triangles"
-    level = int(min(64, max(1, numpy.ceil(max(values)))))
-    if domain == 2:   # triangle: rows of a subdivided triangle
-        points, index = [], {}
-        for i in range(level + 1):
-            for j in range(level + 1 - i):
-                index[(i, j)] = len(points)
-                points.append((i / level, j / level, (level - i - j) / level))
+    points = []
+
+    def add(p):
+        points.append(p)
+        return len(points) - 1
+
+    if domain == 2:   # triangle: edges u == 0, v == 0, w == 0 (SV_TessFactor[0..2])
+        corners = [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)]
+        ids = [add(c) for c in corners]
+        # the outer ring: the side from corner i to corner i + 1 is the edge where the third coordinate is 0
+        sides = [(0, 1, 2), (1, 2, 0), (2, 0, 1)]      # (from, to, the zero coordinate's edge = the opposite corner)
+        outer = []
+        for a, b, opposite in sides:
+            params = _edge_points(factors[opposite] if opposite < len(factors) else 1.0, partitioning)
+            row = [ids[a]]
+            for t in params[1:-1]:
+                p = numpy.array(corners[a]) * (1 - t) + numpy.array(corners[b]) * t
+                row.append(add(tuple(p)))
+            row.append(ids[b])
+            outer.append((params, row))
+        level = inside[0] if inside else max(factors)
+        ring_params = _edge_points(level, partitioning)
+        segments = len(ring_params) - 1
         tris = []
-        for i in range(level):
-            for j in range(level - i):
-                tris.append((index[(i, j)], index[(i + 1, j)], index[(i, j + 1)]))
-                if j < level - i - 1:
-                    tris.append((index[(i + 1, j)], index[(i + 1, j + 1)], index[(i, j + 1)]))
-        return numpy.array(points), numpy.array(tris, dtype=numpy.int64), "triangles"
-    if domain == 3:   # quad: a grid
-        grid = numpy.linspace(0, 1, level + 1)
-        u, v = numpy.meshgrid(grid, grid)
-        points = numpy.stack([u.ravel(), v.ravel(), numpy.zeros(u.size)], 1)
+        if segments <= 1 and all(len(row) == 2 for _, row in outer):
+            tris.append((ids[0], ids[1], ids[2]))
+            return numpy.array(points), _oriented(numpy.array(points), tris), "triangles"
+        rings = [outer]
+        k = 1
+        center = numpy.array([1 / 3, 1 / 3, 1 / 3])
+        while True:
+            count = segments - 2 * k
+            inset = min(ring_params[min(k, len(ring_params) - 1)] * 2 / 3, 1 / 3)
+            ring_corners = [numpy.array(c) * (1 - 3 * inset) + center * 3 * inset for c in corners]
+            if count < 1 or inset >= 1 / 3 - 1e-9:
+                middle = add(tuple(center))
+                rings.append([(numpy.array([0.0, 1.0]), [middle, middle])] * 3)
+                break
+            params = numpy.linspace(0, 1, count + 1)
+            if partitioning in (3, 4) and _segments(level - 2 * k, partitioning) == count:
+                params = _edge_points(level - 2 * k, partitioning)
+            corner_ids = [add(tuple(c)) for c in ring_corners]
+            ring = []
+            for a, b, _ in sides:
+                row = [corner_ids[a]]
+                for t in params[1:-1]:
+                    row.append(add(tuple(ring_corners[a] * (1 - t) + ring_corners[b] * t)))
+                row.append(corner_ids[b])
+                ring.append((params, row))
+            rings.append(ring)
+            if count == 1:
+                tris.append(tuple(corner_ids))
+                break
+            k += 1
+        for outer_ring, inner_ring in zip(rings, rings[1:]):
+            for side in range(3):
+                _zipper(outer_ring[side], inner_ring[side], tris)
+        pts = numpy.array(points)
+        return pts, _oriented(pts, tris), "triangles"
+    if domain == 3:   # quad: edges u == 0, v == 0, u == 1, v == 1 (SV_TessFactor[0..3]), inside along u, v
+        f = factors + [1.0] * (4 - len(factors))
+        iu = inside[0] if inside else max(f)
+        iv = inside[1] if len(inside) > 1 else iu
+        u_params = _edge_points(iu, partitioning)[1:-1]
+        v_params = _edge_points(iv, partitioning)[1:-1]
         tris = []
-        for row in range(level):
-            for col in range(level):
-                a = row * (level + 1) + col
-                tris += [(a, a + 1, a + level + 2), (a, a + level + 2, a + level + 1)]
-        return points, numpy.array(tris, dtype=numpy.int64), "triangles"
-    detail = int(min(64, max(1, numpy.ceil(values[0])))) if values else 1
-    density = int(min(64, max(1, numpy.ceil(values[1] if len(values) > 1 else 1))))
-    points, lines = [], []
+        if len(u_params) == 0 and len(v_params) == 0 and all(_segments(x, partitioning) == 1 for x in f):
+            a, b, c, d = add((0.0, 0.0, 0.0)), add((1.0, 0.0, 0.0)), add((1.0, 1.0, 0.0)), add((0.0, 1.0, 0.0))
+            pts = numpy.array(points)
+            return pts, _oriented(pts, [(a, b, c), (a, c, d)]), "triangles"
+        us = u_params if len(u_params) else numpy.array([0.5])
+        vs = v_params if len(v_params) else numpy.array([0.5])
+        grid = [[add((float(u), float(v), 0.0)) for u in us] for v in vs]
+        for r in range(len(vs) - 1):
+            for col in range(len(us) - 1):
+                tris += [(grid[r][col], grid[r][col + 1], grid[r + 1][col + 1]), (grid[r][col], grid[r + 1][col + 1], grid[r + 1][col])]
+        corners = {(0, 0): add((0.0, 0.0, 0.0)), (1, 0): add((1.0, 0.0, 0.0)), (1, 1): add((1.0, 1.0, 0.0)),
+                   (0, 1): add((0.0, 1.0, 0.0))}
+        # the outer sides (counter-clockwise: v == 0, u == 1, v == 1, u == 0) and the inner rectangle's sides
+        sides = [((0, 0), (1, 0), f[1], [grid[0][c] for c in range(len(us))]),
+                 ((1, 0), (1, 1), f[2], [grid[r][-1] for r in range(len(vs))]),
+                 ((1, 1), (0, 1), f[3], [grid[-1][c] for c in reversed(range(len(us)))]),
+                 ((0, 1), (0, 0), f[0], [grid[r][0] for r in reversed(range(len(vs)))])]
+        for a, b, factor, inner in sides:
+            params = _edge_points(factor, partitioning)
+            pa, pb = numpy.array(a, dtype=float), numpy.array(b, dtype=float)
+            row = [corners[a]] + [add((*(pa * (1 - t) + pb * t), 0.0)) for t in params[1:-1]] + [corners[b]]
+            inner_params = numpy.linspace(0, 1, len(inner)) if len(inner) > 1 else numpy.array([0.0, 1.0])
+            if len(inner) == 1:
+                inner = inner * 2
+            # the inner side's parameters along the outer side
+            pts = numpy.array(points)
+            axis = 0 if a[1] == b[1] else 1
+            span = pb[axis] - pa[axis]
+            inner_params = (pts[inner, axis] - pa[axis]) / span if span else inner_params
+            inner_params = numpy.clip(inner_params, 0, 1)
+            _zipper((params, row), (inner_params, inner), tris)
+        pts = numpy.array(points)
+        return pts, _oriented(pts, tris), "triangles"
+    # isolines: factors[0] the number of lines (detail, integer), factors[1] their points (density)
+    detail = int(min(64, max(1, numpy.ceil(factors[0] if factors else 1))))
+    density_params = _edge_points(factors[1] if len(factors) > 1 else 1.0, partitioning)
+    lines = []
     for line in range(detail):
-        for k in range(density + 1):
-            points.append((k / density, line / max(1, detail), 0.0))
-            if k:
-                lines.append((len(points) - 2, len(points) - 1))
-    return numpy.array(points), numpy.array(lines, dtype=numpy.int64), "lines"
+        start = len(points)
+        for t in density_params:
+            points.append((float(t), line / detail, 0.0))
+        lines += [(start + k, start + k + 1) for k in range(len(density_params) - 1)]
+    return numpy.array(points), numpy.array(lines, dtype=numpy.int64).reshape(-1, 2), "lines"

@@ -812,7 +812,8 @@ static ID3D12Resource* Buffer12(ID3D12Device* device, D3D12_HEAP_TYPE heap, UINT
     return resource;
 }
 
-static int D3D12()
+// the scene of the d3d12 mode (shader model 5.1) and of the dxil mode (the same shaders in shader model 6)
+static int D3D12Scene(const char* mode, const void* vs, SIZE_T vsSize, const void* ps, SIZE_T psSize)
 {
     HWND window = TestWindow(L"Direct3D 12");
     ID3D12Device* device = NULL;
@@ -883,8 +884,8 @@ static int D3D12()
     };
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = {};
     pd.pRootSignature = root;
-    pd.VS = { Scene12VertexShader, sizeof(Scene12VertexShader) };
-    pd.PS = { Scene12PixelShader, sizeof(Scene12PixelShader) };
+    pd.VS = { vs, vsSize };
+    pd.PS = { ps, psSize };
     pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     pd.SampleMask = UINT_MAX;
     pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
@@ -982,14 +983,14 @@ static int D3D12()
     Check(fence->GetCompletedValue() == 1, "the fence");
     if(SUCCEEDED(readback->Map(0, NULL, &mapped)))
     {
-        CheckScene("d3d12", (const BYTE*)mapped + backFootprint.Offset, backFootprint.Footprint.RowPitch);
+        CheckScene(mode, (const BYTE*)mapped + backFootprint.Offset, backFootprint.Footprint.RowPitch);
         readback->Unmap(0, NULL);
     }
     else
         Check(false, "Map of the read back buffer");
     chain->Present(0, 0);
     Check(chain->GetCurrentBackBufferIndex() == (frame + 1) % 2, "the next back buffer after Present");
-    printf("d3d12: %d check(s) failed\n", failures);
+    printf("%s: %d check(s) failed\n", mode, failures);
     CloseHandle(event);
     IUnknown* objects[] = { fence, list, allocator, readback, upload, picture, vb, pso, root, blob, srvHeap, buffers[0], buffers[1],
                             rtvHeap, chain, chain1, factory, queue, device };
@@ -998,4 +999,10 @@ static int D3D12()
             object->Release();
     DestroyWindow(window);
     return failures;
+}
+
+static int D3D12()
+{
+    return D3D12Scene("d3d12", Scene12VertexShader, sizeof(Scene12VertexShader), Scene12PixelShader,
+                      sizeof(Scene12PixelShader));
 }

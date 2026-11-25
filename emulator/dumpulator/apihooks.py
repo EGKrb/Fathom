@@ -251,6 +251,9 @@ class ApiHooks:
         regs.csp = frame.entry_sp + ptr + (0 if dp._x64 else 4 * frame.argcount)
         regs.cax = int(value) & dp.addr_mask if value is not None else 0
         regs.cip = return_address
+        vex = getattr(dp, "_fathom_vex", None)
+        if vex is not None:     # the block after the return is translated without the hook of new blocks
+            vex.scan(return_address)
 
     def _call(self, function: int, arguments: List[int]):
         """Call emulated code below the current stack, returning to the trampoline."""

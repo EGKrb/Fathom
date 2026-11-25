@@ -9,15 +9,18 @@
 # and compute pipeline states (shaders DXBC, run by dxbc.py through d3d_pipeline.py), committed and placed
 # resources (buffers: their bytes in the emulator's memory, the GPU virtual address being that memory),
 # GetCopyableFootprints, CopyTextureRegion / CopyBufferRegion / CopyResource, Map, render passes, bundles.
-# Shaders compiled to DXIL (shader model 6, dxc) are not run (named in the summary).
+# Shaders compiled to DXIL (shader model 6, dxc) run in dxil.py; ray tracing (state objects, acceleration
+# structures, DispatchRays) in dxr.py.
 
 import ctypes
 import struct
 from typing import Dict, List, Optional
 
-from . import dxbc
+from . import dxbc, dxr
+from .dxil import Shader as DxilShader
+from .dxil_bitcode import BitcodeError
 from .d3d11_emu import blends_of, input_layout
-from .d3d_pipeline import DrawState, dispatch, draw_dxbc
+from .d3d_pipeline import DrawState, SOTarget, StreamOutput, dispatch, draw_dxbc
 from .dxgi_emu import dxgi_of, missing, E_INVALIDARG, E_FAIL, DXGI_ERROR_NOT_FOUND, S_FALSE
 from .gpu import DXGI, DXGI_SRGB, Image, Sampler, View, kind_bytes, pitch_of, rows_of, to_srgb
 from .raster import numpy
@@ -155,6 +158,18 @@ class RootSignature:
 
     def GetPrivateData(self, guid, size, data):
         return DXGI_ERROR_NOT_FOUND
+
+
+def shader_of(bytecode: bytes):
+    """A DXBC shader, or a DXIL one (shader model 6: a DXIL part and no SHEX)."""
+    parts = dxbc.chunks(bytecode)
+    if b"DXIL" in parts and b"SHEX" not in parts and b"SHDR" not in parts:
+        from .dxil_bitcode import BitcodeError
+        try:
+            return DxilShader(bytecode)
+        except (BitcodeError, IndexError, KeyError, ValueError) as e:
+            raise dxbc.Unsupported(f"DXIL: {e}")
+    return dxbc.Shader(bytecode)
 
 
 def serialize_root_signature(dp, address, version: int, layouts) -> bytes:
@@ -387,6 +402,7 @@ class PipelineState:
         self.root: Optional[RootSignature] = None
         self.compute = False
         self.error = None
+        self.so = None              # stream output: (entries, strides, rasterized stream)
 
     def GetCachedBlob(self, out):
         blob = Blob(self.d3d, b"")
@@ -654,8 +670,9 @@ class CommandList:
         self._record("vertex_buffers", start, entries)
 
     def SOSetTargets(self, start, count, views):
-        if count and views:
-            missing(self.d3d.dp, "Direct3D 12 stream output")
+        dp = self.d3d.dp
+        entries = [struct.unpack("<3Q", bytes(dp.read(views + 24 * i, 24))) if views else None for i in range(count)]
+        self._record("so_targets", start, entries)
 
     def OMSetRenderTargets(self, count, handles, single, dsv):
         dp = self.d3d.dp
@@ -758,20 +775,20 @@ class CommandList:
     def ExecuteMetaCommand(self, *args):
         return None
 
-    def BuildRaytracingAccelerationStructure(self, *args):
-        missing(self.d3d.dp, "Direct3D 12 ray tracing")
+    def BuildRaytracingAccelerationStructure(self, desc, count, postbuild):
+        self._record("build_structure", dxr.read_build(self.d3d.dp, desc))
 
     def EmitRaytracingAccelerationStructurePostbuildInfo(self, *args):
         return None
 
-    def CopyRaytracingAccelerationStructure(self, *args):
-        return None
+    def CopyRaytracingAccelerationStructure(self, dst, src, mode):
+        self._record("copy_structure", dst, src)
 
     def SetPipelineState1(self, state):
-        missing(self.d3d.dp, "Direct3D 12 ray tracing")
+        self._record("state_object", self.d3d.com.impl(state))
 
     def DispatchRays(self, desc):
-        missing(self.d3d.dp, "Direct3D 12 ray tracing")
+        self._record("dispatch_rays", dxr.read_dispatch(self.d3d.dp, desc))
 
 
 class Executor:
@@ -789,6 +806,8 @@ class Executor:
         self.vertex_buffers: Dict[int, tuple] = {}
         self.rtvs: List[int] = []
         self.dsv = 0
+        self.so_targets: Dict[int, tuple] = {}     # slot -> (location, size, filled size location)
+        self.state_object = None
 
     def run(self, commands):
         for command in commands:
@@ -802,6 +821,10 @@ class Executor:
 
     def _pso(self, pso):
         self.pso = pso
+
+    def _so_targets(self, start, entries):
+        for i, entry in enumerate(entries):
+            self.so_targets[start + i] = entry if entry is not None and entry[0] else None
 
     def _clear_state(self, pso):
         self.__init__(self.d3d)
@@ -987,6 +1010,7 @@ class Executor:
                                 count=(resource.size - offset) // max(1, stride or 4))
                     view.bytes = resource.read()[offset:].copy()
                     view.source = (resource, offset)
+                    view.address = arg[1]       # an acceleration structure (root SRV)
                     (bindings.srvs if parameter["kind"] == "srv" else bindings.uavs)[register] = view
                     views.append(view)
                 continue
@@ -1046,6 +1070,24 @@ class Executor:
         state = DrawState()
         state.shaders = dict(pso.shaders)
         state.layout = pso.layout
+        if pso.so is not None:
+            entries, strides, rasterized = pso.so
+            state.stream_out = StreamOutput(entries, strides, rasterized)
+            for slot, target in self.so_targets.items():
+                if target is None or slot >= 4:
+                    continue
+                location, size, filled_location = target
+                found, filled = self.d3d.at_address(location), self.d3d.at_address(filled_location)
+                if found is None:
+                    continue
+                resource, offset = found
+                used = 0
+                if filled is not None:
+                    used = struct.unpack_from("<Q", resource.read().tobytes() if filled[0] is resource else
+                                              filled[0].read().tobytes(), filled[1])[0]
+                so_target = SOTarget(resource.read(), offset + used, offset + size, resource)
+                so_target.base, so_target.filled = offset, filled
+                state.stream_out.targets[slot] = so_target
         for slot, entry in self.vertex_buffers.items():
             if entry is None:
                 continue
@@ -1085,6 +1127,15 @@ class Executor:
             return
         self.d3d.fragments += draw_dxbc(state, vertex_ids, [(i, start_instance + i) for i in range(instances)])
         self._write_back(state.uav_views)
+        so = state.stream_out
+        for target in (so.targets if so is not None else []):
+            if target is None:
+                continue
+            if target.changed:
+                target.owner.write(target.data[:target.owner.size])
+            if target.filled is not None:   # the buffer's filled size, a UINT64 the GPU keeps
+                holder, at = target.filled
+                holder.write(struct.pack("<Q", target.offset - target.base), at)
 
     def _draw(self, vertices, instances, start, start_instance):
         self._draw_ids(numpy.arange(start, start + vertices), instances, start_instance)
@@ -1110,6 +1161,27 @@ class Executor:
         shader = pso.shaders["cs"]
         bindings, views = self._bindings("compute", shader, 0)
         dispatch(shader, (x, y, z), bindings)
+        self._write_back(views)
+
+    # ray tracing (dxr.py) ---------------------------------------------------------
+    def _build_structure(self, desc):
+        structure = dxr.build(self.d3d, desc)
+        if structure is not None:
+            self.d3d.structures[desc["dest"]] = structure
+
+    def _copy_structure(self, dst, src):
+        if src in self.d3d.structures:
+            self.d3d.structures[dst] = self.d3d.structures[src]
+
+    def _state_object(self, state):
+        self.state_object = state
+
+    def _dispatch_rays(self, desc):
+        state = self.state_object
+        if state is None:
+            return
+        bindings, views = self._bindings("compute", state, 0)
+        dxr.Rays(self.d3d, state, desc, bindings).run()
         self._write_back(views)
 
     def _indirect(self, signature, count, arguments, offset):
@@ -1233,7 +1305,7 @@ class Device12:
         address, size = bytecode.p, bytecode.size
         if not address or not size:
             return None
-        return dxbc.Shader(bytes(self.d3d.dp.read(address, size)))
+        return shader_of(bytes(self.d3d.dp.read(address, size)))
 
     def CreateGraphicsPipelineState(self, desc, riid, out):
         d = self.d3d.s.read("graphics", desc)
@@ -1257,6 +1329,13 @@ class Device12:
         pso.blends = blends_of(State11(self.d3d, "", blend))
         pso.rasterizer = (d.fill, d.cull, bool(d.front_ccw), bool(d.depth_clip), True)
         pso.depth_state = (bool(d.depth_enable), bool(d.depth_write), d.depth_func)
+        if d.so_decl and d.so_entries:
+            from .d3d11_emu import so_entries
+            dp = self.d3d.dp
+            strides = [struct.unpack("<I", bytes(dp.read(d.so_strides + 4 * i, 4)))[0] for i in range(d.so_num_strides)] \
+                if d.so_strides else []
+            pso.so = (so_entries(dp, d.so_decl, d.so_entries, True), strides,
+                      -1 if d.so_stream == 0xFFFFFFFF else d.so_stream)
         return self._out(pso, "ID3D12PipelineState", riid, out)
 
     def CreateComputePipelineState(self, desc, riid, out):
@@ -1313,6 +1392,8 @@ class Device12:
             elif d.dimension in (5, 3):
                 raw = bytes(self.d3d.dp.read(desc + 16, 16))
                 values["mip"], values["mips"], values["first_slice"], values["slices"] = struct.unpack("<4I", raw)
+            elif d.dimension == 11:         # RAYTRACING_ACCELERATION_STRUCTURE: its GPU address
+                values["location"] = struct.unpack("<Q", bytes(self.d3d.dp.read(desc + 16, 8)))[0]
         self._store(handle, Descriptor("srv", impl, **values))
 
     def CreateUnorderedAccessView(self, resource, counter, desc, handle):
@@ -1499,8 +1580,9 @@ class Device12:
             best = max([lvl for lvl in requested if lvl <= 0xC100] or [0xB000])
             dp.write(data + 2 * dp.ptr_size(), struct.pack("<I", best))
             return 0
-        if feature == 7 and size >= 4:              # SHADER_MODEL: 5.1 (no DXIL)
-            dp.write(data, struct.pack("<I", 0x51))
+        if feature == 7 and size >= 4:              # SHADER_MODEL: up to 6.6 (DXIL, dxil.py)
+            requested = struct.unpack("<I", bytes(dp.read(data, 4)))[0]
+            dp.write(data, struct.pack("<I", min(requested, 0x66) if requested >= 0x51 else 0x51))
             return 0
         if feature == 12 and size >= 4:             # ROOT_SIGNATURE: 1.1
             dp.write(data, struct.pack("<I", 2))
@@ -1519,6 +1601,8 @@ class Device12:
             dp.write(data + 4, struct.pack("<B", 1))
             return 0
         dp.write(data, b"\0" * size)
+        if feature == 27 and size >= 12:            # OPTIONS5: ray tracing tier 1.0 (dxr.py)
+            dp.write(data + 8, struct.pack("<I", 10))
         return 0
 
     def CreatePipelineLibrary(self, *args):
@@ -1548,12 +1632,17 @@ class Device12:
     def EnumerateMetaCommands(self, count, descs):
         self.d3d.dp.write(count, struct.pack("<I", 0))
 
-    def CreateStateObject(self, *args):
-        missing(self.d3d.dp, "Direct3D 12 ray tracing")
-        return E_NOTIMPL
+    def CreateStateObject(self, desc, riid, out):
+        try:
+            state = dxr.create_state_object(self.d3d, desc)
+        except (dxbc.Unsupported, BitcodeError, KeyError) as e:
+            missing(self.d3d.dp, f"Direct3D 12 state object: {e}")
+            return E_FAIL
+        return self._out(state, "ID3D12StateObject", riid, out)
 
-    def GetRaytracingAccelerationStructurePrebuildInfo(self, *args):
-        return None
+    def GetRaytracingAccelerationStructurePrebuildInfo(self, desc, info):
+        sizes = dxr.prebuild_sizes(dxr.read_inputs(self.d3d.dp, desc))
+        self.d3d.dp.write(info, struct.pack("<3Q", *sizes))
 
     def CheckDriverMatchingIdentifier(self, *args):
         return 0
@@ -1580,6 +1669,7 @@ class Direct3D12:
         self.devices: List[Device12] = []
         self.heaps: List[DescriptorHeap] = []
         self.buffers: List[Resource12] = []
+        self.structures: Dict[int, object] = {}     # acceleration structures by their GPU address (dxr.py)
         self.fragments = 0
 
     def device_query(self, riid, out):
@@ -1630,9 +1720,13 @@ class Direct3D12:
 
     def gpu_view(self, descriptor: Descriptor) -> Optional[View]:
         resource = descriptor.resource
+        values = descriptor.values
+        if values.get("dimension") == 11 and descriptor.kind == "srv":
+            view = View("raw")
+            view.address = values.get("location", 0)
+            return view
         if resource is None:
             return None
-        values = descriptor.values
         if resource.dimension == "buffer":
             stride = values.get("stride", 0)
             raw = bool(values.get("flags", 0) & 1)

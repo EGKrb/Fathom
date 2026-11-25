@@ -10,8 +10,13 @@
 # continue, return, discard, switch) masks of active lanes. The built-in functions of GLSL and the
 # built-in variables of both profiles (gl_Position, gl_FragColor, gl_FragData, gl_Vertex, gl_Color,
 # gl_MultiTexCoord*, gl_TexCoord, gl_ModelViewProjectionMatrix, ftransform...) are implemented;
-# derivatives (dFdx, dFdy, fwidth) give 0. Not covered: geometry, tessellation and compute shaders,
-# subroutines, images and atomic counters.
+# derivatives (dFdx, dFdy, fwidth, coarse and fine) and the mip level of texture() come from the 2x2 quads
+# of the fragment stage (raster.derivative). The geometry (EmitVertex / EndPrimitive, streams, invocations),
+# tessellation control and evaluation, and compute shaders run too (run_geometry, run_stage, run_compute),
+# with the variables in memory: buffer blocks (std430 / std140), shared variables (one copy per work
+# group; all the lanes run in lockstep, so a barrier holds), atomic counters, the atomic functions (lane
+# after lane, in order), and images (imageLoad / imageStore / imageSize / imageAtomic*). Not covered:
+# subroutines.
 
 import math
 import re
@@ -393,7 +398,8 @@ class Parser:
             return []
         quals, layout = self.qualifiers()
         if self.accept(";"):
-            return []
+            # layout(local_size_x = 8) in; layout(triangles) in; layout(vertices = 3) out; ...
+            return [Node("layout_decl", value=dict(qualifiers=quals, layout=layout))] if layout else []
         # an interface block: qualifier Name { ... } instance;
         if self.peek()[0] == "name" and self.peek(1)[1] == "{" and not self.is_type(self.peek()[1]):
             block = self.next()[1]
@@ -716,8 +722,11 @@ class Program:
         self.functions: Dict[str, list] = {}
         self.globals: List[Node] = []
         self.blocks: List[dict] = []
+        self.layout_decls: List[dict] = []
         for item in self.items:
-            if item.op == "function":
+            if item.op == "layout_decl":
+                self.layout_decls.append(item.value)
+            elif item.op == "function":
                 self.functions.setdefault(item.value["name"], []).append(item)
             elif item.op == "declare":
                 self.globals.append(item)
@@ -769,6 +778,8 @@ class Runtime:
         self.loop_stack: List[dict] = []
         self.frames: List[Frame] = []
         self.constant_cache: Dict[int, Val] = {}
+        self.images: Dict[int, object] = {}
+        self.events = None          # a geometry shader: (emit / cut, stream, lanes, outputs)
 
     # variables --------------------------------------------------------------
     def lookup(self, name: str) -> Val:
@@ -806,7 +817,7 @@ class Runtime:
             v = item.value
             quals = set(v["qualifiers"])
             for name, array, init in v["items"]:
-                if self.has(name) and ("uniform" in quals or "in" in quals or "attribute" in quals or
+                if self.has(name) and ("uniform" in quals or "in" in quals or "attribute" in quals or "shared" in quals or
                                        ("varying" in quals and self.p.stage == "fragment")):
                     continue
                 if self.has(name) and ("out" in quals or "varying" in quals):
@@ -1032,7 +1043,49 @@ class Runtime:
         return Val(new.kind, numpy.where(mask.reshape(shape), new.data, old_data.astype(new.data.dtype)))
 
     # assignment -------------------------------------------------------------
+    def _ref_of(self, node: Node, mask) -> Optional["Ref"]:
+        """The memory a variable expression designates (a buffer block, a shared variable), or None."""
+        if node.op == "name":
+            if not self.has(node.value):
+                return None
+            value = self.lookup(node.value)
+            return value.data if value.kind == "__ref" else None
+        if node.op == "field":
+            base = self._ref_of(node.args[0], mask)
+            if base is None:
+                return None
+            if base.kind in base.structs and base.array is None:
+                return _ref_field(base, node.value)
+            indices = _swizzle(node.value)
+            if len(indices) == 1 and base.kind in VECTORS:
+                return _ref_index(base, numpy.full(self.n, indices[0]))
+            return None
+        if node.op == "index":
+            base = self._ref_of(node.args[0], mask)
+            if base is None:
+                return None
+            index = numpy.asarray(self.eval(node.args[1], mask).data).reshape(-1)
+            return _ref_index(base, numpy.broadcast_to(index, (self.n,)) if index.size == 1 else index)
+        return None
+
     def store(self, node: Node, value: Val, mask):
+        if node.op in ("name", "field", "index"):
+            target = self._ref_of(node, mask)
+            if target is not None:
+                ref_store(target, value, mask, self.n)
+                return
+            if node.op == "field":
+                base = self._ref_of(node.args[0], mask)
+                if base is not None:    # a swizzle of a vector in memory
+                    data = as_columns(ref_load(base, self.n), self.n).copy()
+                    indices = _swizzle(node.value)
+                    source = as_columns(value, self.n)
+                    if source.shape[1] == 1:
+                        source = numpy.repeat(source, len(indices), axis=1)
+                    for k, index in enumerate(indices):
+                        data[:, index] = source[:, k]
+                    ref_store(base, Val(base.kind, data), mask, self.n)
+                    return
         if node.op == "name":
             name = node.value
             for scope in reversed(self.scopes):
@@ -1090,7 +1143,10 @@ class Runtime:
             kind, value = node.value
             return self.constant(kind, value)
         if op == "name":
-            return self.lookup(node.value)
+            value = self.lookup(node.value)
+            if value.kind == "__ref" and not lvalue:
+                return ref_load(value.data, self.n)
+            return value
         if op == "assign":
             if node.value == "=":
                 value = self.eval(node.args[1], mask)
@@ -1133,7 +1189,13 @@ class Runtime:
             self.eval(node.args[0], mask)
             return self.eval(node.args[1], mask)
         if op == "field":
-            base = self.eval(node.args[0], mask)
+            base = self.eval(node.args[0], mask, lvalue=True)
+            if base.kind == "__ref":
+                ref = base.data
+                if ref.kind in ref.structs and ref.array is None:
+                    child = _ref_field(ref, node.value)
+                    return Val("__ref", child) if lvalue else ref_load(child, self.n)
+                base = ref_load(ref, self.n)
             if isinstance(base.data, dict):
                 return base.data[node.value]
             indices = _swizzle(node.value)
@@ -1142,8 +1204,11 @@ class Runtime:
             kind = vector_kind(base_of(base.kind), len(indices))
             return Val(kind, picked[:, 0] if len(indices) == 1 else picked)
         if op == "index":
-            base = self.eval(node.args[0], mask)
+            base = self.eval(node.args[0], mask, lvalue=True)
             index = numpy.asarray(self.eval(node.args[1], mask).data).reshape(-1)
+            if base.kind == "__ref":
+                child = _ref_index(base.data, numpy.broadcast_to(index, (self.n,)) if index.size == 1 else index)
+                return Val("__ref", child) if lvalue else ref_load(child, self.n)
             if base.kind == "array":
                 index = index.astype(numpy.int64)
                 if len(numpy.unique(index)) <= 1:
@@ -1162,7 +1227,9 @@ class Runtime:
                 return Val(vector_kind("float", r), base.data[rows, index])
             return Val(base_of(base.kind), base.data[rows, index])
         if op == "length":
-            base = self.eval(node.args[0], mask)
+            base = self.eval(node.args[0], mask, lvalue=True)
+            if base.kind == "__ref":
+                return self.constant("int", _ref_length(base.data))
             if base.kind == "array":
                 return self.constant("int", base.length)
             if base.kind in MATRICES:
@@ -1288,6 +1355,26 @@ class Runtime:
 
     def call(self, node: Node, mask) -> Val:
         name = node.value
+        if name in ATOMICS and name not in self.p.functions:
+            target = self._ref_of(node.args[0], mask)
+            if target is None:
+                raise GLSLError(f"{name} of a variable that is not in memory")
+            operands = [self.eval(a, mask) for a in node.args[1:]]
+            return ref_atomic(self, name, target, operands, mask)
+        if name.startswith("image") and name not in self.p.functions:
+            return image_call(self, name, [self.eval(a, mask) for a in node.args], mask)
+        if name in ("EmitVertex", "EmitStreamVertex", "EndPrimitive", "EndStreamPrimitive"):
+            stream = int(numpy.asarray(self.eval(node.args[0], mask).data).reshape(-1)[0]) if node.args else 0
+            if self.events is not None:
+                lanes = numpy.nonzero(self.live(mask))[0]
+                if name.startswith("Emit"):
+                    self.events.append(("emit", stream, lanes, {k: _rows(v, lanes) for k, v in emit_outputs(self).items()}))
+                else:
+                    self.events.append(("cut", stream, lanes, None))
+            return Val("void", None)
+        if name in ("barrier", "memoryBarrier", "memoryBarrierShared", "memoryBarrierBuffer", "memoryBarrierImage",
+                    "memoryBarrierAtomicCounter", "groupMemoryBarrier"):
+            return Val("void", None)
         if name in self.p.functions:
             args = [self.eval(a, mask) for a in node.args]
             return self.call_function(name, args, mask, node.args)
@@ -1309,6 +1396,7 @@ class Runtime:
         coords = as_columns(args[1], self.n).astype(numpy.float64)
         lod = None
         offset = (0, 0)
+        extra = {}
         if name in ("textureSize",):
             size = function(sampler.kind, None, "size", None) if function is not None else (0, 0)
             values = numpy.array(size[:2] if "1D" not in sampler.kind else size[:1], dtype=numpy.int64)
@@ -1319,13 +1407,20 @@ class Runtime:
             coords = coords / numpy.where(last == 0, 1, last)
         if "Lod" in name and len(args) > 2:
             lod = as_columns(args[2], self.n)[:, 0]
+        if "Grad" in name and len(args) > 3:
+            extra["gradients"] = (as_columns(args[2], self.n).astype(numpy.float64),
+                                  as_columns(args[3], self.n).astype(numpy.float64))
         if "Offset" in name and len(args) > 2:
-            offset = tuple(int(v) for v in as_columns(args[-1], self.n)[0][:2])
+            offset = tuple(int(v) for v in as_columns(args[-1 if "Grad" not in name else 4], self.n)[0][:2])
+        if name in ("texture", "texture2D", "texture1D", "texture3D", "textureCube", "textureProj", "texture2DProj") \
+                and len(args) > 2 and "Shadow" not in sampler.kind:
+            extra["bias"] = as_columns(args[2], self.n)[:, 0].astype(numpy.float64)
         if name.startswith("texelFetch"):
             lod = as_columns(args[2], self.n)[:, 0] if len(args) > 2 else None
             result = function(sampler.kind, coords, "fetch", lod) if function is not None else numpy.zeros((self.n, 4))
         else:
-            result = function(sampler.kind, coords, offset, lod) if function is not None else numpy.zeros((self.n, 4))
+            result = function(sampler.kind, coords, offset, lod, **extra) if function is not None \
+                else numpy.zeros((self.n, 4))
         result = numpy.asarray(result, dtype=numpy.float64)
         if "Shadow" in sampler.kind or name.startswith("shadow"):
             reference = coords[:, 2] if coords.shape[1] > 2 else coords[:, -1]
@@ -1599,6 +1694,16 @@ def _zero_like(rt, args):
     return Val(args[0].kind, numpy.zeros_like(_f(args[0])))
 
 
+def _derivative(axis, fine=False, width=False):
+    def function(rt, args):
+        from .raster import derivative
+        value = _f(args[0])
+        if width:
+            return Val(args[0].kind, numpy.abs(derivative(value, "x", fine)) + numpy.abs(derivative(value, "y", fine)))
+        return Val(args[0].kind, derivative(value, axis, fine))
+    return function
+
+
 def _atan(rt, args):
     if len(args) == 2:
         y, x = _broadcast(args[0], args[1], "float", rt.n)
@@ -1626,8 +1731,10 @@ BUILTINS = {
     "inverse": _inverse, "lessThan": _compare(numpy.less), "lessThanEqual": _compare(numpy.less_equal),
     "greaterThan": _compare(numpy.greater), "greaterThanEqual": _compare(numpy.greater_equal),
     "equal": _compare(numpy.equal), "notEqual": _compare(numpy.not_equal), "any": _any, "all": _all, "not": _not,
-    "dFdx": _zero_like, "dFdy": _zero_like, "fwidth": _zero_like, "dFdxFine": _zero_like, "dFdyFine": _zero_like,
-    "dFdxCoarse": _zero_like, "dFdyCoarse": _zero_like, "fwidthFine": _zero_like, "fwidthCoarse": _zero_like,
+    "dFdx": _derivative("x", True), "dFdy": _derivative("y", True), "fwidth": _derivative(None, True, True),
+    "dFdxFine": _derivative("x", True), "dFdyFine": _derivative("y", True), "dFdxCoarse": _derivative("x"),
+    "dFdyCoarse": _derivative("y"), "fwidthFine": _derivative(None, True, True),
+    "fwidthCoarse": _derivative(None, False, True),
     "ftransform": _ftransform, "modf": _modf, "fma": lambda rt, a: Val(a[0].kind, _f(a[0]) * _f(a[1]) + _f(a[2])),
 }
 
@@ -1696,3 +1803,495 @@ def run_fragment(program: Program, n: int, inputs: Dict[str, Val], uniforms: Dic
             rt.scopes[0][block["instance"]] = Val("__block", fields)
     rt.run_main()
     return rt
+
+
+# ------------------------------------------------------------------ memory: buffer blocks, shared variables
+class Ref:
+    """A variable in memory (a buffer block, a shared variable, an atomic counter): the bytes (numpy uint8,
+    shared by the lanes), the byte offset of each lane, the type, the array length (None: not an array, -1:
+    the runtime-sized last member), the layout (std430 or std140)."""
+
+    __slots__ = ("memory", "offset", "kind", "array", "std430", "structs")
+
+    def __init__(self, memory, offset, kind, array=None, std430=True, structs=None):
+        self.memory, self.offset, self.kind, self.array = memory, offset, kind, array
+        self.std430, self.structs = std430, structs or {}
+
+
+def _round(value, align):
+    return (value + align - 1) // align * align
+
+
+def layout_of(kind: str, structs, std430=True, array=None):
+    """(size, alignment) of a type in a std430 / std140 block."""
+    if array is not None:
+        stride = array_stride(kind, structs, std430)
+        size, align = layout_of(kind, structs, std430)
+        if not std430:
+            align = _round(align, 16)
+        return stride * max(array, 0), align
+    if kind in structs:
+        offset, align = 0, 1 if std430 else 16
+        for field, field_kind, field_array in structs[kind]:
+            count = _const_count(field_array)
+            size, field_align = layout_of(field_kind, structs, std430, count)
+            align = max(align, field_align)
+            offset = _round(offset, field_align) + size
+        return _round(offset, align), align
+    if kind in MATRICES:
+        c, r = MATRICES[kind]
+        column = array_stride(vector_kind("float", r), structs, std430)
+        return column * c, column if std430 else 16
+    if kind in VECTORS:
+        k = VECTORS[kind][1]
+        return 4 * k, 8 if k == 2 else 16
+    return 4, 4
+
+
+def array_stride(kind: str, structs, std430=True) -> int:
+    size, align = layout_of(kind, structs, std430)
+    stride = _round(size, align)
+    return stride if std430 else _round(stride, 16)
+
+
+def _const_count(node):
+    if node is None:
+        return None
+    if node == -1:
+        return -1
+    if isinstance(node, int):
+        return node
+    if getattr(node, "op", None) == "const":
+        return int(node.value[1])
+    return None
+
+
+def member_offsets(members, structs, std430=True):
+    """[(name, kind, array, offset)] of the members of a block (array: count, -1 for a runtime array)."""
+    out, offset = [], 0
+    for item in members:
+        name, kind, array = item[0], item[1], item[2]
+        layout = item[3] if len(item) > 3 else {}
+        count = _const_count(array)
+        size, align = layout_of(kind, structs, std430, count if count and count > 0 else None)
+        if count == -1:
+            size = 0
+        explicit = (layout or {}).get("offset")
+        offset = _const_count(explicit) if explicit is not None else _round(offset, align)
+        out.append((name, kind, count, offset))
+        offset += size
+    return out
+
+
+def _ref_field(ref: Ref, name: str) -> Ref:
+    for field, kind, count, offset in member_offsets(ref.structs[ref.kind], ref.structs, ref.std430):
+        if field == name:
+            return Ref(ref.memory, ref.offset + offset, kind, count, ref.std430, ref.structs)
+    raise GLSLError(f"no member {name}")
+
+
+def _ref_index(ref: Ref, index) -> Ref:
+    index = numpy.asarray(index).astype(numpy.int64)
+    if ref.array is not None:
+        stride = array_stride(ref.kind, ref.structs, ref.std430)
+        return Ref(ref.memory, ref.offset + index * stride, ref.kind, None, ref.std430, ref.structs)
+    if ref.kind in MATRICES:
+        c, r = MATRICES[ref.kind]
+        column = array_stride(vector_kind("float", r), ref.structs, ref.std430)
+        return Ref(ref.memory, ref.offset + index * column, vector_kind("float", r), None, ref.std430, ref.structs)
+    if ref.kind in VECTORS:
+        return Ref(ref.memory, ref.offset + index * 4, VECTORS[ref.kind][0], None, ref.std430, ref.structs)
+    raise GLSLError("index of a scalar")
+
+
+def _ref_length(ref: Ref) -> int:
+    if ref.array is None:
+        return 0
+    if ref.array >= 0:
+        return ref.array
+    stride = array_stride(ref.kind, ref.structs, ref.std430)
+    start = int(numpy.asarray(ref.offset).reshape(-1)[0]) if numpy.asarray(ref.offset).size else 0
+    return max(0, (len(ref.memory) - start) // max(stride, 1))
+
+
+def _words(ref: Ref, n, count):
+    """The 32-bit words (n, count) of a lane's value, and the lanes inside the memory."""
+    offset = numpy.broadcast_to(numpy.asarray(ref.offset, dtype=numpy.int64), (n,))
+    inside = (offset >= 0) & (offset + 4 * count <= len(ref.memory))
+    safe = numpy.where(inside, offset, 0)
+    index = safe[:, None] + 4 * numpy.arange(count)
+    words = numpy.zeros((n, count), dtype=numpy.uint32)
+    if len(ref.memory) >= 4:
+        raw = ref.memory[(index[:, :, None] + numpy.arange(4)).clip(0, len(ref.memory) - 1)]
+        words = raw.astype(numpy.uint32) @ numpy.array([1, 1 << 8, 1 << 16, 1 << 24], dtype=numpy.uint32)
+    return words, inside
+
+
+def ref_load(ref: Ref, n: int) -> Val:
+    if ref.array is not None:
+        length = _ref_length(ref)
+        return Val("array", [ref_load(_ref_index(ref, numpy.full(n, k)), n) for k in range(length)], length)
+    if ref.kind in ref.structs:
+        return Val(ref.kind, {name: ref_load(Ref(ref.memory, ref.offset + offset, kind, count, ref.std430, ref.structs), n)
+                              for name, kind, count, offset in member_offsets(ref.structs[ref.kind], ref.structs, ref.std430)})
+    if ref.kind in MATRICES:
+        c, r = MATRICES[ref.kind]
+        columns = [ref_load(_ref_index(ref, numpy.full(n, k)), n).data for k in range(c)]
+        return Val(ref.kind, numpy.stack(columns, axis=1))
+    base = base_of(ref.kind)
+    count = size_of(ref.kind)
+    words, inside = _words(ref, n, count)
+    words = numpy.where(inside[:, None], words, 0).astype(numpy.uint32)
+    if base == "float":
+        data = words.view(numpy.float32).astype(numpy.float64)
+    elif base == "int":
+        data = words.view(numpy.int32).astype(numpy.int64)
+    elif base == "uint":
+        data = words.astype(numpy.int64)
+    else:
+        data = words != 0
+    return Val(ref.kind, data[:, 0] if count == 1 else data)
+
+
+def ref_store(ref: Ref, value: Val, mask, n: int):
+    lanes = numpy.nonzero(numpy.asarray(mask, dtype=bool))[0]
+    if len(lanes) == 0:
+        return
+    if ref.array is not None:
+        for k, item in enumerate(value.data if value.kind == "array" else []):
+            ref_store(_ref_index(ref, numpy.full(n, k)), item, mask, n)
+        return
+    if ref.kind in ref.structs:
+        for name, kind, count, offset in member_offsets(ref.structs[ref.kind], ref.structs, ref.std430):
+            if isinstance(value.data, dict) and name in value.data:
+                ref_store(Ref(ref.memory, ref.offset + offset, kind, count, ref.std430, ref.structs), value.data[name], mask, n)
+        return
+    if ref.kind in MATRICES:
+        c, r = MATRICES[ref.kind]
+        data = numpy.asarray(value.data).reshape(n, c, r)
+        for k in range(c):
+            ref_store(_ref_index(ref, numpy.full(n, k)), Val(vector_kind("float", r), data[:, k]), mask, n)
+        return
+    base = base_of(ref.kind)
+    count = size_of(ref.kind)
+    data = numpy.asarray(value.data)
+    data = numpy.broadcast_to(data.reshape(n, -1) if data.ndim else numpy.full((n, 1), data), (n, count)) \
+        if data.ndim <= 1 or data.shape[-1] in (1, count) else data.reshape(n, count)
+    if base == "float":
+        words = data.astype(numpy.float32).view(numpy.uint32)
+    elif base == "bool":
+        words = (data != 0).astype(numpy.uint32)
+    else:
+        words = (data.astype(numpy.int64) & 0xFFFFFFFF).astype(numpy.uint32)
+    offset = numpy.broadcast_to(numpy.asarray(ref.offset, dtype=numpy.int64), (n,))[lanes]
+    ok = (offset >= 0) & (offset + 4 * count <= len(ref.memory))
+    lanes, offset = lanes[ok], offset[ok]
+    raw = numpy.ascontiguousarray(words[lanes]).view(numpy.uint8).reshape(len(lanes), 4 * count)
+    # the lanes in order: when two write the same place, the last one stays
+    ref.memory[offset[:, None] + numpy.arange(4 * count)] = raw
+
+
+ATOMICS = {"atomicAdd", "atomicMin", "atomicMax", "atomicAnd", "atomicOr", "atomicXor", "atomicExchange", "atomicCompSwap",
+           "atomicCounterIncrement", "atomicCounterDecrement", "atomicCounter", "atomicCounterAdd", "atomicCounterSubtract"}
+
+
+def ref_atomic(rt, name: str, ref: Ref, operands, mask) -> Val:
+    """An atomic operation of the active lanes, one after the other in lane order: the old values."""
+    n = rt.n
+    kind = ref.kind
+    signed = base_of(kind) == "int"
+    old = ref_load(ref, n).data.astype(numpy.int64)
+    out = old.copy()
+    lanes = numpy.nonzero(numpy.asarray(mask, dtype=bool))[0]
+    offsets = numpy.broadcast_to(numpy.asarray(ref.offset, dtype=numpy.int64), (n,))
+    values = [numpy.broadcast_to(numpy.asarray(op.data).reshape(-1), (n,)).astype(numpy.int64) if op is not None else None
+              for op in operands]
+    memory = {}
+    for lane in lanes:
+        place = int(offsets[lane])
+        if place < 0 or place + 4 > len(ref.memory):
+            continue
+        current = memory.get(place)
+        if current is None:
+            current = int.from_bytes(bytes(ref.memory[place:place + 4]), "little")
+        value = current - (1 << 32) if signed and current & 0x80000000 else current
+        out[lane] = value
+        a = int(values[0][lane]) if values and values[0] is not None else 0
+        if name in ("atomicAdd", "atomicCounterAdd"):
+            new = value + a
+        elif name == "atomicCounterSubtract":
+            new = value - a
+        elif name == "atomicCounterIncrement":
+            new = value + 1
+        elif name == "atomicCounterDecrement":
+            new = value - 1
+            out[lane] = new         # the decrement gives the new value
+        elif name == "atomicMin":
+            new = min(value, a)
+        elif name == "atomicMax":
+            new = max(value, a)
+        elif name == "atomicAnd":
+            new = value & a
+        elif name == "atomicOr":
+            new = value | a
+        elif name == "atomicXor":
+            new = value ^ a
+        elif name == "atomicExchange":
+            new = a
+        elif name == "atomicCompSwap":
+            new = int(values[1][lane]) if value == a else value
+        else:   # atomicCounter: a read
+            new = value
+        current = new & 0xFFFFFFFF
+        memory[place] = current
+        ref.memory[place:place + 4] = numpy.frombuffer(current.to_bytes(4, "little"), dtype=numpy.uint8)
+    return Val("int" if signed else "uint", out if base_of(kind) != "uint" else out & 0xFFFFFFFF)
+
+
+# ------------------------------------------------------------------ images
+IMAGES = {f"{p}image{d}" for p in ("", "i", "u") for d in ("1D", "2D", "3D", "Cube", "2DRect", "1DArray", "2DArray",
+                                                         "CubeArray", "Buffer", "2DMS", "2DMSArray")}
+SAMPLERS |= IMAGES | {"atomic_uint"}
+
+
+class ImageUnit:
+    """An image bound with glBindImageTexture: its texels (layers of (h, w, 4) float arrays) and format."""
+
+    def __init__(self, layers, integer=False, unsigned=False, on_change=None):
+        self.layers, self.integer, self.unsigned, self.on_change = layers, integer, unsigned, on_change
+
+
+def _image_coords(rt, args, image):
+    coords = numpy.asarray(args[1].data).reshape(rt.n, -1).astype(numpy.int64)
+    first = image.layers[0] if image.layers else numpy.zeros((1, 1, 4))
+    h, w = first.shape[:2]
+    x = coords[:, 0]
+    y = coords[:, 1] if coords.shape[1] > 1 else numpy.zeros(rt.n, dtype=numpy.int64)
+    layer = coords[:, 2] if coords.shape[1] > 2 else numpy.zeros(rt.n, dtype=numpy.int64)
+    inside = (x >= 0) & (x < w) & (y >= 0) & (y < h) & (layer >= 0) & (layer < len(image.layers))
+    return numpy.clip(x, 0, w - 1), numpy.clip(y, 0, h - 1), numpy.clip(layer, 0, len(image.layers) - 1), inside
+
+
+def image_call(rt, name, args, mask) -> Val:
+    unit = int(numpy.asarray(args[0].data).reshape(-1)[0]) if isinstance(args[0].data, numpy.ndarray) else int(args[0].data)
+    image = rt.images.get(unit)
+    kind = args[0].kind
+    base = "int" if kind.startswith("i") else "uint" if kind.startswith("u") else "float"
+    if image is None or not image.layers:
+        if name == "imageSize":
+            return Val("ivec2", numpy.zeros((rt.n, 2), dtype=numpy.int64))
+        return Val(vector_kind(base, 4), numpy.zeros((rt.n, 4), dtype=dtype_of(base)))
+    if name == "imageSize":
+        h, w = image.layers[0].shape[:2]
+        values = [w, h] + ([len(image.layers)] if "Array" in kind or "3D" in kind else [])
+        return Val(vector_kind("int", len(values)), numpy.tile(numpy.array(values, dtype=numpy.int64), (rt.n, 1)))
+    x, y, layer, inside = _image_coords(rt, args, image)
+    if name == "imageLoad":
+        out = numpy.zeros((rt.n, 4))
+        for k in numpy.unique(layer):
+            sel = layer == k
+            out[sel] = image.layers[int(k)][y[sel], x[sel]]
+        out[~inside] = 0
+        data = out if base == "float" else numpy.round(out).astype(numpy.int64)
+        return Val(vector_kind(base, 4), data)
+    if name == "imageStore":
+        value = numpy.asarray(args[2].data, dtype=numpy.float64).reshape(rt.n, -1)
+        if value.shape[1] < 4:
+            value = numpy.concatenate([value, numpy.zeros((rt.n, 4 - value.shape[1]))], 1)
+        lanes = numpy.nonzero(numpy.asarray(mask, dtype=bool) & inside)[0]
+        for lane in lanes if len(numpy.unique(layer[lanes])) > 1 else []:
+            image.layers[int(layer[lane])][y[lane], x[lane]] = value[lane]
+        if len(lanes) and len(numpy.unique(layer[lanes])) <= 1:
+            image.layers[int(layer[lanes[0]])][y[lanes], x[lanes]] = value[lanes]
+        if image.on_change:
+            image.on_change()
+        return Val("void", None)
+    # imageAtomic*: on the first channel, lane after lane
+    lanes = numpy.nonzero(numpy.asarray(mask, dtype=bool) & inside)[0]
+    operand = numpy.broadcast_to(numpy.asarray(args[2].data).reshape(-1), (rt.n,)).astype(numpy.int64)
+    other = numpy.broadcast_to(numpy.asarray(args[3].data).reshape(-1), (rt.n,)).astype(numpy.int64) if len(args) > 3 else None
+    out = numpy.zeros(rt.n, dtype=numpy.int64)
+    for lane in lanes:
+        texels = image.layers[int(layer[lane])]
+        current = int(texels[y[lane], x[lane], 0])
+        out[lane] = current
+        a = int(operand[lane])
+        new = {"imageAtomicAdd": current + a, "imageAtomicMin": min(current, a), "imageAtomicMax": max(current, a),
+               "imageAtomicAnd": current & a, "imageAtomicOr": current | a, "imageAtomicXor": current ^ a,
+               "imageAtomicExchange": a}.get(name, int(other[lane]) if other is not None and current == a else current)
+        texels[y[lane], x[lane], 0] = new
+    if image.on_change:
+        image.on_change()
+    return Val(base, out)
+
+
+# ------------------------------------------------------------------ the stages besides vertex and fragment
+def program_layout(program, qualifier: str) -> Dict[str, object]:
+    """The layout of the declarations "layout(...) in;" / "layout(...) out;": name -> value (None for a
+    flag such as triangles)."""
+    out = {}
+    for decl in program.layout_decls:
+        if qualifier in decl["qualifiers"]:
+            for name, value in decl["layout"].items():
+                out[name] = _const_count(value) if value is not None else None
+    return out
+
+
+STAGE_OUTPUTS = {"gl_Position": "vec4", "gl_PointSize": "float", "gl_Layer": "int", "gl_ViewportIndex": "int",
+                 "gl_PrimitiveID": "int"}
+
+
+def _prepare(rt: "Runtime", program, uniforms, inputs, outputs=True, buffers=None, images=None, groups=None):
+    for name, value in uniforms.items():
+        rt.scopes[0][name] = value
+    for name, value in inputs.items():
+        rt.scopes[0][name] = value
+    rt.images = images or {}
+    n = rt.n
+    if outputs:
+        for name, kind in STAGE_OUTPUTS.items():
+            rt.scopes[0].setdefault(name, zero(kind, n))
+        rt.scopes[0].setdefault("gl_ClipDistance", zero("float", n, None, 8))
+        for item in program.interface("out"):
+            name, kind, array, layout, quals = item
+            if name not in rt.scopes[0]:
+                size = rt.array_size(array)
+                rt.scopes[0][name] = zero(kind, n, program.structs, size if size and size > 0 else None)
+        for block in program.blocks:
+            if "out" in block["qualifiers"] and block["instance"] and block["instance"] not in rt.scopes[0]:
+                fields = {name: zero(kind, n, program.structs) for name, kind, array, layout in block["members"]}
+                rt.scopes[0][block["instance"]] = Val("__block", fields)
+    bind_memory(rt, program, buffers or {}, groups)
+
+
+def bind_memory(rt, program, buffers, groups=None):
+    """The buffer blocks (buffers: binding -> numpy uint8), the atomic counters (binding -> bytes, as
+    ("atomic", binding)) and the shared variables (one copy per work group: groups (n,) the group of each
+    lane) as variables in memory."""
+    n = rt.n
+    zero_offset = numpy.zeros(n, dtype=numpy.int64)
+    for block in program.blocks:
+        if "buffer" not in block["qualifiers"]:
+            continue
+        binding = _const_count(block["layout"].get("binding")) or 0
+        memory = buffers.get(binding)
+        if memory is None:
+            memory = numpy.zeros(0, dtype=numpy.uint8)
+        std430 = "std140" not in block["layout"]
+        members = [(name, kind, array, layout) for name, kind, array, layout in block["members"]]
+        name = f"__buffer_{block['name']}"
+        rt.structs = dict(rt.structs)
+        rt.structs[name] = [(m[0], m[1], m[2]) for m in members]
+        whole = Ref(memory, zero_offset, name, None, std430, rt.structs)
+        if block["instance"]:
+            rt.scopes[0][block["instance"]] = Val("__ref", whole)
+        else:
+            for member in members:
+                rt.scopes[0][member[0]] = Val("__ref", _ref_field(whole, member[0]))
+    for item in program.globals:
+        v = item.value
+        quals = set(v["qualifiers"])
+        if v["kind"] == "atomic_uint" and "uniform" in quals:
+            binding = _const_count(v["layout"].get("binding")) or 0
+            memory = buffers.get(("atomic", binding))
+            if memory is None:
+                memory = numpy.zeros(4, dtype=numpy.uint8)
+            base = _const_count(v["layout"].get("offset")) or 0
+            for k, (name, array, init) in enumerate(v["items"]):
+                count = _const_count(array)
+                rt.scopes[0][name] = Val("__ref", Ref(memory, zero_offset + base + 4 * k, "uint",
+                                                     count if count and count > 0 else None, True, rt.structs))
+        elif "shared" in quals:
+            group_of = numpy.zeros(n, dtype=numpy.int64) if groups is None else numpy.asarray(groups, dtype=numpy.int64)
+            count_groups = int(group_of.max()) + 1 if n else 1
+            for name, array, init in v["items"]:
+                count = rt.array_size(array)
+                size, _ = layout_of(v["kind"], rt.structs, True, count if count and count > 0 else None)
+                memory = numpy.zeros(max(4, size) * count_groups, dtype=numpy.uint8)
+                rt.scopes[0][name] = Val("__ref", Ref(memory, group_of * max(4, size), v["kind"],
+                                                     count if count and count > 0 else None, True, rt.structs))
+
+
+def run_compute(program, groups, uniforms, textures, buffers, images, chunk=1 << 18):
+    """A dispatch of groups (x, y, z) work groups; the lanes of whole groups run together, chunk at most."""
+    layout = program_layout(program, "in")
+    local = (layout.get("local_size_x") or 1, layout.get("local_size_y") or 1, layout.get("local_size_z") or 1)
+    per_group = local[0] * local[1] * local[2]
+    total_groups = groups[0] * groups[1] * groups[2]
+    step = max(1, chunk // max(per_group, 1))
+    for first in range(0, total_groups, step):
+        count = min(step, total_groups - first)
+        n = count * per_group
+        lane = numpy.arange(n, dtype=numpy.int64)
+        group = first + lane // per_group
+        index = lane % per_group
+        local_id = numpy.stack([index % local[0], (index // local[0]) % local[1], index // (local[0] * local[1])], 1)
+        group_id = numpy.stack([group % groups[0], (group // groups[0]) % groups[1], group // (groups[0] * groups[1])], 1)
+        rt = Runtime(program, n, textures)
+        inputs = {"gl_LocalInvocationID": Val("uvec3", local_id), "gl_WorkGroupID": Val("uvec3", group_id),
+                  "gl_GlobalInvocationID": Val("uvec3", group_id * numpy.array(local) + local_id),
+                  "gl_NumWorkGroups": Val("uvec3", numpy.tile(numpy.array(groups, dtype=numpy.int64), (n, 1))),
+                  "gl_WorkGroupSize": Val("uvec3", numpy.tile(numpy.array(local, dtype=numpy.int64), (n, 1))),
+                  "gl_LocalInvocationIndex": Val("uint", index)}
+        _prepare(rt, program, {k: _subset(v, n) for k, v in uniforms.items()}, inputs, False, buffers, images, group - first)
+        rt.run_main()
+
+
+def _subset(value: Val, n: int) -> Val:
+    """A uniform given for some lanes, for n lanes (its first row repeated)."""
+    if value.kind == "array":
+        return Val("array", [_subset(v, n) for v in value.data], value.length)
+    if isinstance(value.data, dict):
+        return Val(value.kind, {k: _subset(v, n) for k, v in value.data.items()})
+    if isinstance(value.data, numpy.ndarray) and value.data.ndim >= 1 and value.data.shape[0] != n and value.data.shape[0] >= 1:
+        return Val(value.kind, numpy.repeat(value.data[:1], n, axis=0))
+    return value
+
+
+def run_geometry(program, n, inputs, uniforms, textures, buffers=None, images=None):
+    """The geometry shader on n primitives: inputs are arrays (one item per vertex of the primitive). Returns
+    the runs (one per invocation), each with its events (emit / cut, stream, lanes, outputs)."""
+    layout = program_layout(program, "in")
+    runs = []
+    for invocation in range(layout.get("invocations") or 1):
+        rt = Runtime(program, n, textures)
+        values = dict(inputs)
+        values["gl_InvocationID"] = Val("int", numpy.full(n, invocation, dtype=numpy.int64))
+        _prepare(rt, program, uniforms, values, True, buffers, images)
+        rt.events = []
+        rt.run_main()
+        runs.append(rt.events)
+    return runs
+
+
+def run_stage(program, n, inputs, uniforms, textures, buffers=None, images=None) -> "Runtime":
+    """A tessellation control / evaluation shader (or any stage with outputs) on n lanes."""
+    rt = Runtime(program, n, textures)
+    _prepare(rt, program, uniforms, inputs, True, buffers, images)
+    rt.scopes[0].setdefault("gl_TessLevelOuter", zero("float", n, None, 4))
+    rt.scopes[0].setdefault("gl_TessLevelInner", zero("float", n, None, 2))
+    rt.run_main()
+    return rt
+
+
+def emit_outputs(rt) -> Dict[str, Val]:
+    """The values of the outputs of a geometry shader (at EmitVertex)."""
+    out = {}
+    for name in list(STAGE_OUTPUTS) + [item[0] for item in rt.p.interface("out")]:
+        if rt.has(name):
+            out[name] = rt.lookup(name).copy()
+    for block in rt.p.blocks:
+        if "out" in block["qualifiers"] and block["instance"] and rt.has(block["instance"]):
+            out[block["instance"]] = rt.lookup(block["instance"]).copy()
+    return out
+
+
+def _rows(value: Val, lanes) -> Val:
+    """A value restricted to some lanes."""
+    if value.kind == "array":
+        return Val("array", [_rows(v, lanes) for v in value.data], value.length)
+    if isinstance(value.data, dict):
+        return Val(value.kind, {k: _rows(v, lanes) for k, v in value.data.items()})
+    if isinstance(value.data, numpy.ndarray) and value.data.ndim >= 1:
+        return Val(value.kind, value.data[lanes].copy())
+    return value

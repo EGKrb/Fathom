@@ -7,7 +7,8 @@
 # constants (def, defi, defb and those set by the program), the control flow (if / ifc / else, rep,
 # loop with aL, break / breakc / breakp, call / callnz / label / ret, predicates and setp), the
 # texture instructions (texld with texldp / texldb, texldl, texldd, ps 1.x tex / texcoord / texcrd,
-# texkill), cmp / cnd / lrp / dp2add, the source modifiers and result shifts of ps 1.x. dsx / dsy give 0;
+# texkill), cmp / cnd / lrp / dp2add, the source modifiers and result shifts of ps 1.x. dsx / dsy and the mip
+# level of texld / texldb / texldd come from the 2x2 quads of the pixel stage (raster.derivative);
 # the bump-mapping and matrix-texture instructions of ps 1.x (texbem, texm3x3...) are not run.
 
 import struct
@@ -166,6 +167,10 @@ class Shader9:
         self._link()
         unsupported = sorted({NAMES.get(ins.opcode, str(ins.opcode)) for ins in self.program if ins.opcode in _UNSUPPORTED})
         self.error = ("instructions " + ", ".join(unsupported)) if unsupported else None
+
+    def uses_derivatives(self) -> bool:
+        """dsx / dsy (texld takes them only for a mipmapped texture, which the device knows)."""
+        return any(ins.opcode in (91, 92) for ins in self.program)
 
     def _link(self):
         stack = []
@@ -508,13 +513,15 @@ class Machine9:
                 alive &= ~frame[2]
         return alive
 
-    def _texture(self, stage, coords, lod=None):
+    def _texture(self, stage, coords, lod=None, bias=None, gradients=None):
         function = self.textures.get(stage)
         if function is None:
             out = numpy.zeros((self.n, 4))
             out[:, 3] = 1
             return out
-        return numpy.asarray(function(coords, lod), dtype=numpy.float64)
+        if bias is None and gradients is None:
+            return numpy.asarray(function(coords, lod), dtype=numpy.float64)
+        return numpy.asarray(function(coords, lod, bias, gradients), dtype=numpy.float64)
 
     def _compute(self, ins: Instruction9):
         code, d, s, pred = ins.opcode, ins.dst, ins.srcs, ins.predicate
@@ -608,8 +615,9 @@ class Machine9:
             w(numpy.where(r(s[0]) >= 0, r(s[1]), r(s[2])))
         elif code == 90:  # dp2add
             w((r(s[0])[:, :2] * r(s[1])[:, :2]).sum(1) + r(s[2])[:, 0])
-        elif code in (91, 92):
-            w(numpy.zeros((self.n, 4)))
+        elif code in (91, 92):  # dsx / dsy
+            from .raster import derivative
+            w(derivative(r(s[0]), "x" if code == 91 else "y"))
         elif code == 94:  # setp_comp p0, a, b
             w(COMPARE.get(ins.control, numpy.greater)(r(s[0]), r(s[1])).astype(numpy.float64))
         elif code == 85:  # texdp3
@@ -624,8 +632,8 @@ class Machine9:
         elif code == 95:  # texldl
             coords = r(s[0])
             w(self._texture(s[1].number, coords, coords[:, 3])[:, list(s[1].swizzle)])
-        elif code == 93:  # texldd
-            w(self._texture(s[1].number, r(s[0]))[:, list(s[1].swizzle)])
+        elif code == 93:  # texldd dst, coords, s#, ddx, ddy
+            w(self._texture(s[1].number, r(s[0]), None, None, (r(s[2]), r(s[3])))[:, list(s[1].swizzle)])
         else:
             raise Unsupported(f"Direct3D 9 shader instruction {NAMES.get(code, code)}")
 
@@ -640,12 +648,12 @@ class Machine9:
             self.write(d, self._texture(d.number, coords))
             return
         coords = self.read(s[0])
-        lod = None
+        bias = None
         if ins.control & 1:    # texldp
             coords = coords / numpy.where(coords[:, 3:4] == 0, 1, coords[:, 3:4])
-        elif ins.control & 2:  # texldb: the bias in w (no derivatives: ignored)
-            lod = None
-        value = self._texture(s[1].number, coords, lod)
+        elif ins.control & 2:  # texldb: the bias in w
+            bias = coords[:, 3].astype(numpy.float64)
+        value = self._texture(s[1].number, coords, None, bias)
         self.write(d, value[:, list(s[1].swizzle)], ins.predicate)
 
 

@@ -9,7 +9,21 @@
 # runs the fragment stage once on all the fragments of a batch, and merges them into the render targets
 # in the order of the primitives (depth test, blending with the factors of Direct3D / OpenGL, write
 # masks, several targets). Lines and points are rasterized too (their attributes interpolated).
+#
+# When the fragment stage needs derivatives (fragment.quads: ddx / ddy in a shader, or the mip level of a
+# texture), the fragments come in 2x2 quads, as on a GPU: four lanes per quad (top left, top right,
+# bottom left, bottom right), the pixels of a quad the primitive does not cover being helper lanes that
+# run the shader (with attributes extrapolated) but write nothing. derivative() takes the differences
+# within the quads; sample_mips() chooses the mip levels from the derivatives of the coordinates.
+#
+# The work of a batch is shared between threads (numpy releases the GIL in its loops): the coverage and the
+# attributes of contiguous pieces of the primitives, then, when the fragment stage says it has no side
+# effects (fragment.parallel: no unordered access view, no image, no atomic), the fragment stage on pieces
+# of the fragments (whole quads); the fragments are merged into the targets in order, by one thread.
 
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, List, Optional, Sequence
 
 try:
@@ -18,6 +32,109 @@ except ImportError:  # the 3D APIs need numpy (requirements.txt)
     numpy = None
 
 BATCH = 1 << 20  # pixels tested at once
+_QUADS = threading.local()  # .lanes: the number of lanes of the fragment stage running in quads (0: none)
+PARALLEL = 1 << 15  # the pixels (or fragments) from which a batch is shared between threads
+_POOL: List[ThreadPoolExecutor] = []
+
+
+def threads() -> int:
+    """The threads that share a batch: FATHOM_RASTER_THREADS, else up to 4 (memory bound beyond)."""
+    try:
+        wanted = int(os.environ.get("FATHOM_RASTER_THREADS", "0"))
+    except ValueError:
+        wanted = 0
+    return max(1, wanted if wanted > 0 else min(4, os.cpu_count() or 1))
+
+
+def _pool(count: int) -> ThreadPoolExecutor:
+    if not _POOL or _POOL[0]._max_workers != count:
+        _POOL[:] = [ThreadPoolExecutor(count, thread_name_prefix="raster")]
+    return _POOL[0]
+
+
+def _pieces(total: int, count: int, align: int = 1):
+    """count ranges covering 0..total, their bounds multiples of align."""
+    size = -(-total // count)
+    size += -size % align
+    return [(start, min(total, start + size)) for start in range(0, total, max(1, size))]
+
+
+def quad_lanes() -> int:
+    return getattr(_QUADS, "lanes", 0)
+
+
+def derivative(values, axis: str, fine: bool = False):
+    """ddx (axis "x") or ddy ("y") of per-lane values (n, ...) of a fragment stage running in quads (zeros
+    otherwise): coarse, the same difference for the four lanes of a quad, or fine, per row / column."""
+    values = numpy.asarray(values)
+    floats = values.astype(numpy.float64) if values.dtype.kind != "f" else values
+    n = values.shape[0] if values.ndim else 0
+    if n == 0 or n != quad_lanes():
+        return numpy.zeros_like(floats)
+    q = floats.reshape((n // 4, 4) + floats.shape[1:])
+    if axis == "x":
+        top = q[:, 1] - q[:, 0]
+        bottom = q[:, 3] - q[:, 2] if fine else top
+        out = numpy.stack([top, top, bottom, bottom], axis=1)
+    else:
+        left = q[:, 2] - q[:, 0]
+        right = q[:, 3] - q[:, 1] if fine else left
+        out = numpy.stack([left, right, left, right], axis=1)
+        if getattr(_QUADS, "y_up", False):  # OpenGL: window y goes up, the rows of the quads go down
+            out = -out
+    return out.reshape(floats.shape)
+
+
+def implicit_lod(coords, sizes):
+    """The mip level (n,) of texture coordinates (n, k) for a texture of sizes (texels per unit along
+    each coordinate), from their coarse derivatives; None outside a fragment stage in quads."""
+    coords = numpy.asarray(coords, dtype=numpy.float64)
+    if coords.ndim != 2 or coords.shape[0] == 0 or coords.shape[0] != quad_lanes():
+        return None
+    k = min(coords.shape[1], len(sizes))
+    scale = numpy.asarray(sizes[:k], dtype=numpy.float64)
+    gx = derivative(coords[:, :k], "x") * scale
+    gy = derivative(coords[:, :k], "y") * scale
+    return lod_of_gradients(gx, gy)
+
+
+def lod_of_gradients(gx, gy):
+    """log2 of the longest of the two gradients (in texels); a very negative level when they are 0."""
+    rho = numpy.maximum(numpy.sqrt((numpy.asarray(gx) ** 2).sum(axis=1)), numpy.sqrt((numpy.asarray(gy) ** 2).sum(axis=1)))
+    with numpy.errstate(divide="ignore", invalid="ignore"):
+        return numpy.where(rho > 0, numpy.log2(numpy.where(rho > 0, rho, 1)), -1000.0)
+
+
+def mip_levels(lod, count: int, linear: bool):
+    """(first level, second level, weight of the second) per lane, for count levels."""
+    lod = numpy.clip(numpy.nan_to_num(numpy.asarray(lod, dtype=numpy.float64), nan=0.0, posinf=1000.0, neginf=-1000.0),
+                     0, max(count - 1, 0))
+    if linear:
+        first = numpy.floor(lod).astype(numpy.int64)
+        second = numpy.minimum(first + 1, count - 1)
+        weight = numpy.where(second > first, lod - first, 0.0)
+        return first, second, weight
+    first = numpy.minimum(numpy.floor(lod + 0.5).astype(numpy.int64), count - 1)
+    return first, first, numpy.zeros(len(lod))
+
+
+def sample_mips(levels, u, v, lod=None, linear=False, mip_linear=False, address="wrap", border=None):
+    """Sampling of a mip chain (a list of (h, w, 4) arrays) at u, v with a level per lane (lod (n,) or None
+    for the first level), trilinear with mip_linear."""
+    if lod is None or len(levels) <= 1:
+        return sample(levels[0], u, v, linear, address, border)
+    u, v = numpy.asarray(u, dtype=numpy.float64), numpy.asarray(v, dtype=numpy.float64)
+    first, second, weight = mip_levels(lod, len(levels), mip_linear)
+    out = numpy.zeros(u.shape + (4,), dtype=numpy.float64)
+    for level in numpy.unique(numpy.concatenate([first, second[weight > 0]])):
+        texture = levels[int(level)]
+        sel = numpy.nonzero(first == level)[0]
+        if len(sel):
+            out[sel] += sample(texture, u[sel], v[sel], linear, address, border) * (1 - weight[sel])[:, None]
+        sel = numpy.nonzero((second == level) & (weight > 0))[0]
+        if len(sel):
+            out[sel] += sample(texture, u[sel], v[sel], linear, address, border) * weight[sel][:, None]
+    return out
 
 
 class Framebuffer:
@@ -199,9 +316,15 @@ class Fragments:
     """What the fragment stage receives: n fragments, their pixel, depth, 1/w, primitive, facing, and the
     interpolated attributes (n, k)."""
 
-    def __init__(self, x, y, z, inv_w, prim, front, attrs):
+    def __init__(self, x, y, z, inv_w, prim, front, attrs, helper=None):
         self.x, self.y, self.z, self.inv_w, self.prim, self.front, self.attrs = x, y, z, inv_w, prim, front, attrs
         self.n = len(x)
+        self.helper = helper        # (n,) True for the helper lanes of the quads (None: no quads)
+
+    def part(self, start: int, end: int) -> "Fragments":
+        return Fragments(self.x[start:end], self.y[start:end], self.z[start:end], self.inv_w[start:end],
+                         self.prim[start:end], self.front[start:end], self.attrs[start:end],
+                         self.helper[start:end] if self.helper is not None else None)
 
 
 FragmentStage = Callable[[Fragments], tuple]  # -> (colors per target (n, 4), alive (n,) or None, depth (n,) or None)
@@ -420,6 +543,77 @@ def _batch(out, pipeline, screen, attrs, prims, source, fragment, flat_mask, are
     total = int(sizes.sum())
     if total == 0:
         return 0
+    quads = bool(getattr(fragment, "quads", False))
+    count = threads()
+    if count > 1 and total >= PARALLEL and len(tri) > 1:
+        # contiguous pieces of the primitives (their order kept), about as many pixels each
+        ends = numpy.cumsum(sizes)
+        cuts = sorted({int(c) for c in numpy.searchsorted(ends, numpy.arange(1, count) * total / count)} | {0, len(tri)})
+        ranges = [(a, b) for a, b in zip(cuts, cuts[1:]) if b > a]
+        parts = list(_pool(count).map(lambda r: _cover(out, pipeline, screen, attrs, prims, flat_mask, area, edges, quads,
+                                                       tri[r[0]:r[1]], px0[r[0]:r[1]], px1[r[0]:r[1]], py0[r[0]:r[1]],
+                                                       py1[r[0]:r[1]], sizes[r[0]:r[1]]), ranges))
+        parts = [p for p in parts if p is not None]
+        if not parts:
+            return 0
+        x, y, t, z, inv_w, values, helper = (numpy.concatenate([p[k] for p in parts]) if parts[0][k] is not None else None
+                                             for k in range(7))
+    else:
+        covered = _cover(out, pipeline, screen, attrs, prims, flat_mask, area, edges, quads, tri, px0, px1, py0, py1, sizes)
+        if covered is None:
+            return 0
+        x, y, t, z, inv_w, values, helper = covered
+    frags = Fragments(x, y, z, inv_w, source[t], front[t], values, helper)
+    colors, alive, depth = _fragments(fragment, frags, quads, pipeline.convention == "gl", count)
+    if helper is not None:
+        alive = ~helper if alive is None else (numpy.asarray(alive, dtype=bool) & ~helper)
+    if depth is not None:
+        z = numpy.asarray(depth, dtype=numpy.float64)
+    merge(out, x, y, z.astype(numpy.float32), colors, alive)
+    return len(x) if helper is None else int((~helper).sum())
+
+
+def _fragments(fragment, frags: Fragments, quads: bool, y_up: bool, count: int):
+    """The fragment stage on frags: on pieces (whole quads) in threads when it allows it."""
+    def run(part):
+        if not quads:
+            return fragment(part)
+        _QUADS.lanes, _QUADS.y_up = part.n, y_up
+        try:
+            return fragment(part)
+        finally:
+            _QUADS.lanes = 0
+    if count < 2 or frags.n < PARALLEL or not getattr(fragment, "parallel", False):
+        return run(frags)
+    ranges = _pieces(frags.n, count, 4)
+    results = list(_pool(count).map(lambda r: run(frags.part(*r)), ranges))
+    targets = max(len(r[0]) for r in results)
+    colors = []
+    for k in range(targets):
+        items = [r[0][k] if k < len(r[0]) else None for r in results]
+        if all(item is None for item in items):
+            colors.append(None)
+            continue
+        shape = next(item for item in items if item is not None).shape[1:]
+        colors.append(numpy.concatenate([item if item is not None else numpy.zeros((b - a,) + shape, dtype=numpy.float32)
+                                         for item, (a, b) in zip(items, ranges)]))
+    alive = None
+    if any(r[1] is not None for r in results):
+        alive = numpy.concatenate([numpy.asarray(r[1], dtype=bool) if r[1] is not None else numpy.ones(b - a, dtype=bool)
+                                   for r, (a, b) in zip(results, ranges)])
+    depth = None
+    if any(r[2] is not None for r in results):
+        depth = numpy.concatenate([numpy.asarray(r[2], dtype=numpy.float64) if r[2] is not None else frags.z[a:b]
+                                   for r, (a, b) in zip(results, ranges)])
+    return colors, alive, depth
+
+
+def _cover(out, pipeline, screen, attrs, prims, flat_mask, area, edges, quads, tri, px0, px1, py0, py1, sizes):
+    """The fragments of the pixels the primitives tri cover (in their order): x, y, primitive, z, 1/w, attributes,
+    helper lanes (quads); None when none."""
+    total = int(sizes.sum())
+    if total == 0:
+        return None
     owner = numpy.repeat(numpy.arange(len(tri)), sizes)
     offset = numpy.arange(total) - numpy.repeat(numpy.cumsum(sizes) - sizes, sizes)
     width = (px1 - px0)[owner]
@@ -439,7 +633,29 @@ def _batch(out, pipeline, screen, attrs, prims, source, fragment, flat_mask, are
         ((e2 > 0) | ((e2 == 0) & edges[2][t]))
     sel = numpy.nonzero(inside)[0]
     if len(sel) == 0:
-        return 0
+        return None
+    helper = None
+    if quads:
+        # the 2x2 quads of the covered pixels, four lanes each; those not covered are helpers
+        x, y, t = x[sel], y[sel], t[sel]
+        left, top, right, bottom = _bounds(out, pipeline)
+        key = numpy.unique(numpy.stack([t, y >> 1, x >> 1], axis=1), axis=0)
+        t = numpy.repeat(key[:, 0], 4)
+        x = numpy.repeat(key[:, 2] * 2, 4) + numpy.tile([0, 1, 0, 1], len(key))
+        y = numpy.repeat(key[:, 1] * 2, 4) + numpy.tile([0, 0, 1, 1], len(key))
+        corner = prims[t]
+        a, b, c = screen[corner[:, 0]], screen[corner[:, 1]], screen[corner[:, 2]]
+        cx, cy = x + 0.5, y + 0.5
+        ar = area[t]
+        e0 = (b[:, 0] - cx) * (c[:, 1] - cy) - (b[:, 1] - cy) * (c[:, 0] - cx)
+        e1 = (c[:, 0] - cx) * (a[:, 1] - cy) - (c[:, 1] - cy) * (a[:, 0] - cx)
+        e2 = (a[:, 0] - cx) * (b[:, 1] - cy) - (a[:, 1] - cy) * (b[:, 0] - cx)
+        sign = numpy.where(ar > 0, 1.0, -1.0)
+        e0, e1, e2 = e0 * sign, e1 * sign, e2 * sign
+        covered = ((e0 > 0) | ((e0 == 0) & edges[0][t])) & ((e1 > 0) | ((e1 == 0) & edges[1][t])) & \
+            ((e2 > 0) | ((e2 == 0) & edges[2][t])) & (x >= left) & (x < right) & (y >= top) & (y < bottom)
+        helper = ~covered
+        sel = numpy.arange(len(x))
     x, y, t = x[sel], y[sel], t[sel]
     a, b, c = a[sel], b[sel], c[sel]
     ar = numpy.abs(ar[sel])
@@ -455,12 +671,7 @@ def _batch(out, pipeline, screen, attrs, prims, source, fragment, flat_mask, are
     if flat_mask is not None and flat_mask.any():
         provoking = corner[:, 0] if pipeline.provoking == "first" else corner[:, 2]
         values[:, flat_mask] = attrs[provoking][:, flat_mask]
-    frags = Fragments(x, y, z, inv_w, source[t], front[t], values)
-    colors, alive, depth = fragment(frags)
-    if depth is not None:
-        z = numpy.asarray(depth, dtype=numpy.float64)
-    merge(out, x, y, z.astype(numpy.float32), colors, alive)
-    return len(x)
+    return x, y, t, z, inv_w, values, helper
 
 
 def _lines_points(out, pipeline, kind, screen, attrs, prims, source, fragment, flat_mask):

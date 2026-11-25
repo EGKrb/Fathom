@@ -13,7 +13,8 @@ import struct
 from typing import Dict, List, Optional
 
 from . import dxbc
-from .d3d_pipeline import DrawState, dispatch, draw_dxbc
+from .apihooks import read_astring
+from .d3d_pipeline import DrawState, SOTarget, StreamOutput, dispatch, draw_dxbc
 from .dxgi_emu import DEVICES, DxgiDevice, Dxgi, dxgi_of, missing, E_INVALIDARG, E_FAIL, DXGI_ERROR_NOT_FOUND, S_FALSE
 from .gpu import (DXGI, DXGI_SRGB, Image, Sampler, View, kind_bytes, pitch_of, rows_of, to_srgb)
 from .raster import Blend, numpy
@@ -323,6 +324,71 @@ class State11:
         return 0
 
 
+def so_entries(dp, address: int, count: int, with_stream: bool):
+    """The entries of a D3D11_SO_DECLARATION_ENTRY (with_stream) / D3D10_SO_DECLARATION_ENTRY array: (stream,
+    semantic name or None for a gap, semantic index, first component, component count, output slot)."""
+    x64 = dp._x64
+    ptr = 8 if x64 else 4
+    head = (ptr if x64 else 4) if with_stream else 0       # the stream (UINT, padded to the pointer on x64)
+    size = head + ptr + 4 + 3
+    size = (size + ptr - 1) // ptr * ptr if x64 else (size + 3) // 4 * 4
+    out = []
+    for i in range(count):
+        base = address + size * i
+        stream = struct.unpack("<I", bytes(dp.read(base, 4)))[0] if with_stream else 0
+        name_address = dp.read_ptr(base + head)
+        index = struct.unpack("<I", bytes(dp.read(base + head + ptr, 4)))[0]
+        first, components, slot = bytes(dp.read(base + head + ptr + 4, 3))
+        name = read_astring(dp, name_address) if name_address else None
+        out.append((stream, name, index, first, components, slot))
+    return out
+
+
+_STATE_SKIP = ("d3d", "device", "commands", "mapped", "refs", "com_address")
+
+
+def _snapshot(context) -> dict:
+    return {k: v for k, v in context.__dict__.items() if k not in _STATE_SKIP}
+
+
+def _copy_state(state: dict) -> dict:
+    return {k: (dict(v) if isinstance(v, dict) else list(v) if isinstance(v, list) else v) for k, v in state.items()}
+
+
+def _unmap_copy(target, sub, data: bytes, pitch: int):
+    """What a deferred context's Map wrote, into the resource when the command list runs."""
+    if target.dimension == "buffer":
+        target.write(data[:target.size])
+        return
+    image = target.subresource(sub)
+    if image is not None:
+        image.from_bytes(data, pitch)
+
+
+class CommandList11:
+    """The commands of a deferred context (FinishCommandList): (method, state, arguments)."""
+    interface = "ID3D11CommandList"
+
+    def __init__(self, d3d, commands):
+        self.d3d, self.commands = d3d, commands
+
+    def GetDevice(self, out):
+        return self.d3d.device_out(out)
+
+    def GetContextFlags(self):
+        return 0
+
+    def SetPrivateData(self, guid, size, data):
+        return 0
+
+    def SetPrivateDataInterface(self, guid, data):
+        return 0
+
+    def GetPrivateData(self, guid, size, data):
+        return DXGI_ERROR_NOT_FOUND
+
+
+
 def blends_of(state: Optional[State11]) -> List[Blend]:
     """raster.Blend of the 8 render targets of a blend state (D3D11_BLEND_DESC / DESC1)."""
     if state is None or not state.data:
@@ -369,6 +435,7 @@ class Context11:
         self.blend_factor = (1.0, 1.0, 1.0, 1.0)
         self.depth_state: Optional[State11] = None
         self.predicate = None
+        self.so_targets: List[tuple] = []      # (Resource11, offset) per slot
 
     def GetDevice(self, out):
         return self.d3d.device_out(out)
@@ -562,21 +629,36 @@ class Context11:
         dp.write(count, struct.pack("<I", n))
 
     def SOSetTargets(self, count, buffers, offsets):
-        if count and any(self._list(count, buffers)):
-            missing(self.d3d.dp, "Direct3D 11 stream output")
+        dp = self.d3d.dp
+        targets = []
+        for i, address in enumerate(self._list(count, buffers) if count else []):
+            resource = self._impl(address) if address else None
+            offset = struct.unpack("<I", bytes(dp.read(offsets + 4 * i, 4)))[0] if offsets else 0
+            if resource is not None and offset == 0xFFFFFFFF:     # append after what was written
+                offset = getattr(resource, "so_filled", 0)
+            targets.append((resource, offset) if isinstance(resource, Resource11) else None)
+        self.so_targets = targets
 
     def SOGetTargets(self, count, buffers):
-        self.d3d.dp.write(buffers, b"\0" * self.d3d.dp.ptr_size() * count)
+        dp = self.d3d.dp
+        for i in range(count):
+            entry = self.so_targets[i] if i < len(self.so_targets) else None
+            dp.write_ptr(buffers + dp.ptr_size() * i, entry[0].com_address if entry else 0)
+
+    def _so_counters(self):
+        return dict(self.d3d.so_written), dict(self.d3d.so_needed)
 
     def Begin(self, query):
         impl = self._impl(query)
         if impl is not None:
             impl.begin_fragments = self.d3d.fragments
+            impl.begin_so = self._so_counters()
 
     def End(self, query):
         impl = self._impl(query)
         if impl is not None:
             impl.end_fragments = self.d3d.fragments
+            impl.end_so = self._so_counters()
 
     def GetData(self, query, data, size, flags):
         impl = self._impl(query)
@@ -593,6 +675,13 @@ class Context11:
             value = struct.pack("<QI", 1000000000, 0)
         elif kind == 0:    # EVENT
             value = struct.pack("<I", 1)
+        elif 6 <= kind <= 15:   # SO_STATISTICS / SO_OVERFLOW_PREDICATE (all streams, then per stream)
+            begin = getattr(impl, "begin_so", ({}, {}))
+            end = getattr(impl, "end_so", begin)
+            streams = range(4) if kind in (6, 7) else [(kind - 8) // 2]
+            written = sum(end[0].get(s, 0) - begin[0].get(s, 0) for s in streams)
+            needed = sum(end[1].get(s, 0) - begin[1].get(s, 0) for s in streams)
+            value = struct.pack("<QQ", written, needed) if kind in (6, 8, 10, 12, 14) else struct.pack("<I", int(needed > written))
         else:
             value = b""
         self.d3d.dp.write(data, value.ljust(size, b"\0")[:size])
@@ -615,7 +704,24 @@ class Context11:
         return 0
 
     def ExecuteCommandList(self, command_list, restore):
-        missing(self.d3d.dp, "Direct3D 11 deferred contexts")
+        """The commands a deferred context recorded, each with the state it had then; afterwards the context's
+        own state is kept (restore) or cleared."""
+        commands = self._impl(command_list)
+        if not isinstance(commands, CommandList11):
+            return
+        saved = _snapshot(self) if restore else None
+        for name, state, args in commands.commands:
+            if name == "unmap":
+                _unmap_copy(*args)
+                continue
+            context = Context11.__new__(Context11)
+            context.d3d, context.device = self.d3d, self.device
+            context.__dict__.update(_copy_state(state))
+            getattr(Context11, name)(context, *args)
+        if restore:
+            self.__dict__.update(_copy_state(saved))
+        else:
+            self.ClearState()
 
     def FinishCommandList(self, restore, out):
         return E_FAIL
@@ -854,6 +960,17 @@ class Context11:
         if "vs" not in state.shaders:
             missing(self.d3d.dp, "Direct3D 11 draw without a vertex shader")
             return None
+        gs_state = self.shaders.get("gs")
+        so = getattr(gs_state, "so", None) if gs_state is not None else None
+        if so is not None:
+            entries, strides, rasterized = so
+            state.stream_out = StreamOutput(entries, strides, rasterized)
+            for slot, entry in enumerate(self.so_targets[:4]):
+                if entry is not None:
+                    resource, offset = entry
+                    state.stream_out.targets[slot] = SOTarget(resource.read(), offset, resource.size, resource)
+            if state.shaders.get("gs") is not None and state.shaders["gs"].kind != 2:
+                del state.shaders["gs"]     # a vertex / domain shader given for stream output: no geometry shader
         state.layout = self.layout.data if self.layout is not None and self.layout.data else []
         for slot, entry in self.vertex_buffers.items():
             if entry and entry[0] is not None:
@@ -894,6 +1011,26 @@ class Context11:
         except dxbc.Unsupported as e:
             missing(self.d3d.dp, f"Direct3D 11 shader: {e}")
         self._write_back(uav_views)
+        self._stream_out_done(state)
+
+    def _stream_out_done(self, state):
+        """The stream output's buffers back in the program's memory, their filled size (DrawAuto), the
+        statistics."""
+        so = state.stream_out
+        if so is None:
+            return
+        for slot, target in enumerate(so.targets):
+            if target is None:
+                continue
+            if target.changed:
+                target.owner.write(target.data[:target.owner.size])
+            target.owner.so_filled = target.offset
+            if slot < len(self.so_targets) and self.so_targets[slot] is not None:
+                self.so_targets[slot] = (target.owner, target.offset)
+        for stream, count in so.written.items():
+            self.d3d.so_written[stream] = self.d3d.so_written.get(stream, 0) + count
+        for stream, count in so.needed.items():
+            self.d3d.so_needed[stream] = self.d3d.so_needed.get(stream, 0) + count
 
     def Draw(self, count, start):
         self._draw(numpy.arange(start, start + count), [(0, 0)])
@@ -936,7 +1073,13 @@ class Context11:
             self.DrawIndexedInstanced(*args)
 
     def DrawAuto(self):
-        missing(self.d3d.dp, "Direct3D 11 DrawAuto (stream output)")
+        """A draw of the vertices the stream output wrote to the buffer of input slot 0."""
+        entry = self.vertex_buffers.get(0)
+        if not entry or entry[0] is None or not entry[1]:
+            return
+        buffer, stride, offset = entry
+        count = max(0, getattr(buffer, "so_filled", 0) - offset) // stride
+        self.Draw(count, 0)
 
     def Dispatch(self, x, y, z):
         shader, ok = self._shader_of("cs")
@@ -1068,9 +1211,13 @@ class Device11(DxgiDevice):
         return self._shader(bytecode, length, out, "ID3D11GeometryShader")
 
     def CreateGeometryShaderWithStreamOutput(self, bytecode, length, decl, entries, strides, count, stream, linkage, out):
-        if entries:
-            missing(self.d3d.dp, "Direct3D 11 stream output")
-        return self._shader(bytecode, length, out, "ID3D11GeometryShader")
+        result = self._shader(bytecode, length, out, "ID3D11GeometryShader")
+        state = self.d3d.com.impl(self.d3d.dp.read_ptr(out)) if out and result == 0 else None
+        if state is not None:
+            dp = self.d3d.dp
+            stride_list = [struct.unpack("<I", bytes(dp.read(strides + 4 * i, 4)))[0] for i in range(count)] if strides else []
+            state.so = (so_entries(dp, decl, entries, True), stride_list, -1 if stream == 0xFFFFFFFF else stream)
+        return result
 
     def CreateHullShader(self, bytecode, length, linkage, out):
         return self._shader(bytecode, length, out, "ID3D11HullShader")
@@ -1115,10 +1262,13 @@ class Device11(DxgiDevice):
         return E_INVALIDARG
 
     def CreateDeferredContext(self, flags, out):
-        missing(self.d3d.dp, "Direct3D 11 deferred contexts")
-        return E_NOTIMPL
+        context = DeferredContext11(self.d3d, self)
+        self.d3d.dp.write_ptr(out, self.d3d.com.create(context, "ID3D11DeviceContext"))
+        return 0
 
     CreateDeferredContext1 = CreateDeferredContext
+    CreateDeferredContext2 = CreateDeferredContext
+    CreateDeferredContext3 = CreateDeferredContext
 
     def CreateDeviceContextState(self, flags, levels, count, sdk, riid, out, chosen):
         if chosen:
@@ -1200,6 +1350,8 @@ class Direct3D11:
         self.com = self.dxgi.com
         self.devices: List[Device11] = []
         self.fragments = 0
+        self.so_written: Dict[int, int] = {}    # stream output: primitives written / needed per stream
+        self.so_needed: Dict[int, int] = {}
 
     def device_out(self, out):
         if not self.devices:
@@ -1249,3 +1401,122 @@ def install(dp):
     hooks.register_signature("d3d11.dll", "D3D11CreateDevice", "pipipiippp", d3d.create)
     hooks.register_signature("d3d11.dll", "D3D11CreateDeviceAndSwapChain", "pipipiippppp", d3d.create_with_chain)
     return d3d
+
+
+class DeferredContext11(Context11):
+    """A deferred context: the state is its own; the commands that act (draws, dispatches, clears, copies,
+    updates, maps, queries) are recorded with the state of the moment and copies of the data they point to,
+    for ExecuteCommandList on the immediate context."""
+
+    def __init__(self, d3d, device):
+        self.commands: List[tuple] = []
+        self.mapped: Dict[tuple, tuple] = {}
+        Context11.__init__(self, d3d, device)
+
+    def GetType(self):
+        return 1    # D3D11_DEVICE_CONTEXT_DEFERRED
+
+    def _copy(self, address: int, size: int) -> int:
+        """A copy of size bytes of the program's memory, kept for the command list."""
+        if not address or size <= 0:
+            return address
+        dp = self.d3d.dp
+        copy = dp.allocate(max(16, size))
+        dp.write(copy, bytes(dp.read(address, size)))
+        return copy
+
+    def _record(self, name, *args):
+        self.commands.append((name, _copy_state(_snapshot(self)), args))
+
+    def FinishCommandList(self, restore, out):
+        commands = CommandList11(self.d3d, self.commands)
+        self.commands = []
+        if not restore:
+            self.ClearState()
+        if out:
+            self.d3d.dp.write_ptr(out, self.d3d.com.create(commands, "ID3D11CommandList"))
+        return 0
+
+    def ExecuteCommandList(self, command_list, restore):
+        self._record("ExecuteCommandList", command_list, restore)
+
+    # the commands -----------------------------------------------------------
+    def ClearRenderTargetView(self, view, color):
+        self._record("ClearRenderTargetView", view, self._copy(color, 16))
+
+    def ClearUnorderedAccessViewFloat(self, view, values):
+        self._record("ClearUnorderedAccessViewFloat", view, self._copy(values, 16))
+
+    def ClearUnorderedAccessViewUint(self, view, values):
+        self._record("ClearUnorderedAccessViewUint", view, self._copy(values, 16))
+
+    def ClearView(self, view, color, rects, count):
+        self._record("ClearView", view, self._copy(color, 16), self._copy(rects, 16 * count), count)
+
+    def CopySubresourceRegion(self, dst, dst_sub, x, y, z, src, src_sub, box):
+        self._record("CopySubresourceRegion", dst, dst_sub, x, y, z, src, src_sub, self._copy(box, 24))
+
+    def CopySubresourceRegion1(self, dst, dst_sub, x, y, z, src, src_sub, box, flags):
+        self._record("CopySubresourceRegion", dst, dst_sub, x, y, z, src, src_sub, self._copy(box, 24))
+
+    def UpdateSubresource(self, dst, sub, box, data, row_pitch, depth_pitch):
+        target = self._impl(dst)
+        if not isinstance(target, Resource11) or not data:
+            return
+        dp = self.d3d.dp
+        area = struct.unpack("<6I", bytes(dp.read(box, 24))) if box else None
+        if target.dimension == "buffer":
+            size = (area[3] - area[0]) if area else target.size
+        else:
+            image = target.subresource(sub)
+            if image is None:
+                return
+            height = (area[4] - area[1]) if area else image.height
+            size = max(row_pitch, 1) * rows_of(image.kind, height)
+        self._record("UpdateSubresource", dst, sub, self._copy(box, 24), self._copy(data, size), row_pitch, depth_pitch)
+
+    def UpdateSubresource1(self, dst, sub, box, data, row_pitch, depth_pitch, flags):
+        return self.UpdateSubresource(dst, sub, box, data, row_pitch, depth_pitch)
+
+    def Map(self, resource, sub, kind, flags, mapped):
+        """Only WRITE_DISCARD / WRITE_NO_OVERWRITE on a deferred context: fresh memory, copied at Unmap."""
+        target = self._impl(resource)
+        if not isinstance(target, Resource11):
+            return E_INVALIDARG
+        dp = self.d3d.dp
+        if target.dimension == "buffer":
+            size, pitch, depth_pitch = target.size, target.size, target.size
+        else:
+            image = target.subresource(sub)
+            if image is None:
+                return E_INVALIDARG
+            pitch = image.pitch
+            size = depth_pitch = pitch * rows_of(image.kind, image.height)
+        address = dp.allocate(max(16, size), page_align=True)
+        if kind == 5 and target.dimension == "buffer":     # NO_OVERWRITE: what is there stays
+            dp.write(address, bytes(target.read()))
+        self.mapped[(id(target), sub)] = (address, size, pitch)
+        if mapped:
+            dp.write_ptr(mapped, address)
+            dp.write(mapped + dp.ptr_size(), struct.pack("<2I", pitch, depth_pitch))
+        return 0
+
+    def Unmap(self, resource, sub):
+        target = self._impl(resource)
+        entry = self.mapped.pop((id(target), sub), None) if target is not None else None
+        if entry is None:
+            return
+        address, size, pitch = entry
+        self.commands.append(("unmap", None, (target, sub, bytes(self.d3d.dp.read(address, size)), pitch)))
+
+
+for _name in ("ClearDepthStencilView", "DiscardResource", "DiscardView", "DiscardView1", "CopyResource", "GenerateMips",
+              "ResolveSubresource", "CopyStructureCount", "Begin", "End", "SetPredication", "Draw", "DrawInstanced",
+              "DrawIndexed", "DrawIndexedInstanced", "DrawInstancedIndirect", "DrawIndexedInstancedIndirect", "DrawAuto",
+              "Dispatch", "DispatchIndirect"):
+    def _recorder(self, *args, _name=_name):
+        if _name == "SetPredication":   # the predicate is state, and is used by the draws recorded after
+            Context11.SetPredication(self, *args)
+        self._record(_name, *args)
+    setattr(DeferredContext11, _name, _recorder)
+

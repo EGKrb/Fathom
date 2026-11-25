@@ -27,6 +27,13 @@ INTERFACES = {
                 "ID3D10RasterizerState", "ID3D10BlendState", "ID3D10DepthStencilState", "ID3D10Query",
                 "ID3D10Predicate", "ID3D10Counter", "ID3D10Multithread"],
     "d3d10_1.h": ["ID3D10Device1", "ID3D10BlendState1", "ID3D10ShaderResourceView1"],
+    "d3d10effect.h": ["ID3D10Effect", "ID3D10EffectPool", "ID3D10EffectTechnique", "ID3D10EffectPass", "ID3D10EffectType",
+                      "ID3D10EffectVariable", "ID3D10EffectScalarVariable", "ID3D10EffectVectorVariable",
+                      "ID3D10EffectMatrixVariable", "ID3D10EffectStringVariable", "ID3D10EffectShaderResourceVariable",
+                      "ID3D10EffectRenderTargetViewVariable", "ID3D10EffectDepthStencilViewVariable",
+                      "ID3D10EffectConstantBuffer", "ID3D10EffectShaderVariable", "ID3D10EffectBlendVariable",
+                      "ID3D10EffectDepthStencilVariable", "ID3D10EffectRasterizerVariable", "ID3D10EffectSamplerVariable",
+                      "ID3D10StateBlock"],
     "d3d11.h": ["ID3D11Device", "ID3D11DeviceContext", "ID3D11Texture2D", "ID3D11Buffer", "ID3D11RenderTargetView",
                 "ID3D11DepthStencilView", "ID3D11ShaderResourceView", "ID3D11VertexShader", "ID3D11PixelShader",
                 "ID3D11GeometryShader", "ID3D11InputLayout", "ID3D11SamplerState", "ID3D11RasterizerState",
@@ -39,7 +46,8 @@ INTERFACES = {
                 "ID3D12GraphicsCommandList2", "ID3D12GraphicsCommandList3", "ID3D12GraphicsCommandList4", "ID3D12Fence",
                 "ID3D12Fence1", "ID3D12Resource", "ID3D12Resource1", "ID3D12DescriptorHeap", "ID3D12RootSignature",
                 "ID3D12PipelineState", "ID3D12Heap", "ID3D12QueryHeap", "ID3D12CommandSignature",
-                "ID3D12RootSignatureDeserializer", "ID3D12VersionedRootSignatureDeserializer"],
+                "ID3D12RootSignatureDeserializer", "ID3D12VersionedRootSignatureDeserializer", "ID3D12StateObject",
+                "ID3D12StateObjectProperties"],
     "d3d12sdklayers.h": ["ID3D12Debug"],
     "dxgi.h": ["IDXGISwapChain", "IDXGIFactory", "IDXGIFactory1", "IDXGIAdapter", "IDXGIAdapter1", "IDXGIDevice",
                "IDXGIDevice1", "IDXGIOutput", "IDXGISurface", "IDXGISurface1", "IDXGIResource"],
@@ -143,15 +151,22 @@ def vtbl_methods(source: str, interface: str):
     return methods
 
 
-def declare_methods(source: str, interface: str):
-    """The methods of DECLARE_INTERFACE_(I, Base) { STDMETHOD(Name)(THIS_ ...) PURE; ... } (d3d9.h)."""
-    match = re.search(r"DECLARE_INTERFACE_\(\s*%s\s*,\s*\w+\s*\)\s*\{(.*?)\n\};" % interface, source, re.S)
+def declare_methods(source: str, interface: str, parsed=None):
+    """The methods of DECLARE_INTERFACE_(I, Base) / DECLARE_INTERFACE(I) { STDMETHOD(Name)(THIS_ ...) PURE; ... }
+    (d3d9.h, d3d10effect.h, whose interfaces without a base have no IUnknown methods)."""
+    match = re.search(r"DECLARE_INTERFACE_?\(\s*%s\s*(?:,\s*(\w+)\s*)?\)\s*\{(.*?)\n\};" % interface, source, re.S)
     if not match:
         return None
+    base = match.group(1)
     methods = []
-    for name, params in re.findall(r"STDMETHOD_?\((?:[^,()]+,\s*)?(\w+)\)\s*\((.*?)\)\s*PURE\s*;", match.group(1), re.S):
+    for name, params in re.findall(r"STDMETHOD_?\((?:[^,()]+,\s*)?(\w+)\)\s*\((.*?)\)\s*PURE\s*;", match.group(2), re.S):
         params = params.replace("THIS_", "").replace("THIS", "")
         methods.append((name, "".join(kind(p) for p in split_parameters(params))))
+    if parsed and base in parsed:
+        # C++: the vtable of the base (whose methods the body may repeat, or leave out, as d3d10effect.h
+        # does with IsValid), then the new methods
+        known = {name for name, _ in parsed[base]}
+        methods = list(parsed[base]) + [m for m in methods if m[0] not in known]
     return methods
 
 
@@ -186,7 +201,7 @@ def main():
             if name in names and len(parts) == 11:
                 iids[name] = ("%08X-%04X-%04X-%02X%02X-" % tuple(parts[:5]) + "".join("%02X" % b for b in parts[5:]))
         for name in names:
-            methods = vtbl_methods(source, name) or declare_methods(source, name)
+            methods = vtbl_methods(source, name) or declare_methods(source, name, interfaces)
             if not methods:
                 raise SystemExit(f"{name} not found in {header}")
             interfaces[name] = methods

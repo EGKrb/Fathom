@@ -17,3 +17,22 @@ cd /d "%~dp0"
 "%FXC%" /nologo /T hs_5_0 /E hs_patch /Vn PatchHullShader /Fh stages_hs.h stages.hlsl || exit /b 1
 "%FXC%" /nologo /T ds_5_0 /E ds_patch /Vn PatchDomainShader /Fh stages_ds.h stages.hlsl || exit /b 1
 "%FXC%" /nologo /T cs_5_0 /E cs_fill /Vn FillComputeShader /Fh stages_cs.h stages.hlsl || exit /b 1
+"%FXC%" /nologo /T cs_5_0 /E cs_load /Vn MoreLoadComputeShader /Fh more_cs_load.h more.hlsl || exit /b 1
+"%FXC%" /nologo /T vs_5_0 /E vs_screen /Vn MoreScreenVertexShader /Fh more_vs_screen.h more.hlsl || exit /b 1
+"%FXC%" /nologo /T ps_5_0 /E ps_deriv /Vn MoreDerivPixelShader /Fh more_ps_deriv.h more.hlsl || exit /b 1
+"%FXC%" /nologo /T vs_5_0 /E vs_patch_point /Vn MorePatchVertexShader /Fh more_vs_patch_point.h more.hlsl || exit /b 1
+"%FXC%" /nologo /T hs_5_0 /E hs_integer /Vn MoreIntegerHullShader /Fh more_hs_integer.h more.hlsl || exit /b 1
+"%FXC%" /nologo /T hs_5_0 /E hs_odd /Vn MoreOddHullShader /Fh more_hs_odd.h more.hlsl || exit /b 1
+"%FXC%" /nologo /T ds_5_0 /E ds_edges /Vn MoreEdgesDomainShader /Fh more_ds_edges.h more.hlsl || exit /b 1
+"%FXC%" /nologo /T vs_5_0 /E vs_seed /Vn MoreSeedVertexShader /Fh more_vs_seed.h more.hlsl || exit /b 1
+"%FXC%" /nologo /T gs_5_0 /E gs_triangle /Vn MoreTriangleGeometryShader /Fh more_gs_triangle.h more.hlsl || exit /b 1
+"%FXC%" /nologo /T vs_5_0 /E vs_streamed /Vn MoreStreamedVertexShader /Fh more_vs_streamed.h more.hlsl || exit /b 1
+"%FXC%" /nologo /T vs_5_0 /E vs_plain /Vn MorePlainVertexShader /Fh more_vs_plain.h more.hlsl || exit /b 1
+"%FXC%" /nologo /T ps_5_0 /E ps_paint /Vn MorePaintPixelShader /Fh more_ps_paint.h more.hlsl || exit /b 1
+"%FXC%" /nologo /T fx_4_0 /Vn MoreEffect /Fh more_fx10.h more_fx10.fx || exit /b 1
+set DXC=dxc
+where dxc >nul 2>nul || for /f "delims=" %%f in ('dir /b /s "%ProgramFiles(x86)%\Windows Kits\10\bin\*dxc.exe" ^| findstr /i x64') do set DXC=%%f
+"%DXC%" -nologo -T cs_6_0 -E cs -Vn MoreSm6ComputeShader -Fh more_sm6_cs.h more_sm6.hlsl || exit /b 1
+"%DXC%" -nologo -T vs_6_0 -E vs -Vn Scene6VertexShader -Fh scene6_vs.h scene.hlsl || exit /b 1
+"%DXC%" -nologo -T ps_6_0 -E ps -Vn Scene6PixelShader -Fh scene6_ps.h scene.hlsl || exit /b 1
+"%DXC%" -nologo -T lib_6_3 -Vn MoreDxrLibrary -Fh more_dxr.h more_dxr.hlsl || exit /b 1

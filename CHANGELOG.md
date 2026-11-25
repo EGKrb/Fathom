@@ -32,8 +32,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - `emulator_world` modes `clip`, `gl3`, `d3d9sh`, `d3d10`, `d3d11gs`,
   `d3d11cs`, `mesh` and `d3d12`, run natively and in the emulator by
   `extracmds/tests/test_emulator.py`.
+- Emulator: shaders of shader model 6 (DXIL, compiled by dxc) run in Direct3D
+  12: the LLVM bitcode is read and interpreted on all the lanes at once
+  (resources, samplers, wave operations, atomics, group shared memory).
+- Emulator: Direct3D 12 ray tracing (DXR 1.0): state objects with DXIL
+  libraries and hit groups, shader identifiers and tables, bottom and top
+  level acceleration structures, `DispatchRays`, `TraceRay` with closest hit,
+  any hit (`IgnoreHit`, `AcceptHitAndEndSearch`) and miss shaders,
+  `CallShader`, the ray system values.
+- Emulator: GLSL geometry, tessellation and compute shaders
+  (`glDispatchCompute`, shader storage blocks, shared memory, atomics,
+  images, atomic counters).
+- Emulator: stream output in Direct3D 10, 11 and 12 (its statistics queries
+  and `DrawAuto`), deferred contexts and command lists in Direct3D 11, and
+  Direct3D 10 effects (`D3D10CreateEffectFromMemory`, fx_4_0).
+- Emulator: derivatives (`ddx` / `ddy` coarse and fine, `dsx` / `dsy`,
+  `dFdx` / `dFdy`) and the mip level of textures, from pixels shaded in 2x2
+  quads with helper lanes; `SampleBias`, `SampleGrad`, `CalculateLevelOfDetail`.
+- Emulator: BC6H (unsigned and signed) and BC7 textures, decoded exactly as
+  the GPU does.
+- `emulator_world` modes `bc`, `deriv`, `tess`, `so`, `deferred`, `gl4`,
+  `fx10`, `dxil` and `dxr`.
 
 ### Fixed
+- Emulator: the tessellation follows the fixed tessellator of Direct3D 11 (a
+  level per edge and one inside, the partitionings), in Direct3D and OpenGL.
+- Emulator: VEX-encoded SSE instructions (AVX), which Unicorn ran as their
+  legacy forms with a wrong first source (`printf("%g")` printed garbage with
+  the FMA routines of the C runtime), are trapped and run right.
+- Emulator: the rendering shares each batch of pixels between threads and the
+  shader interpreter writes registers faster: about twice as fast (a mesh of
+  20000 triangles: 0.7 s instead of 1.4 s). Runs of AVX instructions (`memcpy`,
+  `memset`, auto-vectorized loops) are emulated in one trap, each instruction
+  decoded once: the AVX code of a program runs about twice as fast.
 - Emulator: a triangle that crosses the near plane (one vertex behind the
   camera) is clipped and drawn, in OpenGL and Direct3D.
 - Emulator: the rasterizer draws a batch of triangles at once with numpy (top-left

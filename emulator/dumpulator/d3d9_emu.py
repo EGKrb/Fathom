@@ -1260,7 +1260,11 @@ def _sampler9(self, stage):
     get = lambda kind, default: self.samplers.get((stage, kind), default)
     modes = {1: "wrap", 2: "mirror", 3: "clamp", 4: "border", 5: "mirror"}
     border = _argb(get(4, 0))
-    return Sampler(get(5, 1) >= 2, tuple(modes.get(get(k, 1), "wrap") for k in (1, 2, 3)), tuple(border))
+    mip_filter = get(7, 0)                                  # D3DSAMP_MIPFILTER: none, point, linear
+    bias = struct.unpack("<f", struct.pack("<I", get(8, 0) & 0xFFFFFFFF))[0]   # D3DSAMP_MIPMAPLODBIAS
+    return Sampler(get(5, 1) >= 2, tuple(modes.get(get(k, 1), "wrap") for k in (1, 2, 3)), tuple(border),
+                   mip_linear=mip_filter == 2, min_lod=float(get(9, 0)),   # D3DSAMP_MAXMIPLEVEL: the largest level
+                   max_lod=0.0 if mip_filter == 0 else 1e9, lod_bias=bias)
 
 
 def _texture_function(self, stage):
@@ -1272,9 +1276,13 @@ def _texture_function(self, stage):
     sampler = self._sampler9(stage)
     dimension = view.dimension
 
-    def function(coords, lod=None):
+    def function(coords, lod=None, bias=None, gradients=None):
         columns = 3 if dimension in ("cube", "3d") else 2
-        return sample_view(view, sampler, numpy.asarray(coords, dtype=numpy.float64)[:, :columns], lod)
+        if gradients is not None:
+            gradients = tuple(numpy.asarray(g, dtype=numpy.float64)[:, :columns] for g in gradients)
+        return sample_view(view, sampler, numpy.asarray(coords, dtype=numpy.float64)[:, :columns], lod, None, (0, 0), bias,
+                           gradients)
+    function.mipmaps = len(view.images[0]) > 1 and self.samplers.get((stage, 7), 0) != 0 if view.images else False
     return function
 
 
@@ -1546,6 +1554,11 @@ def _device_draw(self, kind: int, streams, index_list):
             alive = passed if alive is None else alive & passed
         return colors[:target_count], alive, depth_out
 
+    # 2x2 quads for dsx / dsy and the mip levels of mipmapped textures
+    textures = ps_textures if ps is not None else {s: self._texture_function(s) for s in range(8)}
+    mipmaps = any(getattr(f, "mipmaps", False) for f in textures.values() if f is not None)
+    fragment.quads = raster_kind == "triangles" and (mipmaps or ps is not None and ps.uses_derivatives())
+    fragment.parallel = True        # no side effect: the fragments may be shaded by several threads (raster.py)
     if rs.get(8, 3) == 2 and raster_kind == "triangles":   # wireframe
         prims_array = numpy.concatenate([prims_array[:, [0, 1]], prims_array[:, [1, 2]], prims_array[:, [2, 0]]])
         raster_kind = "lines"

@@ -1,7 +1,8 @@
 # Fathom addition to dumpulator: the programmable pipeline of the emulated Direct3D 10 / 11 / 12: input
 # assembly, vertex shader, hull shader + tessellator + domain shader, geometry shader, rasterization
 # (raster.py: clipping, culling, interpolation), pixel shader, output merger with several render
-# targets; and the dispatch of compute shaders. The shaders run in dxbc.py. Boost Software License 1.0,
+# targets; stream output (the vertices of the last stage before the rasterizer written to buffers, per
+# stream); and the dispatch of compute shaders. The shaders run in dxbc.py. Boost Software License 1.0,
 # like the rest of dumpulator (LICENSE.dumpulator).
 
 from typing import Dict, List, Optional
@@ -33,6 +34,36 @@ class DrawState:
         self.depth_state = (True, True, 2)
         self.rasterizer = (3, 3, False, True, False)
         self.srgb = set()          # the targets written in sRGB
+        self.stream_out: Optional[StreamOutput] = None
+
+
+class SOTarget:
+    """A buffer bound for stream output: its bytes (numpy uint8, written in place), the offset where the next
+    vertex goes and the size."""
+
+    def __init__(self, data, offset: int, size: int, owner=None):
+        self.data, self.offset, self.size, self.owner = data, offset, size, owner
+        self.changed = False
+
+
+class StreamOutput:
+    """The stream output of a draw: declaration entries (stream, semantic name or None for a gap, semantic
+    index, first component, component count, output slot), the stride of each slot, the stream that goes on
+    to the rasterizer (-1: none), the targets (SOTarget per slot) and the statistics per stream (primitives
+    written, primitives the buffers would have needed)."""
+
+    def __init__(self, entries, strides, rasterized=0):
+        self.entries, self.rasterized = list(entries), rasterized
+        self.strides = list(strides) + [0] * (4 - len(strides))
+        for slot in range(4):   # strides not given: the components declared for the slot
+            if not self.strides[slot]:
+                self.strides[slot] = 4 * sum(e[4] for e in self.entries if e[5] == slot)
+        self.targets: List[Optional[SOTarget]] = [None] * 4
+        self.written: Dict[int, int] = {}
+        self.needed: Dict[int, int] = {}
+
+    def streams(self):
+        return sorted({e[0] for e in self.entries})
 
 
 TOPOLOGIES = {1: "points", 2: "lines", 3: "line_strip", 4: "triangles", 5: "strip", 10: "lines_adj",
@@ -136,7 +167,7 @@ def _tess_factors(hs, constants, patch):
 def draw_dxbc(state: DrawState, vertex_ids, instances=(0,)) -> int:
     """A draw (Draw, DrawIndexed and their instanced forms): the number of fragments written."""
     vs, hs, ds, gs, ps = (state.shaders.get(k) for k in ("vs", "hs", "ds", "gs", "ps"))
-    if vs is None or not state.viewports or len(vertex_ids) == 0:
+    if vs is None or len(vertex_ids) == 0 or not state.viewports and state.stream_out is None:
         return 0
     empty = dxbc.Bindings()
     written = 0
@@ -153,16 +184,79 @@ def draw_dxbc(state: DrawState, vertex_ids, instances=(0,)) -> int:
             if hs is None or ds is None:
                 continue
             outputs, prims, kind, signature_list, primitive_id = _tessellate(state, hs, ds, outputs, prims)
+        so = state.stream_out
+        rasterized = so.rasterized if so is not None else 0
         if gs is not None and len(prims):
-            outputs, prims, kind, primitive_id = _geometry(state, gs, outputs, prims, primitive_id)
-            signature_list = [e for e in gs.outputs if e.get("stream", 0) == 0]
-        elif kind in ("lines_adj", "triangles_adj"):
-            prims = prims[:, [1, 2]] if kind == "lines_adj" else prims[:, [0, 2, 4]]
-            kind = "lines" if kind == "lines_adj" else "triangles"
-        if len(prims) == 0 or not outputs:
+            streams = sorted(set(so.streams() if so is not None else []) | ({rasterized} if rasterized >= 0 else set()))
+            per_stream = _geometry_streams(state, gs, outputs, prims, primitive_id, streams or [0])
+            if so is not None:
+                for stream in so.streams():
+                    if stream in per_stream:
+                        s_outputs, s_prims, s_kind, _ = per_stream[stream]
+                        stream_out(so, stream, s_outputs, s_prims, [e for e in gs.outputs if e.get("stream", 0) == stream])
+            if rasterized < 0 or rasterized not in per_stream:
+                continue
+            outputs, prims, kind, primitive_id = per_stream[rasterized]
+            signature_list = [e for e in gs.outputs if e.get("stream", 0) == rasterized]
+        else:
+            if kind in ("lines_adj", "triangles_adj"):
+                prims = prims[:, [1, 2]] if kind == "lines_adj" else prims[:, [0, 2, 4]]
+                kind = "lines" if kind == "lines_adj" else "triangles"
+            if so is not None:
+                stream_out(so, 0, outputs, prims, signature_list)
+                if rasterized != 0:
+                    continue
+        if len(prims) == 0 or not outputs or not state.viewports:
             continue
         written += _rasterize(state, ps, outputs, signature_list, prims, kind, primitive_id)
     return written
+
+
+def stream_out(so: StreamOutput, stream: int, outputs, prims, signature_list):
+    """Writes the vertices of the primitives of a stream (lists: strips are already split) to the buffers of
+    the stream output, as long as every buffer of the stream has room for a whole primitive."""
+    entries = [e for e in so.entries if e[0] == stream]
+    count = len(prims)
+    so.needed[stream] = so.needed.get(stream, 0) + count
+    so.written.setdefault(stream, 0)
+    if not entries or count == 0:
+        return
+    per_prim = prims.shape[1]
+    slots = sorted({e[5] for e in entries})
+    limit = count
+    for slot in slots:
+        target, stride = so.targets[slot], so.strides[slot]
+        if target is not None and stride:
+            limit = min(limit, max(0, (target.size - target.offset) // (stride * per_prim)))
+    so.written[stream] += limit
+    if limit <= 0:
+        return
+    vertices = prims[:limit].reshape(-1)
+    for slot in slots:
+        target, stride = so.targets[slot], so.strides[slot]
+        if target is None or not stride:
+            continue
+        words = stride // 4
+        start, end = target.offset, target.offset + len(vertices) * stride
+        existing = numpy.zeros(len(vertices) * stride, dtype=numpy.uint8)
+        have = target.data[start:min(end, len(target.data))]
+        existing[:len(have)] = have
+        rows = existing.view(numpy.uint32).reshape(len(vertices), words).copy()
+        column = 0
+        for _, name, index, first, components, entry_slot in entries:
+            if entry_slot != slot:
+                continue
+            if name is not None:
+                element = next((e for e in signature_list if e["name"].upper() == name.upper() and e["index"] == index), None)
+                if element is not None and element["register"] in outputs:
+                    base = (element["mask"] & -element["mask"]).bit_length() - 1 if element["mask"] else 0
+                    values = outputs[element["register"]][vertices]
+                    take = values[:, base + first:base + first + components]
+                    rows[:, column:column + take.shape[1]] = take
+            column += components
+        target.data[start:end] = rows.view(numpy.uint8).reshape(-1)[:max(0, min(end, len(target.data)) - start)]
+        target.offset = end
+        target.changed = True
 
 
 def _rasterize(state, ps, outputs, signature_list, prims, kind, primitive_id):
@@ -251,7 +345,7 @@ def _rasterize(state, ps, outputs, signature_list, prims, kind, primitive_id):
                         inputs[register][:, c] = bits[:, c]
             else:
                 inputs[register] = numpy.array(bits, dtype=numpy.uint32)
-        result = dxbc.run_pixel(ps, frags.n, inputs, ps_bindings)
+        result = dxbc.run_pixel(ps, frags.n, inputs, ps_bindings, helper=frags.helper)
         colors = []
         for register in target_registers:
             value = result.outputs.get(register) if register is not None else None
@@ -261,6 +355,13 @@ def _rasterize(state, ps, outputs, signature_list, prims, kind, primitive_id):
     if fill == 2 and kind == "triangles":
         prims = numpy.concatenate([prims[:, [0, 1]], prims[:, [1, 2]], prims[:, [2, 0]]])
         kind = "lines"
+    if ps is not None and kind == "triangles":
+        from .gpu import view_levels
+        mipmaps = any(view is not None and view.images and len(view_levels(view, 0)) > 1
+                      for view in ps_bindings.srvs.values())
+        fragment.quads = dxbc.needs_quads(ps, mipmaps)
+    # no side effect (no unordered access view): the fragments may be shaded by several threads
+    fragment.parallel = ps is None or (not ps.uavs and not ps_bindings.uavs)
     return draw(output, pipeline, kind, prims, attrs, fragment, clip=clip, flat_mask=flat_mask)
 
 
@@ -298,52 +399,63 @@ def _tessellate(state, hs, ds, outputs, prims):
 
 
 def _geometry(state, gs, outputs, prims, primitive_id):
+    return _geometry_streams(state, gs, outputs, prims, primitive_id, [0]).get(
+        0, ({}, numpy.zeros((0, 3), dtype=numpy.int64), "triangles", numpy.zeros(0, dtype=numpy.uint32)))
+
+
+def _geometry_streams(state, gs, outputs, prims, primitive_id, streams):
+    """The geometry shader on the primitives: per stream asked, (outputs, primitives, kind, primitive ids), the
+    primitives in the order of the input primitives, then of the instances, then of their emission."""
     expected = dxbc.GS_INPUT_VERTICES.get(gs.gs_input, prims.shape[1])
     if prims.shape[1] > expected:
         prims = prims[:, :expected]
     inputs2d = {reg: values[prims] for reg, values in outputs.items()}
     results = dxbc.run_geometry(gs, len(prims), inputs2d, state.bindings.get("gs", dxbc.Bindings()), primitive_id)
     strip_size = {1: 1, 2: 2, 3: 2, 5: 3}.get(gs.gs_output, 3)
-    parts: Dict[int, list] = {}
-    out_prims, out_ids = [], []
-    count = 0
-    for result in results:
-        strips = [[] for _ in range(len(prims))]
-        for event, stream, lanes, snapshot in result.events:
-            if stream != 0:
-                continue
-            if event == "cut":
-                for lane in lanes:
-                    strips[lane] = []
-                continue
-            ids = range(count, count + len(lanes))
-            count += len(lanes)
-            for reg, values in snapshot.items():
-                parts.setdefault(reg, []).append((ids.start, values))
-            for lane, vertex in zip(lanes, ids):
-                strip = strips[lane]
-                strip.append(vertex)
-                made = None
-                if strip_size == 1:
-                    made = (vertex,)
-                elif strip_size == 2 and len(strip) >= 2:
-                    made = (strip[-2], strip[-1])
-                elif strip_size == 3 and len(strip) >= 3:
-                    made = (strip[-3], strip[-2], strip[-1]) if (len(strip) - 3) % 2 == 0 else (strip[-2], strip[-3], strip[-1])
-                if made is not None:
-                    out_prims.append(made)
-                    out_ids.append(int(primitive_id[lane]))
-    if count == 0 or not out_prims:
-        return {}, numpy.zeros((0, 3), dtype=numpy.int64), "triangles", numpy.zeros(0, dtype=numpy.uint32)
-    merged = {}
-    for reg, pieces in parts.items():
-        array = numpy.zeros((count, 4), dtype=numpy.uint32)
-        for start, values in pieces:
-            array[start:start + len(values)] = values
-        merged[reg] = array
     kind = {1: "points", 2: "lines", 3: "triangles"}[strip_size]
-    return merged, numpy.array(out_prims, dtype=numpy.int64).reshape(-1, strip_size), kind, \
-        numpy.array(out_ids, dtype=numpy.uint32)
+    found = {}
+    for wanted in streams:
+        parts: Dict[int, list] = {}
+        made_list = []      # (input primitive, instance, sequence, vertices)
+        count = 0
+        for instance, result in enumerate(results):
+            strips = [[] for _ in range(len(prims))]
+            for event, stream, lanes, snapshot in result.events:
+                if stream != wanted:
+                    continue
+                if event == "cut":
+                    for lane in lanes:
+                        strips[lane] = []
+                    continue
+                ids = range(count, count + len(lanes))
+                count += len(lanes)
+                for reg, values in snapshot.items():
+                    parts.setdefault(reg, []).append((ids.start, values))
+                for lane, vertex in zip(lanes, ids):
+                    strip = strips[lane]
+                    strip.append(vertex)
+                    made = None
+                    if strip_size == 1:
+                        made = (vertex,)
+                    elif strip_size == 2 and len(strip) >= 2:
+                        made = (strip[-2], strip[-1])
+                    elif strip_size == 3 and len(strip) >= 3:
+                        made = (strip[-3], strip[-2], strip[-1]) if (len(strip) - 3) % 2 == 0 else (strip[-2], strip[-3], strip[-1])
+                    if made is not None:
+                        made_list.append((int(lane), instance, len(made_list), made))
+        if count == 0 or not made_list:
+            continue
+        made_list.sort(key=lambda item: item[:3])
+        merged = {}
+        for reg, pieces in parts.items():
+            array = numpy.zeros((count, 4), dtype=numpy.uint32)
+            for start, values in pieces:
+                array[start:start + len(values)] = values
+            merged[reg] = array
+        out_prims = numpy.array([item[3] for item in made_list], dtype=numpy.int64).reshape(-1, strip_size)
+        out_ids = numpy.array([int(primitive_id[item[0]]) for item in made_list], dtype=numpy.uint32)
+        found[wanted] = (merged, out_prims, kind, out_ids)
+    return found
 
 
 def dispatch(shader, groups, bindings) -> None:

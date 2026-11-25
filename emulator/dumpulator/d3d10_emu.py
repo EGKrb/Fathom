@@ -4,14 +4,15 @@
 #
 # What differs from Direct3D 11 is translated: shaders set with one argument, integer viewports, the blend
 # description (D3D10_BLEND_DESC), the depth stencil view description, Map / Unmap on the resources, the
-# 20-byte buffer description. The effects framework (D3D10CreateEffectFromMemory) is not emulated.
+# 20-byte buffer description. The effects (D3D10CreateEffectFromMemory) are d3d10_effect.py.
 
 import struct
 
 from . import dxbc
-from .d3d11_emu import (Context11, Device11, Direct3D11, Resource11, State11, View11, input_layout, E_INVALIDARG,
+from .d3d11_emu import (Context11, Device11, Direct3D11, Resource11, State11, View11, input_layout, so_entries, E_INVALIDARG,
                         BIND_RENDER_TARGET)
 from .dxgi_emu import DEVICES, missing, S_FALSE
+from .d3d10_effect import create_effect
 from .gpu import rows_of
 from .raster import numpy
 
@@ -186,9 +187,23 @@ class Device10(Context11, Device11):
         return self._shader_object(bytecode, length, out, "ID3D10GeometryShader")
 
     def CreateGeometryShaderWithStreamOutput(self, bytecode, length, decl, entries, stride, out):
-        if entries:
-            missing(self.d3d.dp, "Direct3D 10 stream output")
-        return self._shader_object(bytecode, length, out, "ID3D10GeometryShader")
+        result = self._shader_object(bytecode, length, out, "ID3D10GeometryShader")
+        state = self.d3d.com.impl(self.d3d.dp.read_ptr(out)) if out and result == 0 else None
+        if state is not None:
+            items = so_entries(self.d3d.dp, decl, entries, False)
+            slots = {item[5] for item in items}
+            # one buffer: the given stride; several (each a single element): their components
+            strides = [stride] if len(slots) <= 1 else []
+            state.so = (items, strides, 0)
+        return result
+
+    def SOGetTargets(self, count, buffers, offsets):
+        Context11.SOGetTargets(self, count, buffers)
+        dp = self.d3d.dp
+        if offsets:
+            for i in range(count):
+                entry = self.so_targets[i] if i < len(self.so_targets) else None
+                dp.write(offsets + 4 * i, struct.pack("<I", entry[1] if entry else 0))
 
     def _shader_object(self, bytecode, length, out, interface):
         state = State11(self.d3d, interface, None)
@@ -286,6 +301,6 @@ def install(dp):
     hooks.register_signature("d3d10_1.dll", "D3D10CreateDeviceAndSwapChain1", "pipiiippp",
                              lambda dp, a, t, s, f, level, sdk, desc, chain, out: d3d.create10(dp, a, t, s, f, level, sdk, out, desc, chain))
     for module in ("d3d10.dll", "d3d10_1.dll"):
-        hooks.register_signature(module, "D3D10CreateEffectFromMemory", "pppippp",
-                                 lambda dp, *args: (missing(dp, "Direct3D 10 effects (D3D10CreateEffectFromMemory)"), E_FAIL)[1])
+        hooks.register_signature(module, "D3D10CreateEffectFromMemory", "ppippp",
+                                 lambda dp, *args: create_effect(d3d, dp, *args))
     return d3d

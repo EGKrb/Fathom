@@ -207,8 +207,11 @@ the output and in the result (`gui`, `network`, `processes`, `com`, `shared_obje
   (core and compatibility profiles), buffers (`glMapBufferRange`, uniform buffers in std140),
   vertex array objects, instancing, 1D / 2D / 3D / cube / array textures with mipmaps and S3TC,
   samplers, framebuffer objects and renderbuffers, `glBlitFramebuffer`, sRGB, queries and syncs;
-  the GLSL vertex and fragment shaders (1.10 to 4.60, `glsl.py`: preprocessor, parser and an
-  interpreter that runs every vertex of a draw and every fragment of a batch at once).
+  the GLSL shaders of every stage (1.10 to 4.60, `glsl.py`: preprocessor, parser and an
+  interpreter that runs every vertex of a draw and every fragment of a batch at once): vertex,
+  tessellation control and evaluation, geometry (`EmitVertex`, several streams), fragment and
+  compute (`glDispatchCompute`, shared memory, barriers, atomics), with shader storage and uniform
+  blocks, images (`imageLoad` / `imageStore` / atomics), atomic counters and `dFdx` / `dFdy`.
   Direct3D 9 (`d3d9_emu.py`): the fixed-function pipeline (FVF and vertex declarations, transforms,
   viewport, lights, the texture stages, alpha test, depth, culling, blending, wireframe) and the
   vertex and pixel shaders of shader models 1 to 3 (`d3d9_shader.py`, with their float, int and
@@ -224,15 +227,29 @@ the output and in the result (`gui`, `network`, `processes`, `com`, `shared_obje
   states, committed and placed resources at their GPU virtual address, barriers, fences with their
   events, `CopyTextureRegion` with footprints, `GetCopyableFootprints`. The shaders of Direct3D 10,
   11 and 12 (DXBC, shader models 4.0 to 5.1) run in an interpreter (`dxbc.py`, pipeline in
-  `d3d_pipeline.py`) at every stage: vertex, hull (its phases) and the tessellator, domain,
-  geometry (emitted strips), pixel (several targets, discard, depth output), compute (thread
-  groups, group shared memory, barriers, atomics, typed, raw and structured UAVs, append /
-  consume counters). Texture formats (`gpu.py`): the DXGI and Direct3D 9 formats, 8, 16 and 32-bit,
-  float and integer, depth, sRGB and BC1 to BC5. The triangles (`raster.py`) are clipped against
-  the near and far planes, then rasterized with numpy at the pixel centers with the top-left rule,
-  perspective-correct, in batches of about a million pixels; the depth test, blending, write masks
-  and multiple targets are merged in order (a mesh of 20000 triangles takes under a second, 30
-  times less than one triangle at a time). The COM objects are vtables of stubs whose methods are
+  `d3d_pipeline.py`) at every stage: vertex, hull (its phases) and the tessellator of Direct3D 11
+  (a level per edge and inside, integer, pow2 and fractional odd / even partitionings, the rings
+  stitched), domain, geometry (emitted strips, streams), pixel (several targets, discard, depth
+  output), compute (thread groups, group shared memory, barriers, atomics, typed, raw and
+  structured UAVs, append / consume counters). The shaders of shader model 6 (DXIL, made by dxc)
+  run in `dxil.py`: the LLVM 3.7 bitcode is read by `dxil_bitcode.py` (types, constants, metadata,
+  functions) and run on all the lanes at once (blocks in reverse post-order with lane masks), with
+  the `dx.op` operations of the resources, samplers, derivatives, wave operations and atomics.
+  Stream output (`SOSetTargets`, its statistics and `DrawAuto`), deferred contexts and command
+  lists (`d3d11_emu.py`), Direct3D 10 effects (`D3D10CreateEffectFromMemory`, `d3d10_effect.py`: the
+  fx_4_0 binary, variables, techniques, passes and their states) and the ray tracing of Direct3D 12
+  (`dxr.py`: state objects, acceleration structures with their instances, `DispatchRays`, any hit,
+  closest hit and miss shaders, `TraceRay` and the ray system values) are emulated. The pixel
+  shaders run in 2x2 quads with helper lanes when they need derivatives (`ddx` / `ddy` coarse and
+  fine, `dsx` / `dsy`, `dFdx` / `dFdy`) or the mip level of a texture. Texture formats (`gpu.py`,
+  `bc67.py`): the DXGI and Direct3D 9 formats, 8, 16 and 32-bit, float and integer, depth, sRGB and
+  BC1 to BC7 (BC6H and BC7 decoded as the GPU does, checked against it). The triangles (`raster.py`)
+  are clipped against the near and far planes, then rasterized with numpy at the pixel centers
+  with the top-left rule, perspective-correct, in batches of about a million pixels; the coverage
+  and, when the shader has no side effect, the fragment shading of a batch are shared between
+  threads (4, `FATHOM_RASTER_THREADS`), and the depth test, blending, write masks and multiple
+  targets are merged in order (a mesh of 20000 triangles: 0.7 s, against 25 s one triangle at a
+  time). The COM objects are vtables of stubs whose methods are
   Python (`apihooks.ComRuntime`), generated with the parameter types of the SDK's headers
   (`tools/make_graphics_tables.py` writes `graphics_tables.py`). The functions of these DLLs are
   hooked only when a module imports them (by name or by ordinal) or `GetProcAddress` asks for
@@ -319,6 +336,12 @@ the rest stays close to dumpulator:
   `NtAllocateVirtualMemory` / `NtProtectVirtualMemory` on unaligned ranges, system and token
   information. Information classes are read as integers: recent Windows versions have classes
   dumpulator's enumerations lack.
+- `vex.py` (new): unicorn runs a VEX.128 instruction it knows as the legacy SSE instruction of the
+  same opcode, ignoring its second source (`vsubsd xmm4, xmm0, xmm1` gives `xmm4 - xmm1`): the VEX
+  instructions are found in each block translated (a hook on the generated blocks, a byte filter
+  first) and replaced by `ud2`; the trap runs the original instruction (encoded again as SSE on a
+  small unicorn of its own, or by `avx.py`), and the AVX instructions that follow it at once.
+  `FATHOM_VEX=0` turns it off.
 - `avx.py` (new): **AVX and AVX2 instructions in Python**. Unicorn has no AVX, but the C runtime of a
   process that ran on a recent CPU chose its AVX2 routines at start-up (`wcslen`, `memcpy`,
   `memchr`...): the logical, comparison, minimum / maximum, add / subtract, mask, test, broadcast,
@@ -345,15 +368,15 @@ unhandled exception filter) run to the exit of the process.
 ## Limits
 
 - The emulated processors are those of one machine, run by one host thread: the processes and
-  threads interleave (finely when they share memory), they do not use several host cores.
+  threads interleave (finely when they share memory), they do not use several host cores (only the
+  rasterizer shares a batch of pixels between threads).
 - Only the functions listed above are above the system calls: out-of-process COM servers, RPC to
   other processes and services, and the shell beyond `ShellExecute` (shell folders, the namespace)
-  are answered as unavailable; GDI, GDI+, OpenGL and Direct3D draw what is listed above (DXIL
-  shaders of shader model 6, GLSL geometry, tessellation and compute shaders, stream output,
-  deferred contexts, Direct3D 10 effects, Direct3D 12 ray tracing and the GDI+ functions not listed
-  are not run, and are named in the summary; shader derivatives give 0, the tessellation uses one
-  level for a whole patch, BC6H / BC7 textures are not decoded, and the rendering, in Python with
-  numpy, is far slower than a GPU); a service started with `StartService` is
+  are answered as unavailable; GDI, GDI+, OpenGL and Direct3D draw what is listed above (the GDI+
+  functions not listed, mesh and amplification shaders, the rarer DXIL operations, procedural
+  geometry and intersection shaders, inline ray queries and local root signatures of ray tracing
+  are not run, and are named in the summary; the rendering, in Python with numpy on a few threads,
+  is far slower than a GPU); a service started with `StartService` is
   recorded, its program does not run.
 - What the emulator lacks fails in the program (above): a program that needs it takes another
   path, or stops on its own error.

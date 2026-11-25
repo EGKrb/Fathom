@@ -336,11 +336,19 @@ class OpenGl:
         address = tuple({0x812F: "clamp", 0x2900: "clamp", 0x8370: "mirror", 0x812D: "border"}.get(parameters.get(name, 0x2901), "wrap")
                         for name in (0x2802, 0x2803))
         mode = c.env_mode
+        chain = getattr(c, "texture_levels", None) if texture is not None else None
 
         def fragment(frags):
             color = frags.attrs[:, :4]
-            if texture is not None:
+            if texture is not None and chain is not None:
+                from .raster import implicit_lod, sample_mips
+                levels, mip_linear = chain
+                uv = frags.attrs[:, 4:6]
+                lod = implicit_lod(uv, (levels[0].shape[1], levels[0].shape[0]))
+                texel = sample_mips(levels, uv[:, 0], uv[:, 1], lod, linear, mip_linear, address)
+            elif texture is not None:
                 texel = sample(texture, frags.attrs[:, 4], frags.attrs[:, 5], linear, address)
+            if texture is not None:
                 if mode == 0x1E01:      # GL_REPLACE
                     color = texel
                 elif mode == 0x2101:    # GL_DECAL
@@ -351,6 +359,7 @@ class OpenGl:
                     color = color * texel
             return [color], None, None
 
+        fragment.quads = chain is not None
         flat = numpy.zeros(6, dtype=bool)
         flat[:4] = c.flat
         self.render(c, kind, clip, numpy.concatenate([colors, uvs], axis=1), fragment, flat)
@@ -630,10 +639,8 @@ def install(dp):
     for name, signature in OPENGL.items():
         handler = special.get(name)
         if handler is None:
-            if hasattr(gl, "_" + name):
-                handler = (lambda n: lambda dp, *v: gl.call(n, *v))(name)
-            else:
-                handler = (lambda n: lambda dp, *v: _not_emulated(dp, n))(name)
+            # looked up when called: gl_emu adds the methods of the exports beyond OpenGL 1.x (glGetTexImage...)
+            handler = (lambda n: lambda dp, *v: gl.call(n, *v) if hasattr(gl, "_" + n) else _not_emulated(dp, n))(name)
         hooks.register_signature(m, name, signature, handler)
     for module in ("opengl32.dll",):
         hooks.register_signature(module, "wglCreateContext", "p", gl.create_context)

@@ -36,7 +36,7 @@ SPECS = {
 # packed and compressed kinds: bytes per pixel (or per 4x4 block)
 PACKED = {"rgb10a2un": 4, "bgr10a2un": 4, "rgb10a2u": 4, "r11g11b10f": 4, "rgb9e5": 4, "b5g6r5": 2, "bgr5a1": 2,
           "bgra4": 2, "d24s8": 4, "d32fs8": 8}
-BLOCKS = {"bc1": 8, "bc2": 16, "bc3": 16, "bc4": 8, "bc4s": 8, "bc5": 16, "bc5s": 16, "bc6h": 16, "bc7": 16}
+BLOCKS = {"bc1": 8, "bc2": 16, "bc3": 16, "bc4": 8, "bc4s": 8, "bc5": 16, "bc5s": 16, "bc6h": 16, "bc6hs": 16, "bc7": 16}
 
 DXGI = {1: "rgba32f", 2: "rgba32f", 3: "rgba32u", 4: "rgba32i", 5: "rgb32f", 6: "rgb32f", 7: "rgb32u", 8: "rgb32i",
         9: "rgba16f", 10: "rgba16f", 11: "rgba16un", 12: "rgba16u", 13: "rgba16sn", 14: "rgba16i", 15: "rg32f",
@@ -48,7 +48,7 @@ DXGI = {1: "rgba32f", 2: "rgba32f", 3: "rgba32u", 4: "rgba32i", 5: "rgb32f", 6: 
         57: "r16u", 58: "r16sn", 59: "r16i", 60: "r8un", 61: "r8un", 62: "r8u", 63: "r8sn", 64: "r8i", 65: "a8un",
         67: "rgb9e5", 70: "bc1", 71: "bc1", 72: "bc1", 73: "bc2", 74: "bc2", 75: "bc2", 76: "bc3", 77: "bc3", 78: "bc3",
         79: "bc4", 80: "bc4", 81: "bc4s", 82: "bc5", 83: "bc5", 84: "bc5s", 85: "b5g6r5", 86: "bgr5a1", 87: "bgra8",
-        88: "bgrx8", 90: "bgra8", 91: "bgra8", 92: "bgrx8", 93: "bgrx8", 94: "bc6h", 95: "bc6h", 96: "bc6h", 97: "bc7",
+        88: "bgrx8", 90: "bgra8", 91: "bgra8", 92: "bgrx8", 93: "bgrx8", 94: "bc6h", 95: "bc6h", 96: "bc6hs", 97: "bc7",
         98: "bc7", 99: "bc7", 115: "bgra4"}
 DXGI_DEPTH = {19, 20, 40, 44, 45, 55}         # formats that are depth buffers (as DSV formats)
 DXGI_TYPELESS_DEPTH = {19, 39, 44, 53}        # typeless formats a depth buffer can be made of
@@ -301,8 +301,12 @@ def decode_blocks(data: bytes, kind: str, width: int, height: int):
     elif kind in ("bc5", "bc5s"):
         texels[:, :, 0] = _alpha_block(raw[:, :8], kind == "bc5s")
         texels[:, :, 1] = _alpha_block(raw[:, 8:], kind == "bc5s")
-    else:  # BC6H / BC7: not decoded, a mid gray
-        texels[:, :, :3] = 0.5
+    elif kind == "bc7":
+        from .bc67 import decode_bc7
+        texels = decode_bc7(raw)
+    elif kind in ("bc6h", "bc6hs"):
+        from .bc67 import decode_bc6h
+        texels = decode_bc6h(raw, kind == "bc6hs")
     image = texels.reshape(bh, bw, 4, 4, 4).transpose(0, 2, 1, 3, 4).reshape(bh * 4, bw * 4, 4)
     return image[:height, :width].astype(numpy.float32)
 
@@ -534,34 +538,89 @@ class View:
         return levels[min(max(self.mip + mip, 0), len(levels) - 1)] if levels else None
 
 
-def sample_view(view: View, sampler: Sampler, coords, lod=None, compare_to=None, offset=(0, 0)):
-    """Sampling of a texture view at coords (n, k) floats: (n, 4) float32."""
-    from .raster import sample
+def view_levels(view: View, slice_index: int = 0) -> List[Image]:
+    """The mip chain a view sees of one of its slices."""
+    if not view.images:
+        return []
+    levels = view.images[min(max(slice_index, 0), len(view.images) - 1)][view.mip:]
+    return levels[:view.mips] if view.mips and view.mips > 0 else levels
+
+
+def _sizes(view: View, image: Image):
+    if view.dimension == "cube":
+        return (image.width, image.height)
+    if view.dimension in ("1d", "1darray"):
+        return (image.width,)
+    if view.dimension == "3d":
+        return (image.width, image.height, len(view.images))
+    return (image.width, image.height)
+
+
+def view_lod(view: View, sampler: Sampler, coords, lod=None, bias=None, gradients=None):
+    """The mip level of each lane: explicit (lod), from gradients (ddx, ddy of the coordinates) or from the
+    derivatives of the coordinates in a fragment stage running in quads; with the sampler's bias and
+    clamps. None: the first level for all."""
+    from .raster import implicit_lod, lod_of_gradients
+    base = view.level(0, 0)
+    if base is None:
+        return None
+    sizes = _sizes(view, base)
+    if lod is None:
+        coords = numpy.asarray(coords, dtype=numpy.float64)
+        if view.dimension == "cube":
+            # the derivatives of the face coordinates: the direction divided by its longest component
+            major = numpy.abs(coords[:, :3]).max(axis=1, keepdims=True)
+            coords = coords[:, :3] / numpy.where(major == 0, 1, major) * 0.5
+            sizes = (base.width, base.width, base.width)
+        k = len(sizes)
+        if gradients is not None:
+            gx, gy = (numpy.asarray(g, dtype=numpy.float64)[:, :k] * numpy.asarray(sizes[:k]) for g in gradients)
+            if view.dimension == "cube":
+                major = numpy.abs(numpy.asarray(coords)[:, :3]).max(axis=1, keepdims=True)
+                gx, gy = gx / numpy.where(major == 0, 1, major) * 0.5, gy / numpy.where(major == 0, 1, major) * 0.5
+            lod = lod_of_gradients(gx, gy)
+        else:
+            lod = implicit_lod(coords[:, :k], sizes)
+            if lod is None:
+                return None
+    lod = numpy.asarray(lod, dtype=numpy.float64) + sampler.lod_bias + (0 if bias is None else numpy.asarray(bias))
+    return numpy.clip(lod, sampler.min_lod, sampler.max_lod)
+
+
+def sample_view(view: View, sampler: Sampler, coords, lod=None, compare_to=None, offset=(0, 0), bias=None,
+                gradients=None):
+    """Sampling of a texture view at coords (n, k) floats: (n, 4) float32. The mip level: lod (n,), the
+    gradients (ddx, ddy), or the derivatives of the coordinates in a fragment stage running in quads."""
+    from .raster import sample_mips
+    coords = numpy.asarray(coords, dtype=numpy.float64)
     n = coords.shape[0]
     if view is None or not view.images:
         return numpy.zeros((n, 4), dtype=numpy.float32)
+    levels_of_lane = view_lod(view, sampler, coords, lod, bias, gradients)
     if view.dimension == "cube":
-        return _sample_cube(view, sampler, coords, lod)
-    mip = 0 if lod is None else int(numpy.clip(numpy.round(numpy.nan_to_num(numpy.median(lod))), 0, 15))
-    if view.dimension in ("2darray", "1darray"):
-        layer_axis = 2 if view.dimension == "2darray" else 1
-        layers = numpy.clip(numpy.round(coords[:, layer_axis]).astype(numpy.int64), 0, len(view.images) - 1)
-    elif view.dimension == "3d" and coords.shape[1] > 2:  # depth slices: the nearest
-        layers = numpy.clip(numpy.floor(coords[:, 2] * len(view.images)).astype(numpy.int64), 0, len(view.images) - 1)
+        out = _sample_cube(view, sampler, coords, levels_of_lane)
     else:
-        layers = numpy.zeros(n, dtype=numpy.int64)
-    out = numpy.zeros((n, 4), dtype=numpy.float32)
-    v_coord = coords[:, 1] if coords.shape[1] > 1 and view.dimension not in ("1d", "1darray") else numpy.full(n, 0.5)
-    for layer in numpy.unique(layers):
-        sel = numpy.nonzero(layers == layer)[0]
-        image = view.level(int(layer), mip)
-        if image is None:
-            continue
-        texels = image.texels()
-        u = coords[sel, 0] + offset[0] / image.width
-        v = v_coord[sel] + offset[1] / image.height
-        out[sel] = sample(texels, u, v, sampler.linear, sampler.address[:2],
-                          sampler.border if "border" in sampler.address[:2] else None)
+        if view.dimension in ("2darray", "1darray"):
+            layer_axis = 2 if view.dimension == "2darray" else 1
+            layers = numpy.clip(numpy.round(coords[:, layer_axis]).astype(numpy.int64), 0, len(view.images) - 1)
+        elif view.dimension == "3d" and coords.shape[1] > 2:  # depth slices: the nearest
+            layers = numpy.clip(numpy.floor(coords[:, 2] * len(view.images)).astype(numpy.int64), 0, len(view.images) - 1)
+        else:
+            layers = numpy.zeros(n, dtype=numpy.int64)
+        out = numpy.zeros((n, 4), dtype=numpy.float32)
+        v_coord = coords[:, 1] if coords.shape[1] > 1 and view.dimension not in ("1d", "1darray") else numpy.full(n, 0.5)
+        address = sampler.address[:2]
+        border = sampler.border if "border" in address else None
+        for layer in numpy.unique(layers):
+            sel = numpy.nonzero(layers == layer)[0]
+            levels = view_levels(view, int(layer))
+            if not levels:
+                continue
+            arrays = [image.texels() for image in levels]
+            u = coords[sel, 0] + offset[0] / levels[0].width
+            v = v_coord[sel] + offset[1] / levels[0].height
+            lods = None if levels_of_lane is None else levels_of_lane[sel]
+            out[sel] = sample_mips(arrays, u, v, lods, sampler.linear, sampler.mip_linear, address, border)
     if view.srgb:
         out = to_linear(out)
     if compare_to is not None:
@@ -573,7 +632,7 @@ def sample_view(view: View, sampler: Sampler, coords, lod=None, compare_to=None,
 
 
 def _sample_cube(view, sampler, coords, lod):
-    from .raster import sample
+    from .raster import sample_mips
     n = coords.shape[0]
     x, y, z = coords[:, 0], coords[:, 1], coords[:, 2]
     ax, ay, az = numpy.abs(x), numpy.abs(y), numpy.abs(z)
@@ -585,11 +644,15 @@ def _sample_cube(view, sampler, coords, lod):
     tc = numpy.select([face == 2, face == 3], [z, -z], -y)
     u, v = (sc / major + 1) / 2, (tc / major + 1) / 2
     out = numpy.zeros((n, 4), dtype=numpy.float32)
+    layer = numpy.clip(numpy.floor(coords[:, 3]).astype(numpy.int64), 0, max(len(view.images) // 6 - 1, 0)) \
+        if coords.shape[1] > 3 and view.dimension == "cube" and len(view.images) > 6 else numpy.zeros(n, dtype=numpy.int64)
     for f in range(6):
-        sel = numpy.nonzero(face == f)[0]
-        image = view.level(f, 0)
-        if len(sel) and image is not None:
-            out[sel] = sample(image.texels(), u[sel], v[sel], sampler.linear, "clamp")
+        for l in numpy.unique(layer):
+            sel = numpy.nonzero((face == f) & (layer == l))[0]
+            levels = view_levels(view, int(l) * 6 + f)
+            if len(sel) and levels:
+                out[sel] = sample_mips([image.texels() for image in levels], u[sel], v[sel],
+                                       None if lod is None else lod[sel], sampler.linear, sampler.mip_linear, "clamp")
     return out
 
 

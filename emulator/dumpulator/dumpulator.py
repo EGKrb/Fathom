@@ -867,6 +867,13 @@ class Dumpulator(Architecture):
         self._uc.hook_add(UC_HOOK_INSN_INVALID, _hook_invalid, user_data=self)
         if self.trace:
             self._uc.hook_add(UC_HOOK_CODE, _hook_code, user_data=self)
+        # Fathom: the VEX instructions unicorn would run wrong are trapped (vex.py)
+        from .vex import VexPatcher
+        import os
+        self._fathom_vex = None
+        if os.environ.get("FATHOM_VEX", "1") != "0":     # FATHOM_VEX=0: not trapped (to measure their cost)
+            self._fathom_vex = VexPatcher(self)
+            self._fathom_vex.install()
 
     def _all_exports(self):
         exports: Dict[int, str] = {}
@@ -1287,7 +1294,17 @@ rsp in KiUserExceptionDispatcher:
                         run_count = min(run_count, count_left)
                     sliced = True
                 self.debug(f"emu_start({hex(emu_begin)}, {hex(emu_until)}, {run_count})")
+                vex = getattr(self, "_fathom_vex", None)
+                if vex is not None:
+                    vex.scan(emu_begin)
                 self._uc.emu_start(emu_begin, until=emu_until, count=run_count)
+                if vex is not None and vex.restart:
+                    # a block had VEX instructions, now trapped: it runs again, translated anew
+                    vex.restart = False
+                    if not self.stopped and self._exception.type == ExceptionType.NoException:
+                        emu_begin = self.regs.cip
+                        emu_count = 0
+                        continue
                 if sliced and not self.stopped and (self.regs.cip & self.addr_mask) != (emu_until & self.addr_mask):
                     # the slice is over: the clock advances, another thread may run
                     if count_left is not None:
@@ -1895,7 +1912,7 @@ def _fathom_syscall_not_implemented(dp: Dumpulator, name: str, exc):
     else:
         dp.regs.eip += 2
 
-def _emulate_unsupported_instruction(dp: Dumpulator, instr: CsInsn):
+def _emulate_unsupported_instruction(dp: Dumpulator, instr: CsInsn, quiet=False):
     # Get address mask
     if dp.regs.cs == windows_user_segment.cs:
         address_mask = 0xFFFFFFFFFFFFFFFF
@@ -2009,12 +2026,53 @@ def _emulate_unsupported_instruction(dp: Dumpulator, instr: CsInsn):
     elif emulate_avx(dp, instr, op_read, op_write, cip_next):  # Fathom: the AVX/AVX2 instructions of the C runtime
         pass
     else:
-        dp.error(f"unsupported: {hex(instr.address)}|{instr.mnemonic} {instr.op_str}")
+        if not quiet:
+            dp.error(f"unsupported: {hex(instr.address)}|{instr.mnemonic} {instr.op_str}")
         # Unsupported instruction
         return False
     dp.debug(f"emulated: {hex(instr.address)}|{instr.bytes.hex()}|{instr.mnemonic} {instr.op_str}")
     # Resume execution
     return True
+
+def _decode(dp: Dumpulator, address: int, code: bytes):
+    """Fathom: the instruction at address (code: its bytes and more), decoded once while its bytes stay the
+    same (the emulated AVX loops run the same instructions many times)."""
+    code = bytes(code)
+    cache = dp.__dict__.setdefault("_fathom_decoded", {})
+    found = cache.get(address)
+    if found is not None and code.startswith(found[0]):
+        return found[1]
+    instr = next(dp.cs.disasm(code, address, 1), None)
+    if instr is not None:
+        if len(cache) > 1 << 16:
+            cache.clear()
+        cache[address] = (bytes(instr.bytes), instr)
+    return instr
+
+
+def _chain_vex(dp: Dumpulator, vex, limit=32):
+    """Fathom: emulates the VEX instructions after an emulated one (up to limit), as long as there are some."""
+    from .vex import emulate as emulate_vex, vex_fields, _BMI
+    for _ in range(limit):
+        address = dp.regs.cip
+        try:
+            original = vex.instruction(address) if vex is not None else None
+            code = original if original is not None else bytes(dp.read(address, 15))
+        except Exception:
+            return
+        fields = vex_fields(code, dp._x64)
+        if fields is None or (fields["map"], fields["opcode"]) in _BMI:
+            return
+        instr = _decode(dp, address, code)
+        if instr is None:
+            return
+        try:
+            if not (emulate_vex(dp, instr) or _emulate_unsupported_instruction(dp, instr, quiet=True)):
+                return
+        except Exception:
+            dp.regs.cip = address      # left to the next trap, which reports it
+            return
+
 
 def _hook_invalid(uc: Uc, dp: Dumpulator):
     address = dp.regs.cip
@@ -2025,11 +2083,18 @@ def _hook_invalid(uc: Uc, dp: Dumpulator):
         dp.error(f"terminating emulation...")
         return False
     try:
-        code = dp.read(address, 15)
-        instr = next(dp.cs.disasm(code, address, 1))
+        vex = getattr(dp, "_fathom_vex", None)
+        original = vex.instruction(address) if vex is not None else None
+        code = original if original is not None else dp.read(address, 15)
+        instr = _decode(dp, address, code)
+        if instr is None:
+            raise StopIteration
         dp.debug(f"invalid hook {hex(address)}|{code.hex()}|{instr.mnemonic} {instr.op_str}")
-        # TODO: add a hook
-        if _emulate_unsupported_instruction(dp, instr):
+        from .vex import emulate as emulate_vex
+        if emulate_vex(dp, instr) or _emulate_unsupported_instruction(dp, instr):
+            # Fathom: the VEX instructions that follow are run now too (a memcpy loop: one switch, not four)
+            if not dp.trace:
+                _chain_vex(dp, vex)
             # Resume execution with a context switch
             assert dp._exception.type == ExceptionType.NoException
             exception = UnicornExceptionInfo()

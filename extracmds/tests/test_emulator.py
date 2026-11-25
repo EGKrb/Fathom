@@ -51,7 +51,7 @@ def run_headless(bindir: Path, script: str, plugin: Path) -> tuple[str, int, str
     shutil.copyfile(plugin, folder / plugin.name)
     command = [str(bindir / "headless.exe"), "-testing", "-plugin", f"tests/emulator/{plugin.name}",
                "-c", 'RedirectLog "tests/emulator/test.log"', "-cf", "tests/emulator/test.txt"]
-    subprocess.run(command, cwd=bindir, timeout=900, capture_output=True)
+    subprocess.run(command, cwd=bindir, timeout=3600, capture_output=True)
     log = folder / "test.log"
     text = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
     final = [line for line in text.splitlines() if "[x64dbg-test] FINAL" in line]
@@ -331,6 +331,51 @@ init tests/emulator_world.exe, d3d12
 run
 emu.run
 testassert $result2 == 0, "d3d12: Direct3D 12 command lists, root signature, fence and flip swap chain"
+stop
+init tests/emulator_world.exe, bc
+run
+emu.run
+testassert $result2 == 0, "bc: BC6H (unsigned and signed) and BC7 textures, decoded as the GPU does"
+stop
+init tests/emulator_world.exe, deriv
+run
+emu.run
+testassert $result2 == 0, "deriv: ddx / ddy coarse and fine, mip levels chosen from the derivatives"
+stop
+init tests/emulator_world.exe, tess
+run
+emu.run
+testassert $result2 == 0, "tess: the Direct3D 11 tessellator, a level per edge, integer and fractional partitionings"
+stop
+init tests/emulator_world.exe, so
+run
+emu.run
+testassert $result2 == 0, "so: Direct3D 11 stream output, its statistics and DrawAuto"
+stop
+init tests/emulator_world.exe, deferred
+run
+emu.run
+testassert $result2 == 0, "deferred: Direct3D 11 deferred contexts and command lists"
+stop
+init tests/emulator_world.exe, gl4
+run
+emu.run
+testassert $result2 == 0, "gl4: OpenGL 4.3 compute, geometry and tessellation shaders, GLSL derivatives"
+stop
+init tests/emulator_world.exe, fx10
+run
+emu.run
+testassert $result2 == 0, "fx10: a Direct3D 10 effect (fx_4_0), its variables and two passes"
+stop
+init tests/emulator_world.exe, dxil
+run
+emu.run
+testassert $result2 == 0, "dxil: shader model 6 (DXIL) vertex, pixel and compute shaders in Direct3D 12"
+stop
+init tests/emulator_world.exe, dxr
+run
+emu.run
+testassert $result2 == 0, "dxr: Direct3D 12 ray tracing (state object, acceleration structures, DispatchRays)"
 emu.screenshots off
 stop
 '''
@@ -341,7 +386,8 @@ stop
         return 1
     # the modes of emulator_world that do not need the network are right natively too
     for mode in ("race", "illegal", "process", "pipe", "shm", "namedpipe", "cross", "shell", "system", "racep", "winmsg", "paint",
-                 "gdiplus", "opengl", "d3d9", "d3d11", "clip", "gl3", "d3d9sh", "d3d10", "d3d11gs", "d3d11cs", "mesh", "d3d12"):
+                 "gdiplus", "opengl", "d3d9", "d3d11", "clip", "gl3", "d3d9sh", "d3d10", "d3d11gs", "d3d11cs", "mesh", "d3d12",
+                 "bc", "deriv", "tess", "so", "deferred", "gl4", "fx10", "dxil", "dxr"):
         native = subprocess.run([str(bindir / "tests" / "emulator_world.exe"), mode], capture_output=True, text=True, timeout=120)
         print(f"emulator_world {mode} natively:", " / ".join(native.stdout.splitlines()[:3]), f"(exit code {native.returncode})")
         if native.returncode != 0:

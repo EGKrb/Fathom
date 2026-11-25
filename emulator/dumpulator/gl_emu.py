@@ -10,7 +10,8 @@
 # S3TC compression) and sampler objects, framebuffer and renderbuffer objects (several draw buffers,
 # glBlitFramebuffer), instanced and base-vertex draws, separate blending, queries, syncs;
 # wglCreateContextAttribsARB, wglChoosePixelFormatARB, wglSwapIntervalEXT, the extension strings.
-# Geometry, tessellation and compute shaders, images and atomic counters are not run.
+# Geometry, tessellation (the Direct3D 11 tessellator of dxbc.py) and compute shaders (glDispatchCompute),
+# shader storage blocks, images and atomic counters run too (glsl.py).
 
 import struct
 from typing import Dict, List, Optional
@@ -102,6 +103,16 @@ class GLProgram:
         self.names: Dict[str, int] = {}                  # "a", "a[2]", "s.f" -> location
         self.blocks: List[dict] = []
         self.outputs: Dict[str, int] = {}
+        self.geometry: Optional[glsl.Program] = None
+        self.tess_control: Optional[glsl.Program] = None
+        self.tess_eval: Optional[glsl.Program] = None
+        self.compute: Optional[glsl.Program] = None
+        self.storage_blocks: List[str] = []              # the buffer blocks (glGetProgramResourceIndex)
+        self.storage_bindings: Dict[str, int] = {}       # block -> binding (glShaderStorageBlockBinding)
+
+    def stages(self):
+        return [s for s in (self.vertex, self.tess_control, self.tess_eval, self.geometry, self.fragment, self.compute)
+                if s is not None]
 
 
 class GLFramebuffer:
@@ -154,6 +165,10 @@ def _extend_context():
         self.normal = [0.0, 0.0, 1.0]
         self.provoking = "last"
         self.client_unit = 0
+        self.patch_vertices = 3
+        self.patch_outer = [1.0, 1.0, 1.0, 1.0]
+        self.patch_inner = [1.0, 1.0]
+        self.image_units: Dict[int, tuple] = {}   # unit -> (texture, level, layered, layer, access, format)
     Context.__init__ = init
 
 
@@ -304,7 +319,8 @@ class GLMore:
     def _glCompressedTexImage2D(self, c, target, level, internal, width, height, border, size, data):
         from .gpu import decode_blocks
         kind = {0x83F0: "bc1", 0x83F1: "bc1", 0x83F2: "bc2", 0x83F3: "bc3", 0x8C4C: "bc1", 0x8C4D: "bc1", 0x8C4E: "bc2",
-                0x8C4F: "bc3", 0x8DBB: "bc4", 0x8DBD: "bc5", 0x8E8C: "bc7"}.get(internal)
+                0x8C4F: "bc3", 0x8DBB: "bc4", 0x8DBC: "bc4s", 0x8DBD: "bc5", 0x8DBE: "bc5s", 0x8E8C: "bc7",
+                0x8E8D: "bc7", 0x8E8E: "bc6hs", 0x8E8F: "bc6h"}.get(internal)
         texture = self._bound_texture(c, target)
         if kind is None:
             self._missing_feature(f"OpenGL compressed format {hex(internal)}")
@@ -425,51 +441,101 @@ class GLMore:
 
     def _texture_function(self, c, unit):
         """The sampling of a texture unit for GLSL: (sampler kind, coords, offset / "fetch" / "size", lod)."""
-        def function(kind, coords, mode, lod):
+        def function(kind, coords, mode, lod, bias=None, gradients=None):
             target = {"sampler1D": GL_TEXTURE_1D, "sampler3D": GL_TEXTURE_3D, "samplerCube": GL_TEXTURE_CUBE_MAP,
                       "sampler2DArray": GL_TEXTURE_2D_ARRAY, "sampler2DRect": GL_TEXTURE_RECTANGLE,
                       "samplerCubeShadow": GL_TEXTURE_CUBE_MAP, "sampler2DArrayShadow": GL_TEXTURE_2D_ARRAY,
                       "sampler1DShadow": GL_TEXTURE_1D, "sampler2DRectShadow": GL_TEXTURE_RECTANGLE,
                       "isampler2D": GL_TEXTURE_2D, "usampler2D": GL_TEXTURE_2D}.get(kind, GL_TEXTURE_2D)
             texture = self._bound_texture(c, target, unit)
-            return self.sample_texture(c, texture, unit, kind, coords, mode, lod)
+            return self.sample_texture(c, texture, unit, kind, coords, mode, lod, bias, gradients)
         return function
 
-    def sample_texture(self, c, texture: GLTexture, unit, kind, coords, mode, lod):
-        level = 0 if lod is None else int(numpy.clip(numpy.round(numpy.median(numpy.nan_to_num(lod))), 0, 15))
+    def sample_texture(self, c, texture: GLTexture, unit, kind, coords, mode, lod, bias=None, gradients=None):
         n = 0 if coords is None else coords.shape[0]
-        base = texture.level(level) if texture is not None else None
+        params = dict(texture.params) if texture is not None else {}
+        sampler = c.sampler_objects.get(c.unit_samplers.get(unit, 0))
+        if sampler:
+            params.update(sampler)
+        base_level = int(params.get(0x813C, 0))                    # GL_TEXTURE_BASE_LEVEL
+        if mode == "size":
+            level = base_level + (0 if lod is None else int(numpy.asarray(lod).reshape(-1)[0]) if n else 0)
+            base = texture.level(level) if texture is not None else None
+            return (base.shape[1], base.shape[0], 1) if base is not None else (0, 0, 1)
+        base = texture.level(base_level) if texture is not None else None
         if base is None:
             base = texture.level(0) if texture is not None else None
-        if mode == "size":
-            return (base.shape[1], base.shape[0], 1) if base is not None else (0, 0, 1)
+            base_level = 0
         if base is None:
             out = numpy.zeros((n, 4))
             out[:, 3] = 1
             return out
-        params = dict(texture.params)
-        sampler = c.sampler_objects.get(c.unit_samplers.get(unit, 0))
-        if sampler:
-            params.update(sampler)
         linear = params.get(0x2800, 0x2601) == 0x2601
+        min_filter = params.get(0x2801, 0x2702)
+        mip_linear = min_filter in (0x2702, 0x2703)
         modes = {0x812F: "clamp", 0x2900: "clamp", 0x8370: "mirror", 0x812D: "border", 0x2901: "wrap"}
         address = (modes.get(params.get(0x2802, 0x2901), "wrap"), modes.get(params.get(0x2803, 0x2901), "wrap"))
         if mode == "fetch":
+            level = base_level + (0 if lod is None else int(numpy.clip(numpy.round(numpy.median(numpy.nan_to_num(lod))), 0, 15)))
             ints = numpy.round(coords).astype(numpy.int64)
             y = ints[:, 1] if coords.shape[1] > 1 and kind != "sampler1D" else numpy.zeros(n, numpy.int64)
             layer = ints[:, 2] if coords.shape[1] > 2 and texture.target in (GL_TEXTURE_2D_ARRAY, GL_TEXTURE_3D) else None
-            array = base if layer is None else texture.level(level, int(layer[0]) if n else 0)
+            array = texture.level(level) if layer is None else texture.level(level, int(layer[0]) if n else 0)
+            if array is None:
+                array = base
             return array[numpy.clip(y, 0, array.shape[0] - 1), numpy.clip(ints[:, 0], 0, array.shape[1] - 1)]
+        # the mip chain from the base level, and the level of each lane
+        max_level = int(params.get(0x813D, 1000))
+        count = 1
+        if min_filter in (0x2700, 0x2701, 0x2702, 0x2703) and texture.target != GL_TEXTURE_RECTANGLE:
+            while base_level + count <= max_level and texture.level(base_level + count) is not None:
+                count += 1
+        lanes = None
+        if count > 1:
+            from .raster import implicit_lod, lod_of_gradients
+            if lod is not None:
+                lanes = numpy.asarray(lod, dtype=numpy.float64)
+            else:
+                cube = texture.target == GL_TEXTURE_CUBE_MAP
+                if cube:
+                    major = numpy.abs(coords[:, :3]).max(axis=1, keepdims=True)
+                    points = coords[:, :3] / numpy.where(major == 0, 1, major) * 0.5
+                    sizes = (base.shape[1],) * 3
+                else:
+                    points = coords
+                    sizes = (base.shape[1],) if kind in ("sampler1D", "sampler1DShadow") else \
+                        (base.shape[1], base.shape[0]) if texture.target != GL_TEXTURE_3D else \
+                        (base.shape[1], base.shape[0], len({key[0] for key in texture.levels if key[1] == base_level}))
+                k = len(sizes)
+                if gradients is not None:
+                    gx, gy = (numpy.asarray(g, dtype=numpy.float64)[:, :k] * numpy.asarray(sizes) for g in gradients)
+                    if cube:
+                        gx, gy = gx / numpy.where(major == 0, 1, major) * 0.5, gy / numpy.where(major == 0, 1, major) * 0.5
+                    lanes = lod_of_gradients(gx, gy)
+                else:
+                    lanes = implicit_lod(points[:, :k], sizes)
+                if lanes is not None:
+                    lanes = lanes + float(params.get(0x8501, 0)) + (0 if bias is None else bias)   # GL_TEXTURE_LOD_BIAS
+            if lanes is not None:
+                lanes = numpy.clip(lanes, float(params.get(0x813A, -1000)), float(params.get(0x813B, 1000)))
+
+        def chain(layer=0):
+            return [texture.level(base_level + i, layer) for i in range(count)]
+
+        from .raster import sample_mips
         if texture.target == GL_TEXTURE_CUBE_MAP:
             from .gpu import View, Image, Sampler, sample_view
             images = []
             for face in range(6):
-                array = texture.level(level, face)
-                image = Image(array.shape[1], array.shape[0], "rgba32f")
-                image.data[...] = array
-                images.append([image])
-            view = View("texture", images=images, dimension="cube")
-            return sample_view(view, Sampler(linear, ("clamp",) * 3), coords[:, :3])
+                levels = []
+                for array in chain(face):
+                    image = Image(array.shape[1], array.shape[0], "rgba32f")
+                    image.data[...] = array
+                    levels.append(image)
+                images.append(levels)
+            view = View("texture", images=images, dimension="cube", mips=count)
+            return sample_view(view, Sampler(linear, ("clamp",) * 3, mip_linear=mip_linear), coords[:, :3],
+                               lanes if lanes is not None else numpy.zeros(n))
         u = coords[:, 0]
         v = coords[:, 1] if coords.shape[1] > 1 and kind not in ("sampler1D", "sampler1DShadow") else numpy.full(n, 0.5)
         if texture.target == GL_TEXTURE_RECTANGLE or kind.startswith("sampler2DRect"):
@@ -477,7 +543,7 @@ class GLMore:
         if isinstance(mode, tuple) and mode != (0, 0):
             u, v = u + mode[0] / base.shape[1], v + mode[1] / base.shape[0]
         if texture.target in (GL_TEXTURE_2D_ARRAY, GL_TEXTURE_3D) and coords.shape[1] > 2:
-            layers = sorted({key[0] for key in texture.levels if key[1] == level})
+            layers = sorted({key[0] for key in texture.levels if key[1] == base_level})
             if texture.target == GL_TEXTURE_3D:
                 index = numpy.clip(numpy.floor(coords[:, 2] * len(layers)).astype(int), 0, len(layers) - 1)
             else:
@@ -485,9 +551,11 @@ class GLMore:
             out = numpy.zeros((n, 4))
             for k in numpy.unique(index):
                 sel = index == k
-                out[sel] = sample(texture.level(level, layers[k]), u[sel], v[sel], linear, address)
+                levels = [level for level in chain(layers[k]) if level is not None]
+                out[sel] = sample_mips(levels, u[sel], v[sel], None if lanes is None else lanes[sel], linear, mip_linear,
+                                       address)
             return out
-        return sample(base, u, v, linear, address)
+        return sample_mips(chain(), u, v, lanes, linear, mip_linear, address)
 
     def _glGenSamplers(self, c, count, out):
         for name in self._new_names(c, count, out):
@@ -712,8 +780,8 @@ class GLMore:
     def _glCreateShader(self, c, kind):
         name = c.next_name
         c.next_name += 1
-        c.shaders[name] = GLShader(name, {0x8B31: "vertex", 0x8B30: "fragment", 0x8DD9: "geometry", 0x8E87: "tess_control",
-                                          0x8E88: "tess_evaluation", 0x91B9: "compute"}.get(kind, "vertex"))
+        c.shaders[name] = GLShader(name, {0x8B31: "vertex", 0x8B30: "fragment", 0x8DD9: "geometry", 0x8E88: "tess_control",
+                                          0x8E87: "tess_evaluation", 0x91B9: "compute"}.get(kind, "vertex"))
         return name
 
     def _glCreateShaderObjectARB(self, c, kind):
@@ -738,10 +806,6 @@ class GLMore:
         shader = c.shaders.get(name)
         if shader is None:
             return
-        if shader.kind not in ("vertex", "fragment"):
-            shader.compiled, shader.log = True, ""
-            self._missing_feature(f"OpenGL {shader.kind} shaders")
-            return
         try:
             shader.program = glsl.Program(shader.source, shader.kind)
             shader.compiled, shader.log = True, ""
@@ -754,8 +818,10 @@ class GLMore:
         shader = c.shaders.get(name)
         value = 0
         if shader is not None:
-            value = {0x8B81: int(shader.compiled), 0x8B84: len(shader.log) + 1 if shader.log else 0, 0x8B4F: 0x8B31
-                     if shader.kind == "vertex" else 0x8B30, 0x8B88: len(shader.source) + 1, 0x8B80: 0}.get(parameter, 0)
+            value = {0x8B81: int(shader.compiled), 0x8B84: len(shader.log) + 1 if shader.log else 0,
+                     0x8B4F: {"vertex": 0x8B31, "fragment": 0x8B30, "geometry": 0x8DD9, "tess_control": 0x8E88,
+                              "tess_evaluation": 0x8E87, "compute": 0x91B9}.get(shader.kind, 0x8B30),
+                     0x8B88: len(shader.source) + 1, 0x8B80: 0}.get(parameter, 0)
         self.dp.write(out, struct.pack("<i", value))
 
     def _info_log(self, text, size, length, out):
@@ -808,15 +874,318 @@ class GLMore:
         p = c.programs.get(program)
         if p is None:
             return
-        p.vertex = next((s.program for s in p.shaders if s.kind == "vertex" and s.program is not None), None)
-        p.fragment = next((s.program for s in p.shaders if s.kind == "fragment" and s.program is not None), None)
-        if any(not s.compiled for s in p.shaders) or (p.vertex is None and p.fragment is None):
+        found = {kind: next((s.program for s in p.shaders if s.kind == kind and s.program is not None), None)
+                 for kind in ("vertex", "fragment", "geometry", "tess_control", "tess_evaluation", "compute")}
+        p.vertex, p.fragment, p.geometry = found["vertex"], found["fragment"], found["geometry"]
+        p.tess_control, p.tess_eval, p.compute = found["tess_control"], found["tess_evaluation"], found["compute"]
+        p.storage_blocks = []
+        for stage in p.stages():
+            for block in stage.blocks:
+                if "buffer" in block["qualifiers"] and block["name"] not in p.storage_blocks:
+                    p.storage_blocks.append(block["name"])
+        if any(not s.compiled for s in p.shaders) or (p.vertex is None and p.fragment is None and p.compute is None):
             p.linked, p.log = False, "ERROR: a shader did not compile\n"
             return
         p.linked, p.log = True, ""
         self._link_attributes(p)
         self._link_uniforms(c, p)
         self._link_outputs(p)
+
+    # the geometry, tessellation and compute stages ----------------------------------------------------
+    def _storage(self, c, p):
+        """The buffers of the buffer blocks and atomic counters of a program's stages (by the binding in their
+        layout), and a function writing them back into the buffer objects."""
+        memory, places = {}, []
+        for stage in p.stages():
+            for block in stage.blocks:
+                if "buffer" not in block["qualifiers"]:
+                    continue
+                layout_binding = glsl._const_count(block["layout"].get("binding")) or 0
+                binding = p.storage_bindings.get(block["name"], layout_binding)
+                entry = c.indexed_bindings.get((0x90D2, binding))      # GL_SHADER_STORAGE_BUFFER
+                if entry is None or entry[0] is None or layout_binding in memory:
+                    continue
+                buffer, offset, size = entry
+                size = size or max(0, buffer.size - offset)
+                data = numpy.frombuffer(bytearray(self.dp.read(buffer.address + offset, size)), dtype=numpy.uint8) if size else \
+                    numpy.zeros(0, dtype=numpy.uint8)
+                memory[layout_binding] = data
+                places.append((buffer.address + offset, data))
+            for item in stage.globals:
+                v = item.value
+                if v["kind"] != "atomic_uint":
+                    continue
+                binding = glsl._const_count(v["layout"].get("binding")) or 0
+                entry = c.indexed_bindings.get((0x92C0, binding))      # GL_ATOMIC_COUNTER_BUFFER
+                if entry is None or entry[0] is None or ("atomic", binding) in memory:
+                    continue
+                buffer, offset, size = entry
+                size = size or max(0, buffer.size - offset)
+                data = numpy.frombuffer(bytearray(self.dp.read(buffer.address + offset, size)), dtype=numpy.uint8)
+                memory[("atomic", binding)] = data
+                places.append((buffer.address + offset, data))
+
+        def write_back():
+            for address, data in places:
+                if len(data):
+                    self.dp.write(address, data.tobytes())
+        return memory, write_back
+
+    def _images(self, c):
+        out = {}
+        for unit, (name, level, layered, layer, access, fmt) in c.image_units.items():
+            texture = c.texture_objects.get(name)
+            if texture is None:
+                continue
+            if layered:
+                layers = sorted({key[0] for key in texture.levels if key[1] == level})
+                arrays = [texture.level(level, k) for k in layers]
+            else:
+                arrays = [texture.level(level, layer)]
+            arrays = [a for a in arrays if a is not None]
+            integer = fmt in (0x8D82, 0x8D70, 0x8235, 0x8236, 0x823C, 0x8D88, 0x8D76, 0x8D8E, 0x8D7C)
+            out[unit] = glsl.ImageUnit(arrays, integer, fmt in (0x8236, 0x8D70, 0x823C, 0x8D76, 0x8D7C))
+        return out
+
+    def _stage_uniforms(self, c, p, n):
+        return self._uniform_values_for(c, p, n)
+
+    def _inputs_from(self, program, previous, rows, extra=None):
+        """The array inputs of a stage (geometry, tessellation) read from the previous stage's outputs: item k
+        of each, the value of the vertex rows[:, k]; gl_in from gl_Position / gl_PointSize."""
+        inputs = dict(extra or {})
+        for name, kind, array, layout, quals in program.interface("in"):
+            if name.startswith("gl_") or "patch" in quals or not previous.has(name):
+                continue
+            inputs[name] = _per_vertex(previous.lookup(name), rows)
+        for block in program.blocks:
+            if "in" in block["qualifiers"] and block["instance"]:
+                fields = {}
+                for member in block["members"]:
+                    if previous.has(member[0]):
+                        fields[member[0]] = previous.lookup(member[0])
+                for item in getattr(previous, "values", {}).values() if hasattr(previous, "values") else []:
+                    if isinstance(item.data, dict):
+                        for key, value in item.data.items():
+                            if any(m[0] == key for m in block["members"]):
+                                fields[key] = value
+                if fields:
+                    items = [glsl.Val("__block", {k: glsl._rows(v, rows[:, j]) for k, v in fields.items()})
+                             for j in range(rows.shape[1])]
+                    inputs[block["instance"]] = glsl.Val("array", items, len(items))
+        position = previous.lookup("gl_Position") if previous.has("gl_Position") else None
+        point = previous.lookup("gl_PointSize") if previous.has("gl_PointSize") else None
+        if position is not None:
+            items = []
+            for j in range(rows.shape[1]):
+                fields = {"gl_Position": glsl._rows(position, rows[:, j])}
+                if point is not None:
+                    fields["gl_PointSize"] = glsl._rows(point, rows[:, j])
+                items.append(glsl.Val("__block", fields))
+            inputs["gl_in"] = glsl.Val("array", items, len(items))
+        return inputs
+
+    def _geometry(self, c, p, stage, textures, memory, images):
+        gs = p.geometry
+        prims, simple = _assemble(stage.order, stage.kind)
+        expected = {"points": 1, "lines": 2, "lines_adjacency": 4, "triangles": 3, "triangles_adjacency": 6}
+        layout_in = glsl.program_layout(gs, "in")
+        wanted = next((count for name, count in expected.items() if name in layout_in), prims.shape[1] if prims.ndim > 1 else 1)
+        if prims.ndim < 2 or prims.shape[1] < wanted:
+            return _Stage(_Values({}), 0, [], "points")
+        prims = prims[:, :wanted] if wanted not in (4, 6) or simple.endswith("_adj") else prims
+        count = len(prims)
+        inputs = self._inputs_from(gs, stage.rt, prims, {"gl_PrimitiveIDIn": glsl.Val("int", numpy.arange(count))})
+        runs = glsl.run_geometry(gs, count, inputs, self._stage_uniforms(c, p, count), textures, memory, images)
+        layout_out = glsl.program_layout(gs, "out")
+        size = 1 if "points" in layout_out else 2 if "line_strip" in layout_out else 3
+        pieces, made = [], []
+        total = 0
+        for invocation, events in enumerate(runs):
+            strips = [[] for _ in range(count)]
+            for event, stream, lanes, snapshot in events:
+                if stream != 0:
+                    continue
+                if event == "cut":
+                    for lane in lanes:
+                        strips[lane] = []
+                    continue
+                pieces.append(snapshot)
+                ids = range(total, total + len(lanes))
+                total += len(lanes)
+                for lane, vertex in zip(lanes, ids):
+                    strip = strips[lane]
+                    strip.append(vertex)
+                    if size == 1:
+                        made.append((int(lane), invocation, len(made), (vertex,)))
+                    elif size == 2 and len(strip) >= 2:
+                        made.append((int(lane), invocation, len(made), (strip[-2], strip[-1])))
+                    elif size == 3 and len(strip) >= 3:
+                        tri = (strip[-3], strip[-2], strip[-1]) if (len(strip) - 3) % 2 == 0 else (strip[-2], strip[-3], strip[-1])
+                        made.append((int(lane), invocation, len(made), tri))
+        if not made:
+            return _Stage(_Values({}), 0, [], "points")
+        made.sort(key=lambda item: item[:3])
+        names = set(pieces[0])
+        for piece in pieces[1:]:
+            names &= set(piece)
+        values = {name: _concat([piece[name] for piece in pieces]) for name in names}
+        for value in list(values.values()):     # the members of output blocks by their own names
+            if isinstance(value.data, dict) and value.kind == "__block":
+                for key, member in value.data.items():
+                    values.setdefault(key, member)
+        order = numpy.array([v for item in made for v in item[3]], dtype=numpy.int64)
+        return _Stage(_Values(values), total, order, {1: "points", 2: "lines", 3: "triangles"}[size])
+
+    def _tessellation(self, c, p, stage, textures, memory, images):
+        from .dxbc import tessellate
+        tes = p.tess_eval
+        size = max(1, c.patch_vertices)
+        order = stage.order[:len(stage.order) // size * size]
+        patches = order.reshape(-1, size)
+        count = len(patches)
+        if not count:
+            return _Stage(_Values({}), 0, [], "points")
+        # the control points and patch values: from the control shader, or the vertices and default levels
+        tcs = p.tess_control
+        if tcs is not None:
+            out_vertices = glsl.program_layout(tcs, "out").get("vertices") or size
+            lanes = count * out_vertices
+            patch_of = numpy.repeat(numpy.arange(count), out_vertices)
+            rows = patches[patch_of]
+            inputs = self._inputs_from(tcs, stage.rt, rows, {
+                "gl_InvocationID": glsl.Val("int", numpy.tile(numpy.arange(out_vertices), count)),
+                "gl_PatchVerticesIn": glsl.Val("int", numpy.full(lanes, size)),
+                "gl_PrimitiveID": glsl.Val("int", patch_of.copy())})
+            for name, kind, array, layout, quals in tcs.interface("out"):
+                if "patch" not in quals and array == -1:
+                    inputs[name] = glsl.zero(kind, lanes, tcs.structs, out_vertices)
+            inputs["gl_out"] = glsl.Val("array", [glsl.Val("__block", {"gl_Position": glsl.zero("vec4", lanes),
+                                                                       "gl_PointSize": glsl.Val("float", numpy.ones(lanes))})
+                                                  for _ in range(out_vertices)], out_vertices)
+            rt = glsl.run_stage(tcs, lanes, inputs, self._stage_uniforms(c, p, lanes), textures, memory, images)
+            first = numpy.arange(count) * out_vertices
+            control, patch = {}, {}
+            for name, kind, array, layout, quals in tcs.interface("out"):
+                if not rt.has(name):
+                    continue
+                value = rt.lookup(name)
+                if "patch" in quals:
+                    patch[name] = glsl._rows(value, first)
+                elif value.kind == "array":
+                    control[name] = [glsl._rows(value.data[j], first + j) for j in range(min(out_vertices, len(value.data)))]
+            gl_out = rt.lookup("gl_out")
+            control["gl_Position"] = [glsl._rows(gl_out.data[j].data["gl_Position"], first + j) for j in range(out_vertices)]
+            outer = numpy.stack([numpy.asarray(v.data, dtype=numpy.float64)[first] for v in rt.lookup("gl_TessLevelOuter").data], 1)
+            inner = numpy.stack([numpy.asarray(v.data, dtype=numpy.float64)[first] for v in rt.lookup("gl_TessLevelInner").data], 1)
+        else:
+            out_vertices = size
+            control, patch = {}, {}
+            for name, kind, array, layout, quals in tes.interface("in"):
+                if "patch" not in quals and stage.rt.has(name):
+                    control[name] = [glsl._rows(stage.rt.lookup(name), patches[:, j]) for j in range(size)]
+            control["gl_Position"] = [glsl._rows(stage.rt.lookup("gl_Position"), patches[:, j]) for j in range(size)]
+            outer = numpy.tile(numpy.array(c.patch_outer, dtype=numpy.float64), (count, 1))
+            inner = numpy.tile(numpy.array(c.patch_inner, dtype=numpy.float64), (count, 1))
+        # the domain points of each patch
+        layout = glsl.program_layout(tes, "in")
+        domain = 3 if "quads" in layout else 1 if "isolines" in layout else 2
+        partitioning = 4 if "fractional_even_spacing" in layout else 3 if "fractional_odd_spacing" in layout else 1
+        edges = {2: 3, 3: 4, 1: 2}[domain]
+        insides = {2: 1, 3: 2, 1: 0}[domain]
+        points, owners, prims = [], [], []
+        total = 0
+        kind = "triangles"
+        for q in range(count):
+            domain_points, prim, kind = tessellate(domain, list(outer[q, :edges]), list(inner[q, :insides]), partitioning)
+            if not len(domain_points):
+                continue
+            if kind == "triangles" and "cw" in layout:
+                prim = prim[:, [0, 2, 1]]
+            points.append(domain_points)
+            owners.append(numpy.full(len(domain_points), q))
+            prims.append(prim + total)
+            total += len(domain_points)
+        if not total:
+            return _Stage(_Values({}), 0, [], "points")
+        points = numpy.concatenate(points)
+        owner = numpy.concatenate(owners)
+        prims = numpy.concatenate(prims)
+        inputs = {"gl_TessCoord": glsl.Val("vec3", points.astype(numpy.float64)),
+                  "gl_PatchVerticesIn": glsl.Val("int", numpy.full(total, out_vertices)),
+                  "gl_PrimitiveID": glsl.Val("int", owner.copy()),
+                  "gl_TessLevelOuter": glsl.Val("array", [glsl.Val("float", outer[owner, k]) for k in range(4)], 4),
+                  "gl_TessLevelInner": glsl.Val("array", [glsl.Val("float", inner[owner, k]) for k in range(2)], 2)}
+        for name, items in control.items():
+            if name == "gl_Position":
+                continue
+            inputs[name] = glsl.Val("array", [glsl._rows(item, owner) for item in items], len(items))
+        inputs["gl_in"] = glsl.Val("array", [glsl.Val("__block", {"gl_Position": glsl._rows(item, owner)})
+                                             for item in control["gl_Position"]], len(control["gl_Position"]))
+        for name, value in patch.items():
+            inputs[name] = glsl._rows(value, owner)
+        rt = glsl.run_stage(tes, total, inputs, self._stage_uniforms(c, p, total), textures, memory, images)
+        if "point_mode" in layout:
+            return _Stage(rt, total, numpy.arange(total), "points")
+        return _Stage(rt, total, prims.reshape(-1), "lines" if kind == "lines" else "triangles")
+
+    def _glPatchParameteri(self, c, name, value):
+        if name == 0x8E72:      # GL_PATCH_VERTICES
+            c.patch_vertices = max(1, int(value))
+
+    def _glPatchParameterfv(self, c, name, values):
+        count = 4 if name == 0x8E74 else 2      # GL_PATCH_DEFAULT_OUTER_LEVEL / INNER_LEVEL
+        data = list(struct.unpack(f"<{count}f", bytes(self.dp.read(values, 4 * count))))
+        if name == 0x8E74:
+            c.patch_outer = data
+        elif name == 0x8E73:
+            c.patch_inner = data
+
+    def _glDispatchCompute(self, c, x, y, z):
+        p = c.program
+        if p is None or p.compute is None or not (x and y and z):
+            return
+        memory, write_back = self._storage(c, p)
+        textures = {unit: self._texture_function(c, unit) for unit in range(16)}
+        try:
+            glsl.run_compute(p.compute, (int(x), int(y), int(z)), self._uniform_values_for(c, p, 1), textures, memory,
+                             self._images(c))
+        except (glsl.GLSLError, IndexError, ValueError, KeyError) as e:
+            self._missing_feature(f"GLSL: {e}")
+        write_back()
+
+    def _glDispatchComputeIndirect(self, c, offset):
+        buffer = c.bindings.get(0x90EE)     # GL_DISPATCH_INDIRECT_BUFFER
+        if buffer is not None:
+            x, y, z = struct.unpack("<3I", bytes(self.dp.read(buffer.address + int(offset), 12)))
+            self._glDispatchCompute(c, x, y, z)
+
+    def _glMemoryBarrier(self, c, bits):
+        return None
+
+    _glMemoryBarrierByRegion = _glMemoryBarrier
+
+    def _glBindImageTexture(self, c, unit, texture, level, layered, layer, access, fmt):
+        if texture:
+            c.image_units[int(unit)] = (int(texture), int(level), bool(layered), int(layer), int(access), int(fmt))
+        else:
+            c.image_units.pop(int(unit), None)
+
+    def _glGetProgramResourceIndex(self, c, program, interface, name):
+        p = c.programs.get(program)
+        text = read_astring(self.dp, name) or ""
+        if p is None:
+            return 0xFFFFFFFF
+        if interface == 0x92E6:     # GL_SHADER_STORAGE_BLOCK
+            return p.storage_blocks.index(text) if text in p.storage_blocks else 0xFFFFFFFF
+        if interface == 0x92E2:     # GL_UNIFORM_BLOCK
+            return next((k for k, b in enumerate(p.blocks) if b["name"] == text), 0xFFFFFFFF)
+        return 0xFFFFFFFF
+
+    def _glShaderStorageBlockBinding(self, c, program, index, binding):
+        p = c.programs.get(program)
+        if p is not None and index < len(p.storage_blocks):
+            p.storage_bindings[p.storage_blocks[index]] = int(binding)
 
     def _link_attributes(self, p: GLProgram):
         p.attributes, p.attribute_kinds = {}, {}
@@ -840,9 +1209,7 @@ class GLMore:
         p.uniforms, p.uniform_kinds, p.locations, p.names, p.blocks = {}, {}, {}, {}, []
         location = 0
         structs = {}
-        for program in (p.vertex, p.fragment):
-            if program is None:
-                continue
+        for program in p.stages():
             structs.update(program.structs)
             for item in program.globals:
                 v = item.value
@@ -906,6 +1273,11 @@ class GLMore:
             value = {0x8B82: int(p.linked), 0x8B83: int(p.linked), 0x8B84: len(p.log) + 1 if p.log else 0,
                      0x8B85: len(p.shaders), 0x8B86: len(p.locations), 0x8B87: 64, 0x8B89: len(p.attributes),
                      0x8B8A: 64, 0x8A36: len(p.blocks), 0x8B80: 0}.get(parameter, 0)
+            if parameter == 0x8267 and p.compute is not None:     # GL_COMPUTE_WORK_GROUP_SIZE
+                layout = glsl.program_layout(p.compute, "in")
+                self.dp.write(out, struct.pack("<3i", layout.get("local_size_x") or 1, layout.get("local_size_y") or 1,
+                                               layout.get("local_size_z") or 1))
+                return
         self.dp.write(out, struct.pack("<i", value))
 
     def _glGetProgramInfoLog(self, c, program, size, length, out):
@@ -1550,6 +1922,14 @@ class GLMore:
         texture = self._bound_texture(c, GL_TEXTURE_2D, 0) if GL_TEXTURE_2D in c.enabled else None
         array = texture.level(0) if texture is not None else None
         c.textures = {c.units.get((0, GL_TEXTURE_2D), 0): array} if array is not None else {}
+        # the mip chain when the minifying filter uses mipmaps
+        c.texture_levels = None
+        if texture is not None and array is not None and texture.params.get(0x2801, 0x2702) in (0x2700, 0x2701, 0x2702, 0x2703):
+            levels = [array]
+            while texture.level(len(levels)) is not None:
+                levels.append(texture.level(len(levels)))
+            if len(levels) > 1:
+                c.texture_levels = (levels, texture.params.get(0x2801, 0x2702) in (0x2702, 0x2703))
         c.bound = c.units.get((0, GL_TEXTURE_2D), 0)
         c.texture_parameters = {c.bound: dict(texture.params)} if texture is not None else {}
         if c.program is not None and vertices:
@@ -1588,7 +1968,11 @@ class GLMore:
         if p is None or not p.linked or p.vertex is None:
             return
         kind = KINDS.get(mode, "points")
-        if mode > 9:
+        if mode == 0x000E:          # GL_PATCHES
+            kind = "patches"
+        elif 0x000A <= mode <= 0x000D:
+            kind = {0xA: "lines_adj", 0xB: "line_strip_adj", 0xC: "triangles_adj", 0xD: "strip_adj"}[mode]
+        elif mode > 9:
             self._missing_feature(f"OpenGL primitive {mode}")
             return
         vertex_ids = numpy.asarray(vertex_ids, dtype=numpy.int64)
@@ -1660,7 +2044,26 @@ class GLMore:
             inputs["gl_Normal"] = glsl.Val("vec3", numpy.tile(numpy.array(c.normal, dtype=float), (n, 1)))
         uniforms = self._uniform_values_for(c, p, n)
         textures = {unit: self._texture_function(c, unit) for unit in range(16)}
+        memory, write_back = self._storage(c, p)
+        images = self._images(c)
         rt = glsl.run_vertex(p.vertex, n, inputs, uniforms, textures)
+        if kind == "patches" or kind.endswith("_adj") or p.geometry is not None or p.tess_eval is not None:
+            stage = _Stage(rt, n, inverse, kind)
+            if p.tess_eval is not None and kind == "patches":
+                stage = self._tessellation(c, p, stage, textures, memory, images)
+            elif kind == "patches":
+                write_back()
+                return
+            if p.geometry is not None and stage.n:
+                stage = self._geometry(c, p, stage, textures, memory, images)
+            elif kind.endswith("_adj"):
+                stage.order, stage.kind = _strip_adjacency(stage.order, stage.kind)
+            rt, n, inverse, kind = stage.rt, stage.n, stage.order, stage.kind
+            write_back()
+            if not n or not len(inverse):
+                return
+        else:
+            write_back()
         clip = numpy.asarray(rt.lookup("gl_Position").data, dtype=numpy.float64).reshape(n, 4)
         # the varyings the fragment shader reads
         links, columns, flat = [], [], []
@@ -1708,6 +2111,7 @@ class GLMore:
         attrs_all = attrs[inverse]
         writes_depth = "gl_FragDepth" in fragment_program_source(p)
         outputs = sorted(p.outputs.items(), key=lambda kv: kv[1])
+        source = fragment_program_source(p)
 
         def fragment(frags):
             if fragment_program is None:
@@ -1760,7 +2164,18 @@ class GLMore:
                     if rt_f.has("gl_FragDepth") else None
             return colors, ~rt_f.discarded, depth
 
+        # the fragments in 2x2 quads for the derivatives (dFdx...) and the mip levels of mipmapped textures
+        fragment.quads = any(word in source for word in ("dFdx", "dFdy", "fwidth")) or \
+            ("texture" in source and self._mipmapped_units(c))
         self.render(c, kind, clip_all, attrs_all, fragment, flat_mask)
+
+    def _mipmapped_units(self, c) -> bool:
+        for (unit, target), name in c.units.items():
+            texture = c.texture_objects.get(name)
+            if texture is not None and texture.level(1) is not None and \
+                    texture.params.get(0x2801, 0x2702) in (0x2700, 0x2701, 0x2702, 0x2703):
+                return True
+        return False
 
 
 def fragment_program_source(p: GLProgram) -> str:
@@ -1795,6 +2210,75 @@ def _const_size(node):
     if hasattr(node, "op") and node.op == "const":
         return int(node.value[1])
     return None
+
+
+class _Stage:
+    """The vertices the last stage left (a runtime or what a geometry shader emitted) and their primitives:
+    order (the vertices of the primitives, in sequence) and kind."""
+
+    def __init__(self, rt, n, order, kind):
+        self.rt, self.n, self.order, self.kind = rt, n, numpy.asarray(order, dtype=numpy.int64), kind
+
+
+class _Values:
+    """A runtime-like set of values (lookup by name)."""
+
+    def __init__(self, values):
+        self.values = values
+
+    def lookup(self, name):
+        if name not in self.values:
+            raise glsl.GLSLError(f"unknown variable {name}")
+        return self.values[name]
+
+    def has(self, name):
+        return name in self.values
+
+
+def _assemble(order, kind):
+    """The primitives (p, k) of a sequence of vertices: rows of vertex indices."""
+    order = numpy.asarray(order, dtype=numpy.int64)
+    count = len(order)
+    if kind == "lines_adj":
+        return order[:count // 4 * 4].reshape(-1, 4), "lines_adj"
+    if kind == "line_strip_adj":
+        n = max(0, count - 3)
+        return order[numpy.stack([numpy.arange(n) + k for k in range(4)], 1)] if n else numpy.zeros((0, 4), numpy.int64), "lines_adj"
+    if kind == "triangles_adj":
+        return order[:count // 6 * 6].reshape(-1, 6), "triangles_adj"
+    if kind == "strip_adj":
+        rows = []
+        for t in range(max(0, (count - 4) // 2)):
+            a, b, c = 2 * t, 2 * t + 2, 2 * t + 4
+            rows.append((a, a + 1, b, min(c + 1, count - 1), c, b + 1) if t % 2 == 0 else (b, a + 1, a, min(c + 1, count - 1), c, b + 1))
+        return (order[numpy.array(rows)] if rows else numpy.zeros((0, 6), numpy.int64)), "triangles_adj"
+    prims = primitives(kind, count)
+    simple = kind_of(kind)
+    return (order[prims] if len(prims) else numpy.zeros((0, {"points": 1, "lines": 2}.get(simple, 3)), numpy.int64)), simple
+
+
+def _strip_adjacency(order, kind):
+    prims, simple = _assemble(order, kind)
+    if simple == "lines_adj":
+        return prims[:, [1, 2]].reshape(-1), "lines"
+    return prims[:, [0, 2, 4]].reshape(-1), "triangles"
+
+
+def _concat(values):
+    """Values of several lanes sets, one after the other."""
+    first = values[0]
+    if first.kind == "array":
+        return glsl.Val("array", [_concat([v.data[k] for v in values]) for k in range(len(first.data))], first.length)
+    if isinstance(first.data, dict):
+        return glsl.Val(first.kind, {k: _concat([v.data[k] for v in values]) for k in first.data})
+    if isinstance(first.data, numpy.ndarray):
+        return glsl.Val(first.kind, numpy.concatenate([v.data for v in values]))
+    return first
+
+
+def _per_vertex(value, rows):
+    """An array input of the next stage: item k, the value of vertex rows[:, k]."""
+    return glsl.Val("array", [glsl._rows(value, rows[:, k]) for k in range(rows.shape[1])], rows.shape[1])
 
 
 def _broadcast_val(value: glsl.Val, n: int) -> glsl.Val:

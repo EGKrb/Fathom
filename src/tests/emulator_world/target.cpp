@@ -1203,6 +1203,8 @@ static int D3D11()
 }
 
 #include "graphics_more.inc"
+#include "graphics_more2.inc"
+#include "graphics_more3.inc"
 
 int wmain(int argc, wchar_t** argv)
 {
@@ -1264,6 +1266,24 @@ int wmain(int argc, wchar_t** argv)
         return D3D12();
     if(wcscmp(argv[1], L"mesh") == 0)
         return Mesh();
+    if(wcscmp(argv[1], L"bc") == 0)
+        return Bc();
+    if(wcscmp(argv[1], L"deriv") == 0)
+        return Deriv();
+    if(wcscmp(argv[1], L"tess") == 0)
+        return Tess();
+    if(wcscmp(argv[1], L"so") == 0)
+        return StreamOut();
+    if(wcscmp(argv[1], L"deferred") == 0)
+        return Deferred();
+    if(wcscmp(argv[1], L"gl4") == 0)
+        return Gl4();
+    if(wcscmp(argv[1], L"fx10") == 0)
+        return Fx10();
+    if(wcscmp(argv[1], L"dxil") == 0)
+        return Dxil();
+    if(wcscmp(argv[1], L"dxr") == 0)
+        return Dxr();
     if(wcscmp(argv[1], L"race") == 0)
         return Race();
     if(wcscmp(argv[1], L"illegal") == 0)
