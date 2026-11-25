@@ -1205,6 +1205,7 @@ static int D3D11()
 #include "graphics_more.inc"
 #include "graphics_more2.inc"
 #include "graphics_more3.inc"
+#include "graphics_more4.inc"
 
 int wmain(int argc, wchar_t** argv)
 {
@@ -1284,6 +1285,18 @@ int wmain(int argc, wchar_t** argv)
         return Dxil();
     if(wcscmp(argv[1], L"dxr") == 0)
         return Dxr();
+    if(wcscmp(argv[1], L"dxilgs") == 0)
+        return DxilStages();
+    if(wcscmp(argv[1], L"dxilops") == 0)
+        return DxilOps();
+    if(wcscmp(argv[1], L"dxr2") == 0)
+        return Dxr2();
+    if(wcscmp(argv[1], L"mesh6") == 0)
+        return Mesh6();
+    if(wcscmp(argv[1], L"graph") == 0)
+        return Graph();
+    if(wcscmp(argv[1], L"sm69") == 0)
+        return Sm69();
     if(wcscmp(argv[1], L"race") == 0)
         return Race();
     if(wcscmp(argv[1], L"illegal") == 0)

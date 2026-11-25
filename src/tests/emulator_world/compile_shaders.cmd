@@ -36,3 +36,18 @@ where dxc >nul 2>nul || for /f "delims=" %%f in ('dir /b /s "%ProgramFiles(x86)%
 "%DXC%" -nologo -T vs_6_0 -E vs -Vn Scene6VertexShader -Fh scene6_vs.h scene.hlsl || exit /b 1
 "%DXC%" -nologo -T ps_6_0 -E ps -Vn Scene6PixelShader -Fh scene6_ps.h scene.hlsl || exit /b 1
 "%DXC%" -nologo -T lib_6_3 -Vn MoreDxrLibrary -Fh more_dxr.h more_dxr.hlsl || exit /b 1
+"%DXC%" -nologo -T vs_6_0 -E vs -Vn MoreSm6StagesVertexShader -Fh more_sm6_vs.h more_sm6_stages.hlsl || exit /b 1
+"%DXC%" -nologo -T hs_6_0 -E hs -Vn MoreSm6HullShader -Fh more_sm6_hs.h more_sm6_stages.hlsl || exit /b 1
+"%DXC%" -nologo -T ds_6_0 -E ds -Vn MoreSm6DomainShader -Fh more_sm6_ds.h more_sm6_stages.hlsl || exit /b 1
+"%DXC%" -nologo -T gs_6_0 -E gs -Vn MoreSm6GeometryShader -Fh more_sm6_gs.h more_sm6_stages.hlsl || exit /b 1
+"%DXC%" -nologo -T cs_6_8 -E cs -Vn MoreSm6OpsComputeShader -Fh more_sm6_ops_cs.h more_sm6_ops.hlsl || exit /b 1
+"%DXC%" -nologo -T vs_6_6 -E vs_quad -Vn MoreSm6QuadVertexShader -Fh more_sm6_quad_vs.h more_sm6_ops.hlsl || exit /b 1
+"%DXC%" -nologo -T ps_6_6 -E ps -Vn MoreSm6OpsPixelShader -Fh more_sm6_ops_ps.h more_sm6_ops.hlsl || exit /b 1
+"%DXC%" -nologo -T lib_6_5 -Vn MoreDxr2Library -Fh more_dxr2.h more_dxr2.hlsl || exit /b 1
+"%DXC%" -nologo -T cs_6_5 -E QueryRays -Vn MoreDxr2QueryShader -Fh more_dxr2_cs.h more_dxr2.hlsl || exit /b 1
+"%DXC%" -nologo -T as_6_5 -E as -Vn MoreMeshAmplificationShader -Fh more_mesh6_as.h more_mesh6.hlsl || exit /b 1
+"%DXC%" -nologo -T ms_6_5 -E ms -Vn MoreMeshShader -Fh more_mesh6_ms.h more_mesh6.hlsl || exit /b 1
+"%DXC%" -nologo -T ps_6_5 -E ps -Vn MoreMeshPixelShader -Fh more_mesh6_ps.h more_mesh6.hlsl || exit /b 1
+"%DXC%" -nologo -T lib_6_8 -Vn MoreGraphLibrary -Fh more_graph.h more_graph.hlsl || exit /b 1
+"%DXC%" -nologo -T lib_6_9 -Vn MoreSm69Library -Fh more_sm69.h more_sm69.hlsl || exit /b 1
+"%DXC%" -nologo -T cs_6_9 -E Vectors -Vn MoreSm69VectorShader -Fh more_sm69_cs.h more_sm69.hlsl || exit /b 1

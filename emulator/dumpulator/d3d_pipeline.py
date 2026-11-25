@@ -212,6 +212,60 @@ def draw_dxbc(state: DrawState, vertex_ids, instances=(0,)) -> int:
     return written
 
 
+PRIMITIVE_REGISTERS = 64      # the per-primitive outputs of a mesh shader, after its vertex outputs
+
+
+def draw_mesh(state: DrawState, groups) -> int:
+    """DispatchMesh: the amplification shader's groups (each launching mesh groups with its payload), or the mesh
+    groups directly; their vertices and primitives rasterized (per-primitive attributes constant over their
+    primitive, SV_CullPrimitive, SV_PrimitiveID). The number of fragments written."""
+    from . import dxil_ops
+    amplification, ms, ps = (state.shaders.get(k) for k in ("as", "ms", "ps"))
+    if ms is None or not state.viewports:
+        return 0
+    empty = dxbc.Bindings()
+    launches = []
+    if amplification is not None:
+        for counts, payload in dxil_ops.run_amplification(amplification, groups, state.bindings.get("as", empty)):
+            if all(counts):
+                launches.append((counts, payload))
+    else:
+        launches.append((tuple(groups), None))
+    topology = (ms.mesh or (0, 0, 2))[2]
+    kind = "lines" if topology == 1 else "triangles"
+    signature = list(ms.outputs) + [dict(e, register=e["register"] + PRIMITIVE_REGISTERS) for e in ms.patch]
+    written = 0
+    for counts, payload in launches:
+        vertices, primitives, prims = dxil_ops.run_mesh(ms, counts, state.bindings.get("ms", empty), payload)
+        if len(prims) == 0 or not vertices:
+            continue
+        prims = prims[:, :2] if kind == "lines" else prims
+        primitive_id = numpy.arange(len(prims), dtype=numpy.uint32)
+        keep = numpy.ones(len(prims), dtype=bool)
+        for element in ms.patch:
+            values = primitives.get(element["register"])
+            if values is None:
+                continue
+            component = (element["mask"] & -element["mask"]).bit_length() - 1 if element["mask"] else 0
+            if element["name"] == "SV_PRIMITIVEID":
+                primitive_id = values[:, component].astype(numpy.uint32)
+            elif element["name"] == "SV_CULLPRIMITIVE":
+                keep &= values[:, component] == 0
+        if primitives:          # each primitive gets its own vertices: its attributes are constant over it
+            flat = prims.reshape(-1)
+            per = prims.shape[1]
+            outputs = {reg: values[flat] for reg, values in vertices.items()}
+            for reg, values in primitives.items():
+                outputs[reg + PRIMITIVE_REGISTERS] = numpy.repeat(values, per, axis=0)
+            prims = numpy.arange(len(flat), dtype=numpy.int64).reshape(-1, per)
+        else:
+            outputs = vertices
+        prims, primitive_id = prims[keep], primitive_id[keep]
+        if len(prims):
+            written += _rasterize(state, ps, outputs, signature, prims, kind, primitive_id)
+    return written
+
+
 def stream_out(so: StreamOutput, stream: int, outputs, prims, signature_list):
     """Writes the vertices of the primitives of a stream (lists: strips are already split) to the buffers of
     the stream output, as long as every buffer of the stream has room for a whole primitive."""
@@ -361,7 +415,7 @@ def _rasterize(state, ps, outputs, signature_list, prims, kind, primitive_id):
                       for view in ps_bindings.srvs.values())
         fragment.quads = dxbc.needs_quads(ps, mipmaps)
     # no side effect (no unordered access view): the fragments may be shaded by several threads
-    fragment.parallel = ps is None or (not ps.uavs and not ps_bindings.uavs)
+    fragment.parallel = ps is None or (not ps.uavs and not ps_bindings.uavs and not getattr(ps, "side_effects", False))
     return draw(output, pipeline, kind, prims, attrs, fragment, clip=clip, flat_mask=flat_mask)
 
 
@@ -376,7 +430,8 @@ def _tessellate(state, hs, ds, outputs, prims):
     kind = "triangles"
     for patch in range(patches):
         edges, inside = _tess_factors(hs, constants, patch)
-        points, prim, kind = dxbc.tessellate(hs.domain, edges or [1.0], inside or [1.0], hs.partitioning)
+        points, prim, kind = dxbc.tessellate(hs.domain, edges or [1.0], inside or [1.0], hs.partitioning,
+                                             {1: 1, 2: 2}.get(hs.output_primitive, 3))
         if len(points) == 0:
             continue
         if kind == "triangles" and hs.output_primitive == 4:  # triangle_ccw

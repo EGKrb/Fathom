@@ -23,6 +23,8 @@ from .dxbc import Bindings, Result, Unsupported, chunks, signature
 from .dxil_bitcode import Type
 
 WAVE = 32
+# the operations that write memory or reach the descriptor heaps
+SIDE_EFFECTS = {67, 69, 70, 78, 79, 140, 174, 175, 176, 177, 218, 225, 304}
 OPS: Dict[int, str] = {}
 
 
@@ -88,11 +90,20 @@ class Pointer:
 
 
 class Handle:
-    """A resource of a shader: class (0 SRV, 1 UAV, 2 CBV, 3 sampler) and register."""
-    __slots__ = ("klass", "register", "kind", "stride")
+    """A resource of a shader: class (0 SRV, 1 UAV, 2 CBV, 3 sampler), register and space."""
+    __slots__ = ("klass", "register", "kind", "stride", "space")
 
-    def __init__(self, klass, register, kind=0, stride=0):
-        self.klass, self.register, self.kind, self.stride = klass, register, kind, stride
+    def __init__(self, klass, register, kind=0, stride=0, space=0):
+        self.klass, self.register, self.kind, self.stride, self.space = klass, register, kind, stride, space
+
+
+def _lookup(table, handle):
+    """A binding of a handle: by (space, register) first when its space is not 0, then by register."""
+    if handle.space:
+        found = table.get((handle.space, handle.register))
+        if found is not None:
+            return found
+    return table.get(handle.register)
 
 
 class ResourceGlobal:
@@ -110,6 +121,7 @@ class Shader:
 
     def __init__(self, bytecode: bytes, entry: Optional[str] = None):
         parts = chunks(bytecode)
+        self.parts = parts                  # the container's parts (RDAT: the subobjects of a library)
         self.error = None
         self.inputs = signature(parts.get(b"ISG1") or parts.get(b"ISGN"), b"ISG1" if b"ISG1" in parts else b"ISGN")
         self.outputs = signature(parts.get(b"OSG1") or parts.get(b"OSGN"), b"OSG1" if b"OSG1" in parts else b"OSGN")
@@ -157,16 +169,19 @@ class Shader:
                     self.uavs[lower] = dict(dimension="2d", stride=stride)
         # the entry points: name -> (function, signatures, properties)
         self.entries: Dict[str, tuple] = {}
-        for entry in m.named.get("dx.entryPoints") or []:
-            if not isinstance(entry, list) or not entry:
+        self.patch_function = None          # hull shader: the patch constant function
+        self.mesh = None                    # mesh shader: (max vertices, max primitives, topology, payload size)
+        self.payload_size = 0               # amplification shader
+        self.max_vertices = 0               # geometry shader
+        for record in m.named.get("dx.entryPoints") or []:
+            if not isinstance(record, list) or not record:
                 continue
-            function = entry[0].value if isinstance(entry[0], bc.Value) and entry[0].kind == "function" else None
-            name = entry[1] if len(entry) > 1 and isinstance(entry[1], str) else ""
-            properties = entry[4] if len(entry) > 4 and isinstance(entry[4], list) else []
-            self.entries[name] = (function, entry[2] if len(entry) > 2 else None, properties)
+            function = record[0].value if isinstance(record[0], bc.Value) and record[0].kind == "function" else None
+            name = record[1] if len(record) > 1 and isinstance(record[1], str) else ""
+            properties = record[4] if len(record) > 4 and isinstance(record[4], list) else []
+            self.entries[name] = (function, record[2] if len(record) > 2 else None, properties)
             for k in range(0, len(properties) - 1, 2):
-                if self._int(properties[k]) == 4 and isinstance(properties[k + 1], list):  # NumThreads
-                    self.thread_group = tuple(self._int(v) for v in properties[k + 1][:3])
+                self._property(self._int(properties[k]), properties[k + 1])
         definitions = [f for f in m.functions if not f.declaration]
         if entry is not None:
             chosen = next((e[0] for n, e in self.entries.items() if n == entry), None)
@@ -175,10 +190,52 @@ class Shader:
         self.function = chosen or (definitions[0] if definitions else None)
         self.interpolation: Dict[int, int] = {}       # input register -> interpolation mode (as dxbc's)
         self.input_elements, self.output_elements = self._elements(0), self._elements(1)
+        self.patch_elements = self._elements(2)
+        # writes memory (stores, atomics, counters) or reaches the descriptor heaps: not shaded by several threads
+        self.side_effects = bool(self.function is not None and self._operations() & SIDE_EFFECTS)
         # groupshared variables (address space 3)
         for value in m.values:
             if value.kind == "global" and value.type.space == 3:
                 self.tgsm[value.id] = value.type.pointee
+
+    def _operations(self):
+        """The dx.op opcodes the entry function calls."""
+        found = set()
+        for block in self.function.blocks:
+            for ins in block:
+                if ins.op == "call" and ins.operands:
+                    callee = self.function.all_values[ins.extra["callee"]]
+                    if (callee.name or "").startswith("dx.op."):
+                        value = self.function.all_values[ins.operands[0]]
+                        if value.kind == "const" and isinstance(value.value, int):
+                            found.add(value.value)
+        return found
+
+    def _property(self, tag, value):
+        """A shader property of an entry point (DxilMetadataHelper's tags)."""
+        if not isinstance(value, list):
+            return
+        if tag == 4:                        # NumThreads
+            self.thread_group = tuple(self._int(v) for v in value[:3])
+        elif tag == 1:                      # GS: input primitive, max vertices, streams, topology, instances
+            self.gs_input, self.max_vertices = self._int(value[0]), self._int(value[1])
+            self.gs_output = self._int(value[3]) or 5
+            self.gs_instances = max(1, self._int(value[4])) if len(value) > 4 else 1
+        elif tag == 2:                      # DS: domain, input control points
+            self.domain, self.input_cp = self._int(value[0]), self._int(value[1])
+        elif tag == 3:                      # HS: patch constant function, input / output points, domain, ...
+            patch = value[0]
+            self.patch_function = patch.value if isinstance(patch, bc.Value) and patch.kind == "function" else None
+            self.input_cp, self.output_cp = self._int(value[1]), self._int(value[2])
+            self.domain, self.partitioning, self.output_primitive = (self._int(v) for v in value[3:6])
+        elif tag == 9:                      # MS: threads, max vertices, max primitives, topology, payload
+            if isinstance(value[0], list):
+                self.thread_group = tuple(self._int(v) for v in value[0][:3])
+            self.mesh = tuple(self._int(v) for v in value[1:5])
+        elif tag == 10:                     # AS: threads, payload
+            if isinstance(value[0], list):
+                self.thread_group = tuple(self._int(v) for v in value[0][:3])
+            self.payload_size = self._int(value[1]) if len(value) > 1 else 0
 
     def _int(self, item) -> int:
         value = self.module.constant(item)
@@ -196,7 +253,7 @@ class Shader:
         signatures = next((e[1] for e in self.entries.values() if e[0] is self.function), None)
         if not isinstance(signatures, list) or len(signatures) <= which or not isinstance(signatures[which], list):
             return out
-        table = self.inputs if which == 0 else self.outputs
+        table = (self.inputs, self.outputs, self.patch)[which]
         for element in signatures[which]:
             if not isinstance(element, list) or len(element) < 10:
                 continue
@@ -227,8 +284,12 @@ class Shader:
 # ------------------------------------------------------------------ the interpreter
 class Machine:
     def __init__(self, shader: Shader, function, n: int, bindings: Bindings, inputs=None, system=None, groups=None,
-                 group_count=1, helper=None):
+                 group_count=1, helper=None, inputs2d=None, vocp=None, vpc=None):
         self.s, self.f, self.n = shader, function, n
+        self.inputs2d = inputs2d or {}      # register -> (n, vertices, 4): GS inputs, HS / DS control points
+        self.vocp = vocp or {}              # register -> (n, points, 4): the output control points (patch function)
+        self.vpc = vpc or {}                # register -> (n, 4): the patch constants (domain shader)
+        self.patch_outputs = None           # hull shader: register -> (patches, 4) written by the patch function
         self.m = shader.module
         self.b = bindings or Bindings()
         self.inputs = inputs or {}
@@ -449,7 +510,10 @@ class Machine:
             self._set(ins, self._cmp(ins), lanes)
         elif op == "select":
             c, a, b = (self.get(i) for i in ins.operands)
-            self._set(ins, _merge(c.astype(bool), a, b), lanes)
+            if isinstance(c, tuple):        # a vector condition: element by element
+                self._set(ins, tuple(_merge(x.astype(bool), y, z) for x, y, z in zip(c, a, b)), lanes)
+            else:
+                self._set(ins, _merge(c.astype(bool), a, b), lanes)
         elif op == "extractvalue":
             value = self.get(ins.operands[0])
             for index in ins.extra["indices"]:
@@ -503,8 +567,13 @@ class Machine:
 
     def _binop(self, ins):
         a, b = self.get(ins.operands[0]), self.get(ins.operands[1])
-        op = ins.extra["op"]
-        t = ins.type
+        if isinstance(a, tuple) or isinstance(b, tuple):     # vectors (shader model 6.9): element by element
+            count = len(a) if isinstance(a, tuple) else len(b)
+            a, b = (v if isinstance(v, tuple) else (v,) * count for v in (a, b))
+            return tuple(self._binop_values(ins.extra["op"], x, y, ins.type.elements[0]) for x, y in zip(a, b))
+        return self._binop_values(ins.extra["op"], a, b, ins.type)
+
+    def _binop_values(self, op, a, b, t):
         if op in ("fadd", "fsub", "fmul", "fdiv", "frem"):
             dtype = _dtype(t)
             a, b = a.astype(dtype), b.astype(dtype)
@@ -546,6 +615,11 @@ class Machine:
         op = ins.extra["op"]
         source = self.f.all_values[ins.operands[0]].type
         t = ins.type
+        if isinstance(a, tuple) and source.kind == "vector" and t.kind == "vector" and len(a) == t.count:
+            return tuple(self._cast_values(op, x, source.elements[0], t.elements[0]) for x in a)
+        return self._cast_values(op, a, source, t)
+
+    def _cast_values(self, op, a, source, t):
         if op in ("bitcast", "addrspacecast", "ptrtoint", "inttoptr"):
             if isinstance(a, (Pointer, Handle, tuple)) or op != "bitcast":
                 return a
@@ -583,7 +657,15 @@ class Machine:
 
     def _cmp(self, ins):
         a, b = self.get(ins.operands[0]), self.get(ins.operands[1])
-        p = ins.extra["predicate"]
+        t = self.f.all_values[ins.operands[0]].type
+        if isinstance(a, tuple) or isinstance(b, tuple):
+            count = len(a) if isinstance(a, tuple) else len(b)
+            a, b = (v if isinstance(v, tuple) else (v,) * count for v in (a, b))
+            element = t.elements[0] if t.kind == "vector" else t
+            return tuple(self._cmp_values(ins.extra["predicate"], x, y, element) for x, y in zip(a, b))
+        return self._cmp_values(ins.extra["predicate"], a, b, t)
+
+    def _cmp_values(self, p, a, b, t):
         if p < 32:      # fcmp: 1 oeq, 2 ogt, 3 oge, 4 olt, 5 ole, 6 one, 7 ord, 8 uno, 9 ueq ... 14 une, 15 true
             nan = numpy.isnan(a) | numpy.isnan(b)
             base = {1: a == b, 2: a > b, 3: a >= b, 4: a < b, 5: a <= b, 6: a != b, 7: ~nan, 8: nan,
@@ -599,7 +681,6 @@ class Machine:
             else:
                 out = base[p] | nan
             return out.astype(numpy.int64)
-        t = self.f.all_values[ins.operands[0]].type
         bits = _width(t)
         if p in (32, 33):
             out = (_mask(a, bits) == _mask(b, bits)) if p == 32 else (_mask(a, bits) != _mask(b, bits))
@@ -701,13 +782,39 @@ class Machine:
         register = int(index[0]) if isinstance(index, numpy.ndarray) else int(index)
         if register < lower:
             register += lower
-        return Handle(klass, register, kind, stride)
+        return Handle(klass, register, kind, stride, space)
+
+    def _heap(self, handle):
+        """What a handle of ResourceDescriptorHeap / SamplerDescriptorHeap designates (None when unbound)."""
+        if isinstance(handle.register, tuple):
+            resolve = getattr(self.b, "heap_resource", None)
+            return resolve(handle.register[2], handle.register[1]) if resolve is not None else None
+        return None
 
     def _view(self, handle):
         if not isinstance(handle, Handle):
             return None
+        if isinstance(handle.register, tuple):
+            found = self._heap(handle)
+            return found if hasattr(found, "kind") and hasattr(found, "bytes") else None
         table = {0: self.b.srvs, 1: self.b.uavs}.get(handle.klass)
-        return table.get(handle.register) if table is not None else None
+        return _lookup(table, handle) if table is not None else None
+
+    def _cb(self, handle):
+        if not isinstance(handle, Handle):
+            return None
+        if isinstance(handle.register, tuple):
+            found = self._heap(handle)
+            return found if isinstance(found, numpy.ndarray) else None
+        return _lookup(self.b.cbs, handle)
+
+    def _sampler(self, handle):
+        if not isinstance(handle, Handle):
+            return None
+        if isinstance(handle.register, tuple):
+            found = self._heap(handle)
+            return None if found is None or isinstance(found, numpy.ndarray) or hasattr(found, "bytes") else found
+        return _lookup(self.b.samplers, handle)
 
     def _bytes(self, handle):
         view = self._view(handle)
@@ -732,6 +839,8 @@ def _slots_of_value(value):
 
 
 def _merge(mask, new, old):
+    if hasattr(new, "merge"):           # an object of its own (a HitObject): it merges itself
+        return new.merge(numpy.asarray(mask, dtype=bool), old)
     if isinstance(new, tuple):
         return tuple(_merge(mask, a, b) for a, b in zip(new, old))
     if isinstance(new, (Pointer, Handle)) or not isinstance(new, numpy.ndarray):
@@ -787,13 +896,30 @@ def _from_bits(bits, t: Type):
     return bits.astype(numpy.int64)
 
 
+def _signature_read(m, elements, table2d, table, args, ins):
+    """A signature element (id, row, column[, vertex]) from per-vertex arrays (n, k, 4) or per-lane ones (n, 4)."""
+    ident, column = int(numpy.asarray(args[0])[0]), int(numpy.asarray(args[2])[0])
+    register, first, _, _ = elements.get(ident, (ident, 0, "", 0))
+    rows = register + numpy.broadcast_to(numpy.asarray(args[1], dtype=numpy.int64), (m.n,))
+    component = min(first + column, 3)
+    vertex = args[3] if len(args) > 3 and isinstance(args[3], numpy.ndarray) else None
+    out = numpy.zeros(m.n, dtype=numpy.uint32)
+    lane = numpy.arange(m.n)
+    for r in numpy.unique(rows):
+        sel = rows == r
+        data = table2d.get(int(r)) if vertex is not None and table2d else None
+        if data is not None:
+            k = numpy.clip(numpy.asarray(vertex, dtype=numpy.int64)[sel], 0, data.shape[1] - 1)
+            out[sel] = data[lane[sel], k, component]
+        else:
+            flat = table.get(int(r))
+            if flat is not None:
+                out[sel] = flat[sel, component] if flat.ndim == 2 else flat[sel, 0, component]
+    return _from_bits(out, ins.type)
+
+
 def _load_input(m, args, ins, lanes, active):
-    ident, row, column = (int(a[0]) for a in args[:3])
-    register, first, _, _ = m.s.input_elements.get(ident, (ident, 0, "", 0))
-    value = m.inputs.get(register + row)
-    if value is None:
-        return numpy.zeros(m.n, dtype=_dtype(ins.type))
-    return _from_bits(value[:, min(first + column, 3)], ins.type)
+    return _signature_read(m, m.s.input_elements, m.inputs2d, m.inputs, args, ins)
 
 
 def _store_output(m, args, ins, lanes, active):
@@ -814,7 +940,7 @@ def _store_output(m, args, ins, lanes, active):
 
 def _cbuffer_legacy(m, args, ins, lanes, active):
     handle, row = args[0], args[1]
-    data = m.b.cbs.get(handle.register) if isinstance(handle, Handle) else None
+    data = m._cb(handle)
     columns = len(ins.type.elements)
     t = ins.type.elements[0]
     out = []
@@ -862,7 +988,7 @@ def _sample(kind):
     def run(m, args, ins, lanes, active):
         from .gpu import DEFAULT_SAMPLER, sample_view
         view, sampler_handle = m._view(args[0]), args[1]
-        sampler = m.b.samplers.get(sampler_handle.register) if isinstance(sampler_handle, Handle) else None
+        sampler = m._sampler(sampler_handle)
         if view is None:
             return _res_ret(m, numpy.zeros((m.n, 4)), ins.type)
         count = _dimensions(view)
@@ -1165,8 +1291,14 @@ def _wave_first(m, args, ins, lanes, active):
 
 
 def _wave_groups(m):
-    """The wave of each lane: lanes in order, 32 by 32 (within a thread group for compute)."""
+    """The wave of each lane and its index in it: lanes in order, 32 by 32, a wave never spanning two thread groups
+    (compute, amplification, mesh: by the index of the thread in its group)."""
     lane = numpy.arange(m.n)
+    local = m.system.get("flattened")
+    if local is not None and len(numpy.asarray(local)) == m.n and m.n:
+        local = numpy.asarray(local, dtype=numpy.int64)
+        per_group = -(-(int(local.max()) + 1) // WAVE)
+        return numpy.asarray(m.groups, dtype=numpy.int64) * per_group + local // WAVE, local % WAVE
     return lane // WAVE, lane % WAVE
 
 
@@ -1279,7 +1411,7 @@ def _create_handle_from_binding(m, args, ins, lanes, active):
     bind = args[0]          # %dx.types.ResBind {lower, upper, space, class}
     lower, _, space, klass = (int(numpy.asarray(v)[0]) for v in bind)
     index = int(numpy.asarray(args[1])[0])
-    return Handle(klass, index if index >= lower else lower + index)
+    return Handle(klass, index if index >= lower else lower + index, space=space)
 
 
 def _annotate_handle(m, args, ins, lanes, active):
@@ -1304,6 +1436,43 @@ _DX[216] = _annotate_handle
 def run_vertex(shader: Shader, n: int, inputs, bindings: Bindings, system=None) -> Result:
     shader.check()
     return Machine(shader, shader.function, n, bindings, inputs=inputs, system=system).run()
+
+
+def run_geometry(shader: Shader, n: int, inputs2d, bindings: Bindings, primitive_id) -> List[Result]:
+    """One run per instance of the geometry shader: its events (emit / cut), as dxbc.run_geometry."""
+    shader.check()
+    results = []
+    for instance in range(shader.gs_instances):
+        system = {"primitive_id": primitive_id, "gs_instance": numpy.full(n, instance, dtype=numpy.uint32)}
+        results.append(Machine(shader, shader.function, n, bindings, system=system, inputs2d=inputs2d).run())
+    return results
+
+
+def run_hull(shader: Shader, patches: int, vicp, bindings: Bindings, primitive_id):
+    """The control point function on every output point, then the patch constant function on every patch:
+    (output control points reg -> (p, k, 4), patch constants reg -> (p, 4))."""
+    shader.check()
+    count = shader.output_cp or shader.input_cp or 1
+    lanes = patches * count
+    patch_of = numpy.repeat(numpy.arange(patches), count)
+    system = {"output_cp_id": numpy.tile(numpy.arange(count), patches).astype(numpy.uint32),
+              "primitive_id": numpy.asarray(primitive_id)[patch_of]}
+    result = Machine(shader, shader.function, lanes, bindings, system=system,
+                     inputs2d={reg: values[patch_of] for reg, values in vicp.items()}).run()
+    vocp = {reg: values.reshape(patches, count, 4) for reg, values in result.outputs.items()}
+    constants: Dict[int, numpy.ndarray] = {}
+    if shader.patch_function is not None:
+        machine = Machine(shader, shader.patch_function, patches, bindings, system={"primitive_id": primitive_id},
+                          inputs2d=vicp, vocp=vocp)
+        machine.patch_outputs = constants
+        machine.run()
+    return vocp, constants
+
+
+def run_domain(shader: Shader, n: int, domain, vicp, vpc, bindings: Bindings, primitive_id) -> Result:
+    shader.check()
+    system = {"domain": numpy.asarray(domain).view(numpy.float32), "primitive_id": primitive_id}
+    return Machine(shader, shader.function, n, bindings, system=system, inputs2d=vicp, vpc=vpc).run()
 
 
 def run_pixel(shader: Shader, n: int, inputs, bindings: Bindings, system=None, helper=None) -> Result:
@@ -1351,3 +1520,8 @@ def needs_quads(shader: Shader, mipmaps=True) -> bool:
                     if value.kind == "const" and isinstance(value.value, int) and value.value in wanted:
                         return True
     return False
+
+
+from . import dxil_ops  # noqa: E402,F401  (the rarer operations, registered in _DX)
+from . import dxr  # noqa: E402,F401  (RayQuery and createHandleForLib: dxr.py registers them in _DX)
+from . import workgraph  # noqa: E402,F401  (the node operations of work graphs: registered in _DX)

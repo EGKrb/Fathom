@@ -8,6 +8,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+- Emulator: the hull, domain and geometry stages in shader model 6 (DXIL), and
+  the rarer DXIL operations: wave and quad operations (`WaveMatch`,
+  `WaveMultiPrefix*`, `QuadVote`...), gathers (`GatherCmp`, `GatherRaw`),
+  `SampleCmpLevel` / `SampleCmpGrad` / `SampleCmpBias`, counters, packing,
+  `msad4`, `dot4add`, 16 and 64-bit conversions, attribute evaluation,
+  `ResourceDescriptorHeap` / `SamplerDescriptorHeap` (shader model 6.6).
+- Emulator: Direct3D 12 ray tracing with procedural geometry (AABBs,
+  intersection shaders, `ReportHit`), local root signatures (the arguments
+  of each shader record), the subobjects of DXIL libraries, collections,
+  `AddToStateObject`, and inline ray tracing (`RayQuery`, tier 1.1).
+- Emulator: amplification and mesh shaders (`DispatchMesh`), with pipeline
+  state streams (`CreatePipelineState`).
+- Emulator: work graphs (`DispatchGraph`, broadcasting, coalescing and
+  thread nodes).
+- Emulator: shader model 6.9: shader execution reordering (`HitObject`) and
+  long vectors.
+- `emulator_world` modes `dxilgs`, `dxilops`, `dxr2`, `mesh6` (WARP natively
+  when the GPU has no mesh shaders), `graph` (WARP likewise) and `sm69`.
+
+### Fixed
+- Emulator: the tessellator is a port of Microsoft's reference: the triangles
+  of a patch are those of a GPU, not only its points.
+- Emulator: DXIL bindings take the register space into account; a wave no
+  longer spans two thread groups.
+
 ## [1.8.0] - 2026-11-25
 
 ### Added

@@ -137,12 +137,13 @@ class RootSignature:
             filter_type, u, v, w, bias, anisotropy, compare, border = values[:8]
             min_lod, max_lod = struct.unpack_from("<2f", data, sampler_offset + 52 * i + 32)
             register, space, visibility = struct.unpack_from("<3I", data, sampler_offset + 52 * i + 40)
+            sampler_space = space
             modes = {1: "wrap", 2: "mirror", 3: "clamp", 4: "border", 5: "mirror"}
             borders = {0: (0.0, 0.0, 0.0, 0.0), 1: (0.0, 0.0, 0.0, 1.0), 2: (1.0, 1.0, 1.0, 1.0)}
             sampler = Sampler(bool(filter_type & 0x4) or filter_type & 0x40 != 0, tuple(modes.get(m, "clamp") for m in (u, v, w)),
                               borders.get(border, (0.0, 0.0, 0.0, 0.0)), compare if filter_type & 0x80 else 0,
                               bool(filter_type & 1), min_lod, max_lod, bias)
-            self.samplers.append((register, sampler, visibility))
+            self.samplers.append((register, sampler, visibility, sampler_space))
 
     def GetDevice(self, riid, out):
         return self.d3d.device_query(riid, out)
@@ -511,8 +512,7 @@ class Simple:
 # ------------------------------------------------------------------ command lists
 class CommandList:
     interface = "ID3D12GraphicsCommandList"
-    interfaces = ["ID3D12GraphicsCommandList1", "ID3D12GraphicsCommandList2", "ID3D12GraphicsCommandList3",
-                  "ID3D12GraphicsCommandList4"]
+    interfaces = [f"ID3D12GraphicsCommandList{k}" for k in range(1, 11)]
 
     def __init__(self, d3d, kind, pso, closed=False):
         self.d3d, self.kind = d3d, kind
@@ -568,6 +568,39 @@ class CommandList:
     def Dispatch(self, x, y, z):
         self._record("dispatch", x, y, z)
 
+    def DispatchMesh(self, x, y, z):
+        self._record("dispatch_mesh", x, y, z)
+
+    def SetProgram(self, desc):
+        dp = self.d3d.dp
+        kind = struct.unpack("<I", bytes(dp.read(desc, 4)))[0]
+        if kind == 5:       # WORK_GRAPH: its program identifier
+            ident = bytes(dp.read(desc + 8, 32))
+            self._record("program", self.d3d.programs.get(ident))
+        else:
+            missing(dp, f"Direct3D 12 SetProgram of type {kind}")
+
+    def DispatchGraph(self, desc):
+        """The records of the entry points: copied now from the CPU, read at execution from the GPU."""
+        dp = self.d3d.dp
+        p = dp.ptr_size()
+        mode = struct.unpack("<I", bytes(dp.read(desc, 4)))[0]
+
+        def cpu_input(at):
+            entry, count = struct.unpack("<2I", bytes(dp.read(at, 8)))
+            records = dp.read_ptr(at + 8)
+            stride = struct.unpack("<Q", bytes(dp.read(at + 16, 8)))[0]
+            return entry, [bytes(dp.read(records + k * stride, stride)) if stride else b"" for k in range(count)]
+        if mode == 0:
+            self._record("dispatch_graph", [cpu_input(desc + 8)], None)
+        elif mode == 2:
+            count = struct.unpack("<I", bytes(dp.read(desc + 8, 4)))[0]
+            inputs = dp.read_ptr(desc + (16 if p == 8 else 12))
+            stride = struct.unpack("<Q", bytes(dp.read(desc + (24 if p == 8 else 16), 8)))[0] or (32 if p == 8 else 24)
+            self._record("dispatch_graph", [cpu_input(inputs + k * stride) for k in range(count)], None)
+        else:
+            self._record("dispatch_graph", [], (mode, struct.unpack("<Q", bytes(dp.read(desc + 8, 8)))[0]))
+
     def CopyBufferRegion(self, dst, dst_offset, src, src_offset, size):
         self._record("copy_buffer", self.d3d.com.impl(dst), dst_offset, self.d3d.com.impl(src), src_offset, size)
 
@@ -615,7 +648,8 @@ class CommandList:
             self._record("bundle", impl)
 
     def SetDescriptorHeaps(self, count, heaps):
-        return None
+        dp = self.d3d.dp
+        self._record("heaps", [self.d3d.com.impl(dp.read_ptr(heaps + dp.ptr_size() * i)) for i in range(count)])
 
     def SetComputeRootSignature(self, root):
         self._record("root", "compute", self.d3d.com.impl(root))
@@ -808,6 +842,8 @@ class Executor:
         self.dsv = 0
         self.so_targets: Dict[int, tuple] = {}     # slot -> (location, size, filled size location)
         self.state_object = None
+        self.program = None                         # the work graph SetProgram chose: (state object, graph)
+        self.heaps = {}                             # heap type (0 CBV/SRV/UAV, 1 sampler) -> DescriptorHeap
 
     def run(self, commands):
         for command in commands:
@@ -973,23 +1009,84 @@ class Executor:
             dst_resource.write(src_resource.read()[src_value[0]:], dst_value[0])
 
     # drawing ----------------------------------------------------------------
-    def _bindings(self, kind, shader, stage_visibility):
-        """The bindings of a shader from the root signature and its arguments."""
+    def _bindings(self, kind, shader, stage_visibility, views=None):
+        """The bindings of a shader from the root signature and its arguments (the views it may write added to
+        views, also those of the heaps resolved later, while the shader runs)."""
         root = self.roots[kind]
         bindings = dxbc.Bindings()
-        views: List[View] = []
+        views: List[View] = [] if views is None else views
+        resolved = {}
+
+        def heap_resource(index, sampler):
+            """A slot of the bound heaps (ResourceDescriptorHeap[index] / SamplerDescriptorHeap[index])."""
+            key = (index, sampler)
+            if key not in resolved:
+                heap = self.heaps.get(1 if sampler else 0)
+                descriptor = heap.descriptors[index] if heap is not None and 0 <= index < heap.count else None
+                found = None
+                if descriptor is not None and descriptor.kind == "sampler":
+                    found = descriptor.values["sampler"]
+                elif descriptor is not None and descriptor.kind == "cbv":
+                    place = self.d3d.at_address(descriptor.values["location"])
+                    if place is not None:
+                        data = place[0].read()[place[1]:place[1] + descriptor.values["size"]]
+                        data = numpy.concatenate([data, numpy.zeros(-len(data) % 16, dtype=numpy.uint8)])
+                        found = data.view("<u4").reshape(-1, 4)
+                elif descriptor is not None:
+                    found = self.d3d.gpu_view(descriptor)
+                    if found is not None:
+                        views.append(found)
+                resolved[key] = found
+            return resolved[key]
+        bindings.heap_resource = heap_resource
         if root is None:
             return bindings, views
+        self._bind_root(root, self.args[kind], shader, stage_visibility, views, bindings)
+        return bindings, views
+
+    def local_bindings(self, root, record: bytes, shader, base, views):
+        """The bindings of a ray tracing shader: those of the global root signature (base) and the local root
+        arguments of its shader record (after the 32-byte identifier), as the local root signature lays them out."""
+        bindings = dxbc.Bindings(dict(base.cbs), dict(base.srvs), dict(base.samplers), dict(base.uavs))
+        bindings.heap_resource = getattr(base, "heap_resource", None)
+        if root is None:
+            return bindings
+        args = {}
+        offset = 32
+        for index, parameter in enumerate(root.parameters):
+            if parameter["kind"] == "constants":
+                offset += -offset % 4
+                count = parameter["count"]
+                args[index] = ("constants", list(struct.unpack_from(f"<{count}I", record, offset)) if len(record) >= offset + 4 * count else [])
+                offset += 4 * count
+            else:
+                offset += -offset % 8
+                value = struct.unpack_from("<Q", record, offset)[0] if len(record) >= offset + 8 else 0
+                args[index] = ("table" if parameter["kind"] == "table" else "address", value)
+                offset += 8
+        self._bind_root(root, args, shader, 0, views, bindings)
+        return bindings
+
+    def _bind_root(self, root, arguments, shader, stage_visibility, views, bindings):
+        """The resources a root signature binds with its arguments, put in bindings by register (and by (space,
+        register) for a space other than 0: DXIL looks them up with their space)."""
+        def put(table, space, register, value):
+            if space:
+                table[(space, register)] = value
+                table.setdefault(register, value)
+            else:
+                table[register] = value
         for index, parameter in enumerate(root.parameters):
             visibility = parameter["visibility"]
             if visibility not in (0, stage_visibility):
                 continue
-            arg = self.args[kind].get(index)
+            arg = arguments.get(index)
+            space = parameter.get("space", 0)
             if parameter["kind"] == "constants":
                 values = list(arg[1]) if arg and arg[0] == "constants" else []
                 values += [0] * (-len(values) % 4)
                 if values:
-                    bindings.cbs[parameter["register"]] = numpy.array(values, dtype=numpy.uint32).reshape(-1, 4)
+                    put(bindings.cbs, space, parameter["register"], numpy.array(values, dtype=numpy.uint32).reshape(-1, 4))
                 continue
             if arg is None:
                 continue
@@ -1002,7 +1099,7 @@ class Executor:
                 if parameter["kind"] == "cbv":
                     data = resource.read()[offset:offset + 65536]
                     data = numpy.concatenate([data, numpy.zeros(-len(data) % 16, dtype=numpy.uint8)])
-                    bindings.cbs[register] = data.view("<u4").reshape(-1, 4)
+                    put(bindings.cbs, space, register, data.view("<u4").reshape(-1, 4))
                 else:
                     declared = (shader.resources if parameter["kind"] == "srv" else shader.uavs).get(register, {})
                     stride = declared.get("stride", 0)
@@ -1011,7 +1108,8 @@ class Executor:
                     view.bytes = resource.read()[offset:].copy()
                     view.source = (resource, offset)
                     view.address = arg[1]       # an acceleration structure (root SRV)
-                    (bindings.srvs if parameter["kind"] == "srv" else bindings.uavs)[register] = view
+                    view.structures = self.d3d.structures
+                    put(bindings.srvs if parameter["kind"] == "srv" else bindings.uavs, space, register, view)
                     views.append(view)
                 continue
             # a descriptor table
@@ -1030,27 +1128,30 @@ class Executor:
                     if descriptor is None:
                         continue
                     if range_type == 3:
-                        bindings.samplers[register] = descriptor.values["sampler"]
+                        put(bindings.samplers, space, register, descriptor.values["sampler"])
                     elif range_type == 2:
                         found = self.d3d.at_address(descriptor.values["location"])
                         if found is not None:
                             resource, offset = found
                             data = resource.read()[offset:offset + descriptor.values["size"]]
                             data = numpy.concatenate([data, numpy.zeros(-len(data) % 16, dtype=numpy.uint8)])
-                            bindings.cbs[register] = data.view("<u4").reshape(-1, 4)
+                            put(bindings.cbs, space, register, data.view("<u4").reshape(-1, 4))
                     else:
                         view = self.d3d.gpu_view(descriptor)
                         if view is not None:
-                            (bindings.srvs if range_type == 0 else bindings.uavs)[register] = view
+                            put(bindings.srvs if range_type == 0 else bindings.uavs, space, register, view)
                             views.append(view)
                 running += count
-        for register, sampler, visibility in root.samplers:
+        for register, sampler, visibility, *rest in root.samplers:
             if visibility in (0, stage_visibility):
-                bindings.samplers[register] = sampler
-        return bindings, views
+                put(bindings.samplers, rest[0] if rest else 0, register, sampler)
+        return bindings
 
     def _write_back(self, views):
         for view in views:
+            counter = getattr(view, "counter_source", None)
+            if counter is not None and view.counter is not None:
+                counter[0].write(struct.pack("<I", view.counter[0] & 0xFFFFFFFF), counter[1])
             source = getattr(view, "source", None)
             if view.bytes is None or not view.dirty or source is None:
                 continue
@@ -1113,12 +1214,11 @@ class Executor:
         state.depth_state = pso.depth_state
         fill, cull, front_ccw, depth_clip, _ = pso.rasterizer
         state.rasterizer = (fill, cull, front_ccw, depth_clip, bool(self.scissors))
-        visibility = {"vs": 1, "hs": 2, "ds": 3, "gs": 4, "ps": 5}
+        visibility = {"vs": 1, "hs": 2, "ds": 3, "gs": 4, "ps": 5, "as": 6, "ms": 7}
         state.uav_views = []
         for stage, shader in state.shaders.items():
-            bindings, views = self._bindings("graphics", shader, visibility[stage])
+            bindings, _ = self._bindings("graphics", shader, visibility[stage], state.uav_views)
             state.bindings[stage] = bindings
-            state.uav_views += views
         return state
 
     def _draw_ids(self, vertex_ids, instances, start_instance):
@@ -1154,6 +1254,55 @@ class Executor:
         base = base - (1 << 32) if base & 0x80000000 else base
         self._draw_ids(indices + base, instances, start_instance)
 
+    def _program(self, program):
+        self.program = program
+
+    def _gpu_records(self, address, stride, count):
+        found = self.d3d.at_address(address)
+        if found is None:
+            return []
+        data = found[0].read()
+        return [data[found[1] + k * stride:found[1] + (k + 1) * stride].tobytes() for k in range(count)]
+
+    def _dispatch_graph(self, inputs, gpu):
+        from .workgraph import Run
+        if self.program is None:
+            return
+        state, graph = self.program
+        if gpu is not None:         # D3D12_NODE_GPU_INPUT / D3D12_MULTI_NODE_GPU_INPUT in GPU memory
+            mode, address = gpu
+            found = self.d3d.at_address(address)
+            if found is None:
+                return
+            raw = found[0].read()[found[1]:found[1] + 64].tobytes()
+            if mode == 1:
+                entry, count, start, stride = struct.unpack_from("<2I2Q", raw, 0)
+                inputs = [(entry, self._gpu_records(start, stride, count))]
+            else:
+                count, _, start, stride = struct.unpack_from("<2I2Q", raw, 0)
+                inputs = []
+                for k in range(count):
+                    item = self._gpu_records(start + k * stride, 24, 1)
+                    if item:
+                        entry, number, records, record_stride = struct.unpack_from("<2I2Q", item[0], 0)
+                        inputs.append((entry, self._gpu_records(records, record_stride, number)))
+        bindings, views = self._bindings("compute", state, 0)
+        run = Run(graph, bindings)
+        for entry, records in inputs:
+            if 0 <= entry < len(graph.entrypoints):
+                size = graph.nodes[graph.entrypoints[entry]].record_size
+                run.enqueue(graph.entrypoints[entry], [r[:size] if size else r for r in records])
+        run.run()
+        self._write_back(views)
+
+    def _dispatch_mesh(self, x, y, z):
+        from .d3d_pipeline import draw_mesh
+        state = self._state()
+        if state is None:
+            return
+        self.d3d.fragments += draw_mesh(state, (x, y, z))
+        self._write_back(state.uav_views)
+
     def _dispatch(self, x, y, z):
         pso = self.pso
         if pso is None or not pso.compute or "cs" not in pso.shaders:
@@ -1176,12 +1325,18 @@ class Executor:
     def _state_object(self, state):
         self.state_object = state
 
+    def _heaps(self, heaps):
+        for heap in heaps:
+            if heap is not None:
+                self.heaps[heap.kind] = heap
+
     def _dispatch_rays(self, desc):
         state = self.state_object
         if state is None:
             return
         bindings, views = self._bindings("compute", state, 0)
-        dxr.Rays(self.d3d, state, desc, bindings).run()
+        local = lambda root, data, base: self.local_bindings(root, data, state, base, views)    # noqa: E731
+        dxr.Rays(self.d3d, state, desc, bindings, local).run()
         self._write_back(views)
 
     def _indirect(self, signature, count, arguments, offset):
@@ -1274,7 +1429,7 @@ class CommandQueue:
 # ------------------------------------------------------------------ the device
 class Device12:
     interface = "ID3D12Device"
-    interfaces = ["ID3D12Device1", "ID3D12Device2", "ID3D12Device3", "ID3D12Device4", "ID3D12Device5"]
+    interfaces = [f"ID3D12Device{k}" for k in range(1, 15)]
 
     def __init__(self, d3d, level):
         self.d3d, self.level = d3d, level
@@ -1355,9 +1510,86 @@ class Device12:
         pso.root = self.d3d.com.impl(d.root) if d.root else None
         return self._out(pso, "ID3D12PipelineState", riid, out)
 
+    # the subobjects of a pipeline state stream: type -> (alignment, size) of their value (p: the pointer size)
+    STREAM = {0: ("p", "p"), 1: ("p", "2p"), 2: ("p", "2p"), 3: ("p", "2p"), 4: ("p", "2p"), 5: ("p", "2p"), 6: ("p", "2p"),
+              7: ("p", "so"), 8: (4, 328), 9: (4, 4), 10: (4, 44), 11: (4, 52), 12: ("p", "2p"), 13: (4, 4), 14: (4, 4),
+              15: (4, 36), 16: (4, 4), 17: (4, 8), 18: (4, 4), 19: ("p", "2p"), 20: (4, 4), 21: (4, 56), 22: ("p", "vi"),
+              24: ("p", "2p"), 25: ("p", "2p"), 26: (4, 60), 27: (4, 44), 28: (4, 40), 29: ("p", "2p")}
+
     def CreatePipelineState(self, desc, riid, out):
-        missing(self.d3d.dp, "Direct3D 12 pipeline state streams (CreatePipelineState)")
-        return E_NOTIMPL
+        """ID3D12Device2::CreatePipelineState: a stream of subobjects (graphics, compute or mesh pipelines)."""
+        dp = self.d3d.dp
+        p = dp.ptr_size()
+        size = dp.read_ptr(desc)
+        stream = dp.read_ptr(desc + p)
+        data = bytes(dp.read(stream, size)) if size else b""
+        fields = {}
+        offset = 0
+        while offset + 4 <= len(data):
+            kind = struct.unpack_from("<I", data, offset)[0]
+            layout = self.STREAM.get(kind)
+            if layout is None:
+                missing(dp, f"Direct3D 12 pipeline state subobject {kind}")
+                return E_INVALIDARG
+            align = p if layout[0] == "p" else layout[0]
+            length = {"p": p, "2p": 2 * p, "so": 32 if p == 8 else 20, "vi": 24 if p == 8 else 12}.get(layout[1], layout[1])
+            start = offset + 4 + (-(offset + 4) % align)
+            fields[kind] = data[start:start + length]
+            offset = start + length
+            offset += -offset % p
+        pso = PipelineState(self.d3d)
+
+        def pointer(raw):
+            return struct.unpack_from("<Q" if p == 8 else "<I", raw, 0)[0]
+
+        def bytecode(raw):
+            return pointer(raw), struct.unpack_from("<Q" if p == 8 else "<I", raw, p)[0]
+        try:
+            for kind, stage in ((1, "vs"), (2, "ps"), (3, "ds"), (4, "hs"), (5, "gs"), (6, "cs"), (24, "as"), (25, "ms")):
+                if kind in fields:
+                    address, length = bytecode(fields[kind])
+                    if address and length:
+                        shader = shader_of(bytes(dp.read(address, length)))
+                        if shader.error:
+                            pso.error = shader.error
+                        pso.shaders[stage] = shader
+        except (dxbc.Unsupported, struct.error, BitcodeError) as e:
+            pso.error = str(e)
+            missing(dp, f"Direct3D 12 shader: {e}")
+        pso.compute = "cs" in pso.shaders
+        if 0 in fields:
+            pso.root = self.d3d.com.impl(pointer(fields[0]))
+        if 12 in fields:
+            address, count = pointer(fields[12]), struct.unpack_from("<I", fields[12], p)[0]
+            pso.layout = input_layout(dp, address, count) if address and count else []
+        blend = fields.get(8) or (struct.pack("<2I", 0, 0) + struct.pack("<9IB3x", 0, 0, 2, 1, 1, 2, 1, 1, 4, 15) * 8)
+        from .d3d11_emu import State11
+        pso.blends = blends_of(State11(self.d3d, "", blend))
+        raster = next((fields[k] for k in (28, 27, 10) if k in fields), None)
+        if raster is not None:
+            fill, cull, front_ccw = struct.unpack_from("<3I", raster, 0)
+            depth_clip = struct.unpack_from("<I", raster, 24)[0]
+            pso.rasterizer = (fill, cull, bool(front_ccw), bool(depth_clip), True)
+        else:
+            pso.rasterizer = (3, 3, False, True, True)
+        depth = next((fields[k] for k in (26, 21, 11) if k in fields), None)
+        if depth is not None:
+            enable, write, function = struct.unpack_from("<3I", depth, 0)
+            pso.depth_state = (bool(enable), bool(write), function)
+        else:
+            pso.depth_state = (True, True, 2)
+        if 7 in fields:
+            from .d3d11_emu import so_entries
+            raw = fields[7]
+            if p == 8:
+                decl, entries, strides_at, num_strides, stream_index = struct.unpack_from("<QI4xQII", raw, 0)
+            else:
+                decl, entries, strides_at, num_strides, stream_index = struct.unpack_from("<5I", raw, 0)
+            if decl and entries:
+                strides = [struct.unpack("<I", bytes(dp.read(strides_at + 4 * i, 4)))[0] for i in range(num_strides)] \
+                    if strides_at else []
+                pso.so = (so_entries(dp, decl, entries, True), strides, -1 if stream_index == 0xFFFFFFFF else stream_index)
+        return self._out(pso, "ID3D12PipelineState", riid, out)
 
     def CreateDescriptorHeap(self, desc, riid, out):
         kind, count, flags, _ = struct.unpack("<4I", bytes(self.d3d.dp.read(desc, 16)))
@@ -1405,6 +1637,8 @@ class Device12:
                           flags=d.flags)
             if d.dimension in (4, 2):
                 values["mip"] = struct.unpack("<I", bytes(self.d3d.dp.read(desc + 8, 4)))[0]
+            elif d.dimension == 1 and counter:
+                values["counter"] = (self.d3d.com.impl(counter), int(d.counter_offset))
         self._store(handle, Descriptor("uav", impl, **values))
 
     def CreateRenderTargetView(self, resource, desc, handle):
@@ -1582,7 +1816,7 @@ class Device12:
             return 0
         if feature == 7 and size >= 4:              # SHADER_MODEL: up to 6.6 (DXIL, dxil.py)
             requested = struct.unpack("<I", bytes(dp.read(data, 4)))[0]
-            dp.write(data, struct.pack("<I", min(requested, 0x66) if requested >= 0x51 else 0x51))
+            dp.write(data, struct.pack("<I", min(requested, 0x69) if requested >= 0x51 else 0x51))
             return 0
         if feature == 12 and size >= 4:             # ROOT_SIGNATURE: 1.1
             dp.write(data, struct.pack("<I", 2))
@@ -1601,8 +1835,12 @@ class Device12:
             dp.write(data + 4, struct.pack("<B", 1))
             return 0
         dp.write(data, b"\0" * size)
-        if feature == 27 and size >= 12:            # OPTIONS5: ray tracing tier 1.0 (dxr.py)
-            dp.write(data + 8, struct.pack("<I", 10))
+        if feature == 27 and size >= 12:            # OPTIONS5: ray tracing tier 1.1 (dxr.py, RayQuery)
+            dp.write(data + 8, struct.pack("<I", 11))
+        if feature == 32 and size >= 8:             # OPTIONS7: mesh shaders tier 1 (d3d_pipeline.draw_mesh)
+            dp.write(data, struct.pack("<I", 10))
+        if feature == 53 and size >= 8:             # OPTIONS21: work graphs tier 1.0 (workgraph.py)
+            dp.write(data, struct.pack("<I", 0x10))
         return 0
 
     def CreatePipelineLibrary(self, *args):
@@ -1640,6 +1878,15 @@ class Device12:
             return E_FAIL
         return self._out(state, "ID3D12StateObject", riid, out)
 
+    def AddToStateObject(self, desc, existing, riid, out):
+        base = self.d3d.com.impl(existing)
+        try:
+            state = dxr.create_state_object(self.d3d, desc, base if isinstance(base, dxr.StateObject) else None)
+        except (dxbc.Unsupported, BitcodeError, KeyError) as e:
+            missing(self.d3d.dp, f"Direct3D 12 state object: {e}")
+            return E_FAIL
+        return self._out(state, "ID3D12StateObject", riid, out)
+
     def GetRaytracingAccelerationStructurePrebuildInfo(self, desc, info):
         sizes = dxr.prebuild_sizes(dxr.read_inputs(self.d3d.dp, desc))
         self.d3d.dp.write(info, struct.pack("<3Q", *sizes))
@@ -1670,6 +1917,7 @@ class Direct3D12:
         self.heaps: List[DescriptorHeap] = []
         self.buffers: List[Resource12] = []
         self.structures: Dict[int, object] = {}     # acceleration structures by their GPU address (dxr.py)
+        self.programs: Dict[bytes, tuple] = {}      # work graph program identifiers -> (state object, graph)
         self.fragments = 0
 
     def device_query(self, riid, out):
@@ -1724,6 +1972,7 @@ class Direct3D12:
         if values.get("dimension") == 11 and descriptor.kind == "srv":
             view = View("raw")
             view.address = values.get("location", 0)
+            view.structures = self.structures
             return view
         if resource is None:
             return None
@@ -1739,6 +1988,11 @@ class Direct3D12:
                 view = View("buffer", fmt=DXGI.get(fmt, "r32u"), count=values.get("count", 0), first=values.get("first", 0))
             view.bytes = resource.read()
             view.source = descriptor
+            counter = values.get("counter")
+            if counter is not None and counter[0] is not None:     # the hidden counter of an append / consume UAV
+                holder, at = counter
+                view.counter = [int(holder.read()[at:at + 4].view("<u4")[0])]
+                view.counter_source = counter
             return view
         dimension = {1: "buffer", 2: "1d", 3: "1darray", 4: "2d", 5: "2darray", 6: "2d", 7: "2darray", 8: "3d", 9: "cube",
                      10: "cube"}.get(values.get("dimension", 4), "2d")

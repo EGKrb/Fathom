@@ -231,15 +231,26 @@ the output and in the result (`gui`, `network`, `processes`, `com`, `shared_obje
   (a level per edge and inside, integer, pow2 and fractional odd / even partitionings, the rings
   stitched), domain, geometry (emitted strips, streams), pixel (several targets, discard, depth
   output), compute (thread groups, group shared memory, barriers, atomics, typed, raw and
-  structured UAVs, append / consume counters). The shaders of shader model 6 (DXIL, made by dxc)
-  run in `dxil.py`: the LLVM 3.7 bitcode is read by `dxil_bitcode.py` (types, constants, metadata,
-  functions) and run on all the lanes at once (blocks in reverse post-order with lane masks), with
-  the `dx.op` operations of the resources, samplers, derivatives, wave operations and atomics.
+  structured UAVs, append / consume counters). The shaders of shader model 6 up to 6.9 (DXIL, made by
+  dxc) run in `dxil.py`: the LLVM 3.7 bitcode is read by `dxil_bitcode.py` (types, constants, metadata,
+  functions) and run on all the lanes at once (blocks in reverse post-order with lane masks, native
+  vectors of 6.9 element by element), at every stage (vertex, hull and its patch constant function,
+  domain, geometry, pixel, compute, amplification, mesh), with the `dx.op` operations of `dxil.py` and
+  `dxil_ops.py`: resources (bound by register and space, or from `ResourceDescriptorHeap` /
+  `SamplerDescriptorHeap`), sampling (gathers, comparisons with a level, gradients or bias),
+  derivatives, wave and quad operations, atomics, counters, packing, 16 and 64-bit conversions,
+  attribute evaluation. Mesh shaders: `DispatchMesh` with a pipeline state stream
+  (`CreatePipelineState`), amplification payloads, per-primitive attributes, `SV_CullPrimitive`.
+  Work graphs (`workgraph.py`): broadcasting, coalescing and thread nodes, node arrays, records per
+  thread or per group, `DispatchGraph` from the CPU or the GPU.
   Stream output (`SOSetTargets`, its statistics and `DrawAuto`), deferred contexts and command
   lists (`d3d11_emu.py`), Direct3D 10 effects (`D3D10CreateEffectFromMemory`, `d3d10_effect.py`: the
   fx_4_0 binary, variables, techniques, passes and their states) and the ray tracing of Direct3D 12
-  (`dxr.py`: state objects, acceleration structures with their instances, `DispatchRays`, any hit,
-  closest hit and miss shaders, `TraceRay` and the ray system values) are emulated. The pixel
+  (`dxr.py`: state objects with the subobjects of their libraries, collections and local root
+  signatures, acceleration structures of triangles and AABBs with their instances, `DispatchRays`,
+  intersection, any hit, closest hit and miss shaders, `TraceRay`, `ReportHit`, `RayQuery`, the
+  `HitObject` of shader model 6.9) are emulated. The tessellator (`tessellator.py`) is a port of
+  Microsoft's reference one: the points and triangles of a patch are those of a GPU. The pixel
   shaders run in 2x2 quads with helper lanes when they need derivatives (`ddx` / `ddy` coarse and
   fine, `dsx` / `dsy`, `dFdx` / `dFdy`) or the mip level of a texture. Texture formats (`gpu.py`,
   `bc67.py`): the DXGI and Direct3D 9 formats, 8, 16 and 32-bit, float and integer, depth, sRGB and
@@ -373,10 +384,9 @@ unhandled exception filter) run to the exit of the process.
 - Only the functions listed above are above the system calls: out-of-process COM servers, RPC to
   other processes and services, and the shell beyond `ShellExecute` (shell folders, the namespace)
   are answered as unavailable; GDI, GDI+, OpenGL and Direct3D draw what is listed above (the GDI+
-  functions not listed, mesh and amplification shaders, the rarer DXIL operations, procedural
-  geometry and intersection shaders, inline ray queries and local root signatures of ray tracing
-  are not run, and are named in the summary; the rendering, in Python with numpy on a few threads,
-  is far slower than a GPU); a service started with `StartService` is
+  functions not listed and the operations of shader model 6.10, a preview that no compiler or driver
+  available runs, are not run, and are named in the summary; the rendering, in Python with numpy on
+  a few threads, is far slower than a GPU); a service started with `StartService` is
   recorded, its program does not run.
 - What the emulator lacks fails in the program (above): a program that needs it takes another
   path, or stops on its own error.

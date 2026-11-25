@@ -177,7 +177,7 @@ def signature(chunk: Optional[bytes], tag: bytes) -> List[dict]:
         offset = 8 + k * stride + base
         name, index, sv, kind, register = struct.unpack_from("<5I", chunk, offset)
         mask = chunk[offset + 20]
-        stream = struct.unpack_from("<I", chunk, 8 + k * stride)[0] if tag == b"OSG5" else 0
+        stream = struct.unpack_from("<I", chunk, 8 + k * stride)[0] if tag in (b"OSG5", b"OSG1") else 0
         end = chunk.index(b"\0", name)
         out.append(dict(name=chunk[name:end].decode("latin-1").upper(), index=index, sv=sv, kind=kind, register=register,
                         mask=mask, stream=stream))
@@ -1451,6 +1451,9 @@ GS_INPUT_VERTICES = {1: 1, 2: 2, 3: 3, 6: 4, 7: 6}
 
 def run_geometry(shader: Shader, n: int, inputs2d, bindings: Bindings, primitive_id) -> List[Result]:
     """One run per instance (dcl_gs_instance_count): the events (emit / cut) of each."""
+    if getattr(shader, "dxil", False):
+        from . import dxil
+        return dxil.run_geometry(shader, n, inputs2d, bindings, primitive_id)
     shader.check()
     results = []
     for instance in range(shader.gs_instances):
@@ -1462,6 +1465,9 @@ def run_geometry(shader: Shader, n: int, inputs2d, bindings: Bindings, primitive
 def run_hull(shader: Shader, patches: int, vicp, bindings: Bindings, primitive_id):
     """The phases of a hull shader on patches: (output control points reg -> (p, k, 4), patch constants
     reg -> (p, 4))."""
+    if getattr(shader, "dxil", False):
+        from . import dxil
+        return dxil.run_hull(shader, patches, vicp, bindings, primitive_id)
     shader.check()
     count = shader.output_cp or shader.input_cp or 1
     control = [p for p in shader.phases if p.kind == "control"]
@@ -1491,6 +1497,9 @@ def run_hull(shader: Shader, patches: int, vicp, bindings: Bindings, primitive_i
 
 
 def run_domain(shader: Shader, n: int, domain, vicp, vpc, bindings: Bindings, primitive_id) -> Result:
+    if getattr(shader, "dxil", False):
+        from . import dxil
+        return dxil.run_domain(shader, n, domain, vicp, vpc, bindings, primitive_id)
     shader.check()
     system = {"domain": domain, "primitive_id": primitive_id}
     return Machine(shader, shader.main, n, inputs2d=vicp, vpc=vpc, system=system, bindings=bindings).run()
@@ -1533,187 +1542,31 @@ def _vec(values):
 
 
 # ------------------------------------------------------------------ the tessellator
-def _edge_points(factor: float, partitioning: int):
-    """The parameters (0..1, both ends included, symmetric) of the points of an edge of a factor:
-    partitioning 1 integer, 2 pow2, 3 fractional_odd, 4 fractional_even (the numbers of dxbc)."""
-    f = float(factor)
-    if partitioning == 3:
-        f = min(max(f, 1.0), 63.0)
-        n = int(numpy.ceil(f))
-        if n % 2 == 0:
-            n += 1
-    elif partitioning == 4:
-        f = min(max(f, 2.0), 64.0)
-        n = int(numpy.ceil(f))
-        if n % 2:
-            n += 1
-    else:
-        f = min(max(f, 1.0), 64.0)
-        n = int(numpy.ceil(f))
-        if partitioning == 2:
-            n = 1 << (n - 1).bit_length()
-        f = float(n)
-    if n <= 1:
-        return numpy.array([0.0, 1.0])
-    if partitioning in (3, 4) and n > f:
-        # n - 2 segments of 1 / f and two shorter ones, next to the middle, that grow with the factor
-        full, short = 1.0 / f, (f - (n - 2)) / (2.0 * f)
-        side = (n - 2) // 2
-        middle = [short, full, short] if n % 2 else [short, short]
-        segments = [full] * side + middle + [full] * side
-    else:
-        segments = [1.0 / n] * n
-    points = numpy.concatenate([[0.0], numpy.cumsum(segments)])
-    points[-1] = 1.0
-    return points
-
-
-def _segments(factor: float, partitioning: int) -> int:
-    return len(_edge_points(factor, partitioning)) - 1
-
-
-def _zipper(outer, inner, out):
-    """Triangles between two rows of points (indices with parameters 0..1 along the row): outer (k + 1) and
-    inner (m + 1), each step advancing on the row whose next point comes first."""
-    i = j = 0
-    (op, oi), (ip, ii) = outer, inner
-    while i < len(oi) - 1 or j < len(ii) - 1:
-        if j >= len(ii) - 1 or (i < len(oi) - 1 and op[i + 1] <= ip[j + 1]):
-            out.append((oi[i], oi[i + 1], ii[j]))
-            i += 1
-        else:
-            out.append((oi[i], ii[j + 1], ii[j]))
-            j += 1
-
-
-def _oriented(points, tris):
-    """Triangles made counter-clockwise in the (u, v) plane, the orientation the hull shader's triangle_cw
-    output keeps (triangle_ccw swaps it)."""
-    tris = numpy.asarray(tris, dtype=numpy.int64).reshape(-1, 3)
-    if len(tris) == 0:
-        return tris
-    a, b, c = points[tris[:, 0]], points[tris[:, 1]], points[tris[:, 2]]
-    area = (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0])
-    tris = tris[numpy.abs(area) > 1e-12]
-    area = area[numpy.abs(area) > 1e-12]
-    return numpy.where((area < 0)[:, None], tris[:, [0, 2, 1]], tris)
-
-
-def tessellate(domain: int, factors, inside, partitioning: int = 1):
+def tessellate(domain: int, factors, inside, partitioning: int = 1, output: int = 3):
     """The points (k, 3) in the domain (barycentric u, v, w for triangles, u, v for quads and lines) and the
-    primitives (indices) of a patch, as the fixed tessellator of Direct3D 11 makes them: each edge cut at its
-    own factor, the inside at the inside factors in concentric rings (quads: a grid) stitched to the edges,
-    with the integer, pow2, fractional_odd and fractional_even partitionings. A factor <= 0 or NaN culls."""
-    factors = [float(v) for v in factors]
-    inside = [float(v) for v in inside]
-    if any(not numpy.isfinite(v) or v <= 0 for v in factors):
-        return numpy.zeros((0, 3)), numpy.zeros((0, 3), dtype=numpy.int64), "triangles"
-    points = []
-
-    def add(p):
-        points.append(p)
-        return len(points) - 1
-
-    if domain == 2:   # triangle: edges u == 0, v == 0, w == 0 (SV_TessFactor[0..2])
-        corners = [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)]
-        ids = [add(c) for c in corners]
-        # the outer ring: the side from corner i to corner i + 1 is the edge where the third coordinate is 0
-        sides = [(0, 1, 2), (1, 2, 0), (2, 0, 1)]      # (from, to, the zero coordinate's edge = the opposite corner)
-        outer = []
-        for a, b, opposite in sides:
-            params = _edge_points(factors[opposite] if opposite < len(factors) else 1.0, partitioning)
-            row = [ids[a]]
-            for t in params[1:-1]:
-                p = numpy.array(corners[a]) * (1 - t) + numpy.array(corners[b]) * t
-                row.append(add(tuple(p)))
-            row.append(ids[b])
-            outer.append((params, row))
-        level = inside[0] if inside else max(factors)
-        ring_params = _edge_points(level, partitioning)
-        segments = len(ring_params) - 1
-        tris = []
-        if segments <= 1 and all(len(row) == 2 for _, row in outer):
-            tris.append((ids[0], ids[1], ids[2]))
-            return numpy.array(points), _oriented(numpy.array(points), tris), "triangles"
-        rings = [outer]
-        k = 1
-        center = numpy.array([1 / 3, 1 / 3, 1 / 3])
-        while True:
-            count = segments - 2 * k
-            inset = min(ring_params[min(k, len(ring_params) - 1)] * 2 / 3, 1 / 3)
-            ring_corners = [numpy.array(c) * (1 - 3 * inset) + center * 3 * inset for c in corners]
-            if count < 1 or inset >= 1 / 3 - 1e-9:
-                middle = add(tuple(center))
-                rings.append([(numpy.array([0.0, 1.0]), [middle, middle])] * 3)
-                break
-            params = numpy.linspace(0, 1, count + 1)
-            if partitioning in (3, 4) and _segments(level - 2 * k, partitioning) == count:
-                params = _edge_points(level - 2 * k, partitioning)
-            corner_ids = [add(tuple(c)) for c in ring_corners]
-            ring = []
-            for a, b, _ in sides:
-                row = [corner_ids[a]]
-                for t in params[1:-1]:
-                    row.append(add(tuple(ring_corners[a] * (1 - t) + ring_corners[b] * t)))
-                row.append(corner_ids[b])
-                ring.append((params, row))
-            rings.append(ring)
-            if count == 1:
-                tris.append(tuple(corner_ids))
-                break
-            k += 1
-        for outer_ring, inner_ring in zip(rings, rings[1:]):
-            for side in range(3):
-                _zipper(outer_ring[side], inner_ring[side], tris)
-        pts = numpy.array(points)
-        return pts, _oriented(pts, tris), "triangles"
-    if domain == 3:   # quad: edges u == 0, v == 0, u == 1, v == 1 (SV_TessFactor[0..3]), inside along u, v
-        f = factors + [1.0] * (4 - len(factors))
-        iu = inside[0] if inside else max(f)
-        iv = inside[1] if len(inside) > 1 else iu
-        u_params = _edge_points(iu, partitioning)[1:-1]
-        v_params = _edge_points(iv, partitioning)[1:-1]
-        tris = []
-        if len(u_params) == 0 and len(v_params) == 0 and all(_segments(x, partitioning) == 1 for x in f):
-            a, b, c, d = add((0.0, 0.0, 0.0)), add((1.0, 0.0, 0.0)), add((1.0, 1.0, 0.0)), add((0.0, 1.0, 0.0))
-            pts = numpy.array(points)
-            return pts, _oriented(pts, [(a, b, c), (a, c, d)]), "triangles"
-        us = u_params if len(u_params) else numpy.array([0.5])
-        vs = v_params if len(v_params) else numpy.array([0.5])
-        grid = [[add((float(u), float(v), 0.0)) for u in us] for v in vs]
-        for r in range(len(vs) - 1):
-            for col in range(len(us) - 1):
-                tris += [(grid[r][col], grid[r][col + 1], grid[r + 1][col + 1]), (grid[r][col], grid[r + 1][col + 1], grid[r + 1][col])]
-        corners = {(0, 0): add((0.0, 0.0, 0.0)), (1, 0): add((1.0, 0.0, 0.0)), (1, 1): add((1.0, 1.0, 0.0)),
-                   (0, 1): add((0.0, 1.0, 0.0))}
-        # the outer sides (counter-clockwise: v == 0, u == 1, v == 1, u == 0) and the inner rectangle's sides
-        sides = [((0, 0), (1, 0), f[1], [grid[0][c] for c in range(len(us))]),
-                 ((1, 0), (1, 1), f[2], [grid[r][-1] for r in range(len(vs))]),
-                 ((1, 1), (0, 1), f[3], [grid[-1][c] for c in reversed(range(len(us)))]),
-                 ((0, 1), (0, 0), f[0], [grid[r][0] for r in reversed(range(len(vs)))])]
-        for a, b, factor, inner in sides:
-            params = _edge_points(factor, partitioning)
-            pa, pb = numpy.array(a, dtype=float), numpy.array(b, dtype=float)
-            row = [corners[a]] + [add((*(pa * (1 - t) + pb * t), 0.0)) for t in params[1:-1]] + [corners[b]]
-            inner_params = numpy.linspace(0, 1, len(inner)) if len(inner) > 1 else numpy.array([0.0, 1.0])
-            if len(inner) == 1:
-                inner = inner * 2
-            # the inner side's parameters along the outer side
-            pts = numpy.array(points)
-            axis = 0 if a[1] == b[1] else 1
-            span = pb[axis] - pa[axis]
-            inner_params = (pts[inner, axis] - pa[axis]) / span if span else inner_params
-            inner_params = numpy.clip(inner_params, 0, 1)
-            _zipper((params, row), (inner_params, inner), tris)
-        pts = numpy.array(points)
-        return pts, _oriented(pts, tris), "triangles"
-    # isolines: factors[0] the number of lines (detail, integer), factors[1] their points (density)
-    detail = int(min(64, max(1, numpy.ceil(factors[0] if factors else 1))))
-    density_params = _edge_points(factors[1] if len(factors) > 1 else 1.0, partitioning)
-    lines = []
-    for line in range(detail):
-        start = len(points)
-        for t in density_params:
-            points.append((float(t), line / detail, 0.0))
-        lines += [(start + k, start + k + 1) for k in range(len(density_params) - 1)]
-    return numpy.array(points), numpy.array(lines, dtype=numpy.int64).reshape(-1, 2), "lines"
+    primitives (indices) of a patch, as the fixed tessellator of Direct3D 11 makes them (tessellator.py, a port of
+    Microsoft's reference: the same points and triangles as a GPU). domain: 1 isoline, 2 triangle, 3 quad;
+    partitioning: 1 integer, 2 pow2, 3 fractional_odd, 4 fractional_even; output: 1 points, 2 lines, 3
+    triangles in the reference's (clockwise) order (the caller swaps them for triangle_ccw). Isolines:
+    factors[0] the number of lines, factors[1] the segments of each. A factor <= 0 or NaN culls."""
+    from . import tessellator as ts
+    mode = {1: ts.INTEGER, 2: ts.POW2, 3: ts.FRACTIONAL_ODD, 4: ts.FRACTIONAL_EVEN}.get(partitioning, ts.INTEGER)
+    kind_out = ts.OUTPUT_POINT if output == 1 else ts.OUTPUT_LINE if domain == 1 else ts.OUTPUT_TRIANGLE_CW
+    t = ts.Tessellator(mode, kind_out)
+    f = [float(v) for v in factors] + [1.0] * 4
+    i = [float(v) for v in inside] + [1.0] * 2
+    if domain == 2:
+        t.tessellate_tri(f[0], f[1], f[2], i[0])
+    elif domain == 3:
+        t.tessellate_quad(f[0], f[1], f[2], f[3], i[0], i[1])
+    else:
+        t.tessellate_isoline(f[0], f[1])
+    uv = numpy.array(t.points[:t.num_points], dtype=numpy.float64).reshape(-1, 2)
+    third = 1.0 - uv[:, 0] - uv[:, 1] if domain == 2 else numpy.zeros(len(uv))
+    points = numpy.concatenate([uv, third[:, None]], axis=1) if len(uv) else numpy.zeros((0, 3))
+    indices = numpy.array(t.indices[:t.num_indices], dtype=numpy.int64)
+    if kind_out == ts.OUTPUT_POINT:
+        return points, indices.reshape(-1, 1), "points"
+    if kind_out == ts.OUTPUT_LINE:
+        return points, indices.reshape(-1, 2), "lines"
+    return points, indices.reshape(-1, 3), "triangles"

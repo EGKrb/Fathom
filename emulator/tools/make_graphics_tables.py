@@ -47,7 +47,8 @@ INTERFACES = {
                 "ID3D12Fence1", "ID3D12Resource", "ID3D12Resource1", "ID3D12DescriptorHeap", "ID3D12RootSignature",
                 "ID3D12PipelineState", "ID3D12Heap", "ID3D12QueryHeap", "ID3D12CommandSignature",
                 "ID3D12RootSignatureDeserializer", "ID3D12VersionedRootSignatureDeserializer", "ID3D12StateObject",
-                "ID3D12StateObjectProperties"],
+                "ID3D12StateObjectProperties", "ID3D12StateObjectProperties1", "ID3D12WorkGraphProperties"]
+               + [f"ID3D12Device{k}" for k in range(6, 15)] + [f"ID3D12GraphicsCommandList{k}" for k in range(5, 11)],
     "d3d12sdklayers.h": ["ID3D12Debug"],
     "dxgi.h": ["IDXGISwapChain", "IDXGIFactory", "IDXGIFactory1", "IDXGIAdapter", "IDXGIAdapter1", "IDXGIDevice",
                "IDXGIDevice1", "IDXGIOutput", "IDXGISurface", "IDXGISurface1", "IDXGIResource"],
@@ -70,7 +71,8 @@ POINTER = r"\b(H[A-Z]+|HANDLE|\w+_PTR|SIZE_T|SSIZE_T|LPARAM|WPARAM|LRESULT|REF\w
           r"|GLsync|GLDEBUGPROC\w*|GLeglImageOES|GLeglClientBufferEXT|GLvdpauSurfaceNV|D3D12_CPU_DESCRIPTOR_HANDLE" \
           r"|HGPUNV|HPBUFFERARB|HPBUFFEREXT|HPVIDEODEV|HVIDEOOUTPUTDEVICENV|HVIDEOINPUTDEVICENV)\b"
 QWORD = r"\b(UINT64|ULONGLONG|LONGLONG|INT64|LARGE_INTEGER|ULARGE_INTEGER|LUID|GLuint64\w*|GLint64\w*" \
-        r"|D3D12_GPU_VIRTUAL_ADDRESS|D3D12_GPU_DESCRIPTOR_HANDLE)\b"
+        r"|D3D12_GPU_VIRTUAL_ADDRESS|D3D12_GPU_DESCRIPTOR_HANDLE" \
+        r"|D3D12_NODE_ID)\b"    # a 16-byte struct by value: x64 passes a pointer to a copy, x86 its 8 bytes
 
 
 def kind(declaration: str) -> str:

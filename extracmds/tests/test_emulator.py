@@ -376,6 +376,36 @@ init tests/emulator_world.exe, dxr
 run
 emu.run
 testassert $result2 == 0, "dxr: Direct3D 12 ray tracing (state object, acceleration structures, DispatchRays)"
+stop
+init tests/emulator_world.exe, dxilgs
+run
+emu.run
+testassert $result2 == 0, "dxilgs: hull, domain and geometry shaders of shader model 6, captured by stream output"
+stop
+init tests/emulator_world.exe, dxilops
+run
+emu.run
+testassert $result2 == 0, "dxilops: the rarer DXIL operations (waves, quads, packing, gathers, counters, ResourceDescriptorHeap)"
+stop
+init tests/emulator_world.exe, dxr2
+run
+emu.run
+testassert $result2 == 0, "dxr2: ray tracing with an intersection shader, local root signatures and RayQuery"
+stop
+init tests/emulator_world.exe, mesh6
+run
+emu.run
+testassert $result2 == 0, "mesh6: amplification and mesh shaders (DispatchMesh, a pipeline state stream)"
+stop
+init tests/emulator_world.exe, graph
+run
+emu.run
+testassert $result2 == 0, "graph: a work graph (broadcasting, thread and coalescing nodes)"
+stop
+init tests/emulator_world.exe, sm69
+run
+emu.run
+testassert $result2 == 0, "sm69: shader model 6.9 (HitObject, long vectors)"
 emu.screenshots off
 stop
 '''
@@ -387,7 +417,8 @@ stop
     # the modes of emulator_world that do not need the network are right natively too
     for mode in ("race", "illegal", "process", "pipe", "shm", "namedpipe", "cross", "shell", "system", "racep", "winmsg", "paint",
                  "gdiplus", "opengl", "d3d9", "d3d11", "clip", "gl3", "d3d9sh", "d3d10", "d3d11gs", "d3d11cs", "mesh", "d3d12",
-                 "bc", "deriv", "tess", "so", "deferred", "gl4", "fx10", "dxil", "dxr"):
+                 "bc", "deriv", "tess", "so", "deferred", "gl4", "fx10", "dxil", "dxr", "dxilgs", "dxilops", "dxr2", "mesh6",
+                 "graph", "sm69"):
         native = subprocess.run([str(bindir / "tests" / "emulator_world.exe"), mode], capture_output=True, text=True, timeout=120)
         print(f"emulator_world {mode} natively:", " / ".join(native.stdout.splitlines()[:3]), f"(exit code {native.returncode})")
         if native.returncode != 0:
