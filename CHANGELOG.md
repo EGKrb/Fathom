@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-11-25
+
 ### Added
 - Emulator: Direct3D 9 shaders run (vertex and pixel shaders of shader models
   1 to 3, with their float, int and bool constants), with the texture stages,
