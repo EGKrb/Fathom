@@ -30,7 +30,9 @@
 #include "vmprotect/image_desc.hpp"
 #include "vmprotect/vtil_lifter.hpp"
 #include "vmprotect/vm_state.hpp"
-#include "demo_compiler.hpp"
+#if !defined( _M_IX86 )
+#include "demo_compiler.hpp" // recompiles the lifted VTIL to x64: x64 only
+#endif
 
 #ifdef _MSC_VER
 #pragma comment(linker, "/STACK:34359738368")
@@ -116,6 +118,12 @@ int main( int argc, const char** argv )
 		{
 			while ( ++i < argc && argv[ i ][ 0 ] != '-' )
 				vmp::section_prefixes.emplace_back( argv[ i ] );
+		}
+		else if ( !strcmp( argv[ i ], "-vipbase" ) )
+		{
+			// Fathom: the base VMProtect's encrypted VIP is relative to (0x100000000 on x64, 0 assumed on x86)
+			fassert( ++i < argc );
+			vmp::default_vip_base = strtoull( argv[ i ], nullptr, 16 );
 		}
 		else if ( !strcmp( argv[ i ], "-base" ) )
 		{
@@ -262,7 +270,7 @@ int main( int argc, const char** argv )
 				{
 					if ( ins.base->name == "vemit" )
 					{
-						uint8_t* bs = ( uint8_t* ) &ins.operands[ 0 ].imm().u64;
+						uint8_t* bs = ( uint8_t* ) &ins.operands[ 0 ].imm().uval;
 						bytes.insert( bytes.end(), bs, bs + ins.operands[ 0 ].size() );
 					}
 				}
@@ -273,7 +281,7 @@ int main( int argc, const char** argv )
 				log<CON_YLW>( "Special instructions:\n" );
 
 				size_t n = 0;
-				auto dasm = vtil::amd64::disasm( bytes.data(), 0, bytes.size() );
+				auto dasm = vmp::disasm( bytes.data(), 0, bytes.size() );
 				for ( auto& ins : dasm )
 				{
 					n++;
@@ -318,9 +326,14 @@ int main( int argc, const char** argv )
 	//
 	if ( !compile )
 	{
-		system( "pause" ); 
+		system( "pause" );
 		return 0;
 	}
+#if defined( _M_IX86 )
+	// Fathom: the experimental recompiler emits x64 code: not in the x86 build
+	log<CON_RED>( "[*] -experimental:recompile is x64 only\n" );
+	return 1;
+#else
 
 	uint32_t rva_sec = ( rva_high + 0xFFF ) & ~0xFFF;
 	std::vector<uint8_t> byte_stream;
@@ -384,8 +397,9 @@ int main( int argc, const char** argv )
 	write_raw( 
 		desc->raw.data(), 
 		desc->raw.size(), 
-		image_path.string() 
+		image_path.string()
 	);
 	system( "pause" );
 	return 0;
+#endif
 }

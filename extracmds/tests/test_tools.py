@@ -8,6 +8,11 @@ Triton plugin (triton/tests/target.c):
 3. novmp (x64): the module image read from memory and given to NoVmp, which finds no VMProtect virtual
    machine in it (the target is not protected); vtildump prints a routine lifted from VMProtect (VTIL's
    sample, tests/vmprotect.vtil of novmp).
+4. remill.lift on mba (read from memory, lifted to LLVM IR);
+5. binja: the module read from memory and opened in "Binary Ninja", a stand-in batch file
+   (FATHOM_BINARYNINJA) that records the binaryninja: URL it receives;
+6. revng.decompile on mba (rev.ng built for Windows, revng/dist): the module read from memory, analyzed by
+   rev.ng, the function decompiled to C (it computes (x & y) * 2 + (x ^ y)).
 
 Usage: py extracmds/tests/test_tools.py --bin bin/x64 --plugin extracmds/build-x64-noqt/ExtraCmds.dp64
        --target triton/build-x64/triton_target.exe [--python <python with angr>]
@@ -19,6 +24,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -69,15 +75,33 @@ bc triton_target.check_branches
 rtr
 testassert eax == 1, "the debuggee accepts angr's serial natively"
 '''
-    if x64:
-        script += '''
-// 3. novmp
+    # 3. novmp: NoVmp (x64) or NoVmp32 (x86) on the module read from memory
+    script += '''
 novmp triton_target.check_mix
 testassert $result == 0, "no VMProtect virtual machine in the target"
+'''
+    # 4. remill: mba read from memory and lifted to LLVM IR
+    script += '''
+remill.lift triton_target.mba, 0x30
+testassert $result > 20, "mba lifted to LLVM IR by remill"
+'''
+    # 5. binja: a stand-in for Binary Ninja that records its command line
+    stand_in = folder / "binaryninja.bat"
+    received = folder / "binja-url.txt"
+    stand_in.write_text(f'@echo %*> "{received}"\r\n', encoding="ascii")
+    script += '''
+binja triton_target.check_mix
+testassert $result != 0, "Binary Ninja (stand-in) started"
+'''
+    # 6. rev.ng: mba decompiled to C
+    script += '''
+revng.decompile triton_target.mba
+testassert $result > 2, "mba decompiled to C by rev.ng"
 '''
     script += "run\n"
     (folder / "tools.txt").write_text(script, encoding="utf-8")
     env = dict(os.environ)
+    env["FATHOM_BINARYNINJA"] = str(stand_in)
     if args.python:
         env["PATH"] = str(Path(args.python).resolve().parent) + os.pathsep + env["PATH"]
     log_path = folder / "tools.log"
@@ -89,10 +113,21 @@ testassert $result == 0, "no VMProtect virtual machine in the target"
     asserts = script.count("testassert")
     print(final, f"({asserts} assertions in the script)")
     ok = "status=pass" in final and f"asserts={asserts}" in final
-    for pattern in (r"solution: .*", r"^\s*(RAX|EAX) = .*", r"no VMProtect.*", r"NoVmp on .*"):
+    for pattern in (r"solution: .*", r"^\s*(RAX|EAX) = .*", r"no VMProtect.*", r"NoVmp on .*", r"^\s*return .*", r"\[ExtraCmds\] \d+ lines of C: .*"):
         for match in re.finditer(pattern, log, re.M):
             print("  " + match.group(0).strip())
             break
+
+    # the URL Binary Ninja received: the module dumped from memory, opened at check_mix
+    for _ in range(50):
+        if received.exists() and received.stat().st_size:
+            break
+        time.sleep(0.1)
+    url = received.read_text(errors="replace").strip().strip('"') if received.exists() else ""
+    match = re.match(r"binaryninja:///(.+)\?expr=(0x[0-9A-F]+)$", url)
+    dumped = Path(match.group(1)) if match else None
+    print(f"binja: {url or 'no URL received'}")
+    ok = ok and dumped is not None and dumped.is_file() and dumped.read_bytes()[:2] == b"MZ"
 
     if x64:
         # vtildump on a routine lifted from VMProtect (VTIL's sample)

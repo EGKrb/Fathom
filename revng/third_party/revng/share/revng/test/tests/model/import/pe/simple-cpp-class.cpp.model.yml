@@ -1,0 +1,100 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+#
+# NOTE: this file is stripped of any architecture-specific information (things
+#       like ABI, pointer sizes, and so on): it reflects all the _common_
+#       expectations for a specific source file (see revng-qa-side importPE
+#       sources) after being compiled and lifted by a variety of different
+#       msvc compiler versions.
+#
+
+---
+Functions:
+  - Name: "Foo::Foo"
+    Prototype:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/16558654860526908435-CABIFunctionDefinition"
+  - Name: "Foo::retX"
+    Prototype:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/17990064059287856019-CABIFunctionDefinition"
+  - Name: "Foo::retY"
+    Prototype:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/8800211852340388695-CABIFunctionDefinition"
+  - Name: "Foo::dummy"
+    Prototype:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/11972987020417764497-CABIFunctionDefinition"
+TypeDefinitions:
+  - Kind: StructDefinition
+    ID: 987067897056915724
+    Name: Foo
+    Fields:
+      - Offset: 0
+        Name: x
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Signed
+          Size: 4
+      - Offset: 4
+        Name: "y"
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Signed
+          Size: 4
+  - Kind: CABIFunctionDefinition
+    ID: 16558654860526908435
+    Arguments:
+      - Index: 0
+        Type:
+          Kind: PointerType
+          PointeeType:
+            Kind: DefinedType
+            Definition: "/TypeDefinitions/12480030069089186527-StructDefinition"
+      - Index: 1
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Signed
+          Size: 4
+      - Index: 2
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Signed
+          Size: 4
+  - Kind: CABIFunctionDefinition
+    ID: 17990064059287856019
+    ReturnType:
+      Kind: PrimitiveType
+      PrimitiveKind: Signed
+      Size: 4
+    Arguments:
+      - Index: 0
+        Type:
+          Kind: PointerType
+          PointeeType:
+            Kind: DefinedType
+            Definition: "/TypeDefinitions/12480030069089186527-StructDefinition"
+  - Kind: CABIFunctionDefinition
+    ID: 8800211852340388695
+    ReturnType:
+      Kind: PrimitiveType
+      PrimitiveKind: Signed
+      Size: 4
+    Arguments:
+      - Index: 0
+        Type:
+          Kind: PointerType
+          PointeeType:
+            Kind: DefinedType
+            Definition: "/TypeDefinitions/12480030069089186527-StructDefinition"
+  - Kind: CABIFunctionDefinition
+    ID: 11972987020417764497
+    Arguments:
+      - Index: 0
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Signed
+          Size: 4

@@ -438,7 +438,7 @@ namespace vmp
 			[ ] ( vtil::basic_block* fl, const arch::instruction& ins, uint8_t v )
 			{
 				auto& p = ins.parameters;
-				auto [t0, t1] = fl->tmp( 64, v * 8 );
+				auto [t0, t1] = fl->tmp( vmp::native_bits, v * 8 );
 
 				fl
 					// t0 := [rsp]
@@ -446,13 +446,13 @@ namespace vmp
 					// [rsp] := t1
 					->pop( t0 );
 
-				if ( ins.stream[ 1 ].prefix[ 1 ] == X86_PREFIX_GS )
+				if ( ins.stream[ 1 ].prefix[ 1 ] == vmp::TEB_PREFIX )
 				{
-					fl  ->vemits( "mov rax, gs:0x30" )
-					    ->vpinw( X86_REG_RAX )
-						->add( t0, X86_REG_RAX );
+					fl  ->vemits( vmp::TEB_SELF )
+					    ->vpinw( vmp::REG_NAX )
+						->add( t0, vmp::REG_NAX );
 				}
-				else if ( ins.stream[ 1 ].prefix[ 1 ] == X86_PREFIX_FS )
+				else if ( ins.stream[ 1 ].prefix[ 1 ] == X86_PREFIX_FS || ins.stream[ 1 ].prefix[ 1 ] == X86_PREFIX_GS )
 				{
 					unreachable();
 				}
@@ -466,7 +466,7 @@ namespace vmp
 			[ ] ( vtil::basic_block* fl, const arch::instruction& ins, uint8_t v )
 			{
 				auto& p = ins.parameters;
-				auto [t0, t1] = fl->tmp( 64, v * 8 );
+				auto [t0, t1] = fl->tmp( vmp::native_bits, v * 8 );
 
 				fl
 					// t0 := [rsp]
@@ -475,13 +475,13 @@ namespace vmp
 					->pop( t0 )
 					->pop( t1 );
 
-				if ( ins.stream[ 3 ].prefix[ 1 ] == X86_PREFIX_GS )
+				if ( ins.stream[ 3 ].prefix[ 1 ] == vmp::TEB_PREFIX )
 				{
-					fl  ->vemits( "mov rax, gs:0x30" )
-						->vpinw( X86_REG_RAX )
-						->add( t0, X86_REG_RAX );
+					fl  ->vemits( vmp::TEB_SELF )
+						->vpinw( vmp::REG_NAX )
+						->add( t0, vmp::REG_NAX );
 				}
-				else if ( ins.stream[ 3 ].prefix[ 1 ] == X86_PREFIX_FS )
+				else if ( ins.stream[ 3 ].prefix[ 1 ] == X86_PREFIX_FS || ins.stream[ 3 ].prefix[ 1 ] == X86_PREFIX_GS )
 				{
 					unreachable();
 				}
@@ -516,7 +516,7 @@ namespace vmp
 			[ ] ( vtil::basic_block* fl, const arch::instruction& ins, uint8_t v )
 			{
 				auto& p = ins.parameters;
-				auto t0 = fl->tmp( 64 );
+				auto t0 = fl->tmp( vmp::native_bits );
 
 				fl
 					// t0 := [rsp],
@@ -537,7 +537,7 @@ namespace vmp
 					// Pin read registers
 					//
 					for ( uint16_t reg : instr.second.regs_read )
-						if ( reg != X86_REG_RSP && reg != X86_REG_RIP && reg != X86_REG_EFLAGS )
+						if ( reg != vmp::REG_NSP && reg != vmp::REG_NIP && reg != X86_REG_EFLAGS )
 							fl->vpinr( vtil::operand( x86_reg( reg ) ) );
 
 					// Emit all bytes
@@ -548,7 +548,7 @@ namespace vmp
 					// Pin written registers
 					//
 					for ( uint16_t reg : instr.second.regs_write )
-						if ( reg != X86_REG_RSP && reg != X86_REG_RIP && reg != X86_REG_EFLAGS )
+						if ( reg != vmp::REG_NSP && reg != vmp::REG_NIP && reg != X86_REG_EFLAGS )
 							fl->vpinw( vtil::operand( x86_reg( reg ) ) );
 				}
 			}
@@ -561,8 +561,8 @@ namespace vmp
 				fl
 					// RDTSC
 					->vemits( "rdtsc" )
-					->vpinw( X86_REG_RDX )
-					->vpinw( X86_REG_RAX )
+					->vpinw( vmp::REG_NDX )
+					->vpinw( vmp::REG_NAX )
 
 					// [rsp + 4] := edx
 					// [rsp] := eax
@@ -580,13 +580,13 @@ namespace vmp
 					->pop( X86_REG_EAX )
 
 					// CPUID
-					->vpinr( X86_REG_RCX )
-					->vpinr( X86_REG_RAX )
+					->vpinr( vmp::REG_NCX )
+					->vpinr( vmp::REG_NAX )
 					->vemits( "cpuid" )
-					->vpinw( X86_REG_RDX )
-					->vpinw( X86_REG_RCX )
-					->vpinw( X86_REG_RBX )
-					->vpinw( X86_REG_RAX )
+					->vpinw( vmp::REG_NDX )
+					->vpinw( vmp::REG_NCX )
+					->vpinw( vmp::REG_NBX )
+					->vpinw( vmp::REG_NAX )
 
 					// [rsp] := edx
 					// [rsp+4] := ecx
@@ -608,13 +608,13 @@ namespace vmp
 					->pop( X86_REG_EAX )
 
 					// CPUID
-					->vpinr( X86_REG_RCX )
-					->vpinr( X86_REG_RAX )
+					->vpinr( vmp::REG_NCX )
+					->vpinr( vmp::REG_NAX )
 					->vemits( "cpuid" )
-					->vpinw( X86_REG_RDX )
-					->vpinw( X86_REG_RCX )
-					->vpinw( X86_REG_RBX )
-					->vpinw( X86_REG_RAX )
+					->vpinw( vmp::REG_NDX )
+					->vpinw( vmp::REG_NCX )
+					->vpinw( vmp::REG_NBX )
+					->vpinw( vmp::REG_NAX )
 
 					// [rsp] := edx
 					// [rsp+4] := ecx
@@ -631,25 +631,29 @@ namespace vmp
 			[ ] ( vtil::basic_block* fl, const arch::instruction& ins, uint8_t v )
 			{
 				const char* reader =
-					v == 8 ? "lock xchg qword ptr [rdx], rax" :
-					v == 4 ? "lock xchg dword ptr [rdx], eax" :
-					v == 2 ? "lock xchg word ptr [rdx], ax" :
-					v == 1 ? "lock xchg byte ptr [rdx], al" : "";
+					vmp::native_x86 ?
+					( v == 4 ? "lock xchg dword ptr [edx], eax" :
+					  v == 2 ? "lock xchg word ptr [edx], ax" :
+					  v == 1 ? "lock xchg byte ptr [edx], al" : "" ) :
+					( v == 8 ? "lock xchg qword ptr [rdx], rax" :
+					  v == 4 ? "lock xchg dword ptr [rdx], eax" :
+					  v == 2 ? "lock xchg word ptr [rdx], ax" :
+					  v == 1 ? "lock xchg byte ptr [rdx], al" : "" );
 
-				auto vr = vtil::amd64::registers.remap( X86_REG_RAX, 0, v );
+				auto vr = vmp::resize( vmp::REG_NAX, v );
 				auto& p = ins.parameters;
 				fl
 					// rdx := [rsp]
-					->pop( X86_REG_RDX )
+					->pop( vmp::REG_NDX )
 
 					// reg := [rsp + 8]
 					->pop( vr )
 
 					// LOCK XCHG [RDX], reg
-					->vpinr( X86_REG_RDX )
-					->vpinr( X86_REG_RAX )
+					->vpinr( vmp::REG_NDX )
+					->vpinr( vmp::REG_NAX )
 					->vemits( reader )
-					->vpinw( X86_REG_RAX )
+					->vpinw( vmp::REG_NAX )
 
 					// [rsp] := reg
 					->push( vr );
@@ -741,9 +745,9 @@ namespace vmp
 			{
 				auto& p = ins.parameters;
 				fl
-					->vemits( "mov rax, cr0" )
-					->vpinw( X86_REG_RAX )
-					->push( X86_REG_RAX );
+					->vemits( vmp::native_x86 ? "mov eax, cr0" : "mov rax, cr0" )
+					->vpinw( vmp::REG_NAX )
+					->push( vmp::REG_NAX );
 			}
 		},
 		{
@@ -752,9 +756,9 @@ namespace vmp
 			{
 				auto& p = ins.parameters;
 				fl
-					->vemits( "mov rax, cr3" )
-					->vpinw( X86_REG_RAX )
-					->push( X86_REG_RAX );
+					->vemits( vmp::native_x86 ? "mov eax, cr3" : "mov rax, cr3" )
+					->vpinw( vmp::REG_NAX )
+					->push( vmp::REG_NAX );
 			}
 		},
 	};

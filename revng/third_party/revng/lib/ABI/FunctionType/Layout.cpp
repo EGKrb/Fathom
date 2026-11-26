@@ -1,0 +1,920 @@
+//
+// This file is distributed under the MIT License. See LICENSE.md for details.
+//
+
+#include <span>
+#include <unordered_set>
+
+#include "revng/ABI/FunctionType/Layout.h"
+#include "revng/ABI/FunctionType/Support.h"
+#include "revng/ADT/SmallMap.h"
+#include "revng/Model/ABI/Definition.h"
+#include "revng/Model/Binary.h"
+#include "revng/Model/Helpers.h"
+#include "revng/Model/Register.h"
+#include "revng/Support/Debug.h"
+#include "revng/TupleTree/NamedEnumScalarTraits.h"
+
+#include "FloatingPointStrategy.h"
+#include "ValueDistributor.h"
+
+static Logger Log("function-type-conversion-to-raw");
+
+namespace abi::FunctionType {
+
+class ToRawConverter {
+private:
+  using CFT = const model::CABIFunctionDefinition &;
+  using CFTArguments = decltype(std::declval<CFT>().Arguments());
+
+private:
+  const abi::Definition &ABI;
+
+public:
+  explicit ToRawConverter(const abi::Definition &ABI) : ABI(ABI) {
+    revng_assert(ABI.verify());
+  }
+
+public:
+  /// Entry point for the `toRaw` conversion.
+  model::UpcastableType
+  convert(const model::CABIFunctionDefinition &FunctionType,
+          TupleTree<model::Binary> &Binary) const;
+
+  /// Helper used for deciding how an arbitrary return type should be
+  /// distributed across registers and the stack accordingly to the \ref ABI.
+  ///
+  /// \param ReturnValueType The model type that should be returned.
+  /// \return Information about registers and stack that are to be used to
+  ///         return the said type.
+  DistributedValue
+  distributeReturnValue(const model::Type &ReturnValueType) const {
+    return ReturnValueDistributor(ABI).returnValue(ReturnValueType);
+  }
+
+  /// Helper used for deciding how an arbitrary set of arguments should be
+  /// distributed across registers and the stack accordingly to the \ref ABI.
+  ///
+  /// \param Arguments The list of arguments to distribute.
+  /// \param HasReturnValueLocation `true` if the first argument slot should
+  ///        be occupied by a shadow return value, `false` otherwise.
+  ///
+  /// \return Information about registers and stack that are to be used to
+  ///         pass said arguments.
+  DistributedValues distributeArguments(CFTArguments Arguments,
+                                        bool HasReturnValueLocation) const;
+
+public:
+  uint64_t finalStackOffset(uint64_t SizeOfArgumentsOnStack) const;
+
+  uint64_t
+  combinedStackArgumentSize(const model::CABIFunctionDefinition &) const;
+};
+
+model::UpcastableType
+ToRawConverter::convert(const model::CABIFunctionDefinition &FunctionType,
+                        TupleTree<model::Binary> &Binary) const {
+  revng_log(Log,
+            "Converting a `CABIFunctionDefinition` to "
+            "`RawFunctionDefinition`.");
+  revng_log(Log, "Original type:\n" << toString(FunctionType));
+  LoggerIndent Indentation(Log);
+
+  // Since this conversion cannot fail, nothing prevents us from creating
+  // the result type right away.
+  auto &&[NewPrototype, NewType] = Binary->makeRawFunctionDefinition();
+
+  revng_assert(FunctionType.ABI() != model::ABI::Invalid);
+  NewPrototype.Architecture() = model::ABI::getArchitecture(FunctionType.ABI());
+  model::copyMetadata(NewPrototype, FunctionType);
+
+  model::StructDefinition StackArguments;
+  uint64_t StackStructSize = 0;
+
+  // Since shadow arguments are a concern, we need to deal with the return
+  // value first.
+  bool UsesSPTAR = false;
+  if (!FunctionType.ReturnType().isEmpty()) {
+    auto ReturnValue = distributeReturnValue(*FunctionType.ReturnType());
+    if (ReturnValue.ShouldBeIgnored) {
+      // We do not have the means to handle this return value - ignore it.
+      revng_log(Log, "Return value is ignored.\n");
+
+    } else if (!ReturnValue.Registers.empty()) {
+      revng_assert(ReturnValue.SizeOnStack == 0);
+
+      // The return value uses registers: pass them through to the new type.
+      for (model::Register::Values Register : ReturnValue.Registers) {
+        model::NamedTypedRegister Converted;
+        Converted.Location() = Register;
+
+        const model::UpcastableType &ReturnType = FunctionType.ReturnType();
+        if (ReturnValue.Registers.size() > 1) {
+          Converted.Type() = model::PrimitiveType::makeGeneric(Register);
+        } else if (ReturnValue.UsesPointerToCopy == true) {
+          revng_assert(*ReturnType->size() > ABI.getPointerSize());
+          Converted.Type() = model::PointerType::make(ReturnType.copy(),
+                                                      ABI.getArchitecture());
+        } else if (ReturnType->isScalar()) {
+          Converted.Type() = ReturnType.copy();
+        } else {
+          Converted.Type() = model::PrimitiveType::make(Register);
+        }
+
+        revng_log(Log,
+                  "Adding a return value register:\n"
+                    << toString(Register));
+
+        NewPrototype.ReturnValues().emplace(Converted);
+      }
+    } else if (ReturnValue.Size != 0) {
+      // The return value uses a pointer-to-a-location: add it as an argument.
+      UsesSPTAR = true;
+
+      auto MaybeReturnValueSize = FunctionType.ReturnType()->size();
+      revng_assert(MaybeReturnValueSize != std::nullopt);
+      revng_assert(ReturnValue.Size == *MaybeReturnValueSize);
+
+      auto ReturnType = model::PointerType::make(FunctionType.ReturnType()
+                                                   .copy(),
+                                                 Binary->Architecture());
+      if (ABI.ReturnValueLocationRegister() != model::Register::Invalid) {
+        model::NamedTypedRegister
+          InputPointer(ABI.ReturnValueLocationRegister());
+        InputPointer.Type() = ReturnType;
+
+        revng_log(Log,
+                  "Adding a register argument to represent the return value "
+                  "location:\n"
+                    << toString(InputPointer));
+        NewPrototype.Arguments().emplace(std::move(InputPointer));
+      } else if (ABI.ReturnValueLocationOnStack()) {
+        model::StructField InputPointer(0);
+        InputPointer.Type() = ReturnType;
+
+        revng_log(Log,
+                  "Adding a stack argument to represent the return value "
+                  "location:\n"
+                    << toString(InputPointer));
+        StackArguments.Fields().emplace(std::move(InputPointer));
+        StackStructSize = ABI.getPointerSize();
+      } else {
+        revng_abort("Current ABI doesn't support big return values.");
+      }
+
+      revng_log(Log,
+                "Return value is returned through a shadow-argument-pointer:\n"
+                  << toString(ReturnType));
+
+      if (ABI.ReturnValueLocationIsReturned()) {
+        revng_assert(!ABI.GeneralPurposeReturnValueRegisters().empty());
+        auto FirstRegister = ABI.GeneralPurposeReturnValueRegisters()[0];
+        model::NamedTypedRegister OutputPointer(FirstRegister);
+        OutputPointer.Type() = std::move(ReturnType);
+        NewPrototype.ReturnValues().emplace(std::move(OutputPointer));
+      }
+    } else {
+      // The function returns `void`: no need to do anything special.
+      revng_log(Log, "Return value is `void`\n");
+    }
+  }
+
+  // Now that return value is figured out, the arguments are next.
+  auto Arguments = distributeArguments(FunctionType.Arguments(), UsesSPTAR);
+  uint64_t Index = 0;
+  for (const DistributedValue &Distributed : Arguments) {
+    if (Distributed.ShouldBeIgnored) {
+      // We do not have the means to handle this argument - ignore it.
+      //
+      // IMPORTANT: this likely means that following arguments will not be
+      //            placed correctly either. Layout produced for this function
+      //            is not trustworthy.
+      revng_log(Log, "Ignoring an argument.");
+
+      ++Index;
+      continue;
+    }
+
+    if (!Distributed.RepresentsPadding) {
+      // Transfer the register arguments first.
+      for (model::Register::Values Register : Distributed.Registers) {
+        model::NamedTypedRegister Argument(Register);
+
+        const auto &ArgumentType = FunctionType.Arguments().at(Index).Type();
+        uint64_t ArgumentSize = *ArgumentType->size();
+        if (Distributed.Registers.size() > 1 || Distributed.SizeOnStack != 0) {
+          Argument.Type() = model::PrimitiveType::makeGeneric(Register);
+        } else if (Distributed.UsesPointerToCopy == true) {
+          revng_assert(ArgumentSize > ABI.getPointerSize());
+          Argument.Type() = model::PointerType::make(ArgumentType.copy(),
+                                                     ABI.getArchitecture());
+        } else if (ArgumentType->isScalar()) {
+          Argument.Type() = ArgumentType;
+        } else {
+          Argument.Type() = model::PrimitiveType::make(Register);
+        }
+
+        revng_log(Log, "Adding an argument register:\n" << toString(Register));
+        NewPrototype.Arguments().emplace(Argument);
+      }
+
+      // Then stack arguments.
+      if (Distributed.SizeOnStack != 0) {
+        auto ArgumentIterator = FunctionType.Arguments().find(Index);
+        revng_assert(ArgumentIterator != FunctionType.Arguments().end());
+        const model::Argument &Argument = *ArgumentIterator;
+
+        if (Distributed.Registers.empty()) {
+          // A stack-only argument: convert it into a struct field.
+          model::StructField Field;
+          model::copyMetadata(Field, Argument);
+          Field.Offset() = Distributed.OffsetOnStack;
+          Field.Type() = Argument.Type().copy();
+          if (Distributed.UsesPointerToCopy)
+            Field.Type() = model::PointerType::make(std::move(Field.Type()),
+                                                    ABI.getArchitecture());
+
+          revng_log(Log, "Adding a stack argument:\n" << toString(Field));
+          StackArguments.Fields().emplace(std::move(Field));
+        } else {
+          // A piece of the argument is in registers, the rest is on the stack.
+          // TODO: there must be more efficient way to handle these, but for
+          //       the time being, just replace the argument type with
+          //       a bunch of`Generic` words so that at least size adds up.
+          uint64_t PointerSize = ABI.getPointerSize();
+          revng_assert(Distributed.SizeOnStack % PointerSize == 0);
+          revng_log(Log,
+                    "Adding " << (Distributed.SizeOnStack / PointerSize)
+                              << " stack argument pieces.\n");
+
+          auto Type = model::PrimitiveType::make(model::PrimitiveKind::Generic,
+                                                 PointerSize);
+          for (uint64_t CurrentWordOffset = 0;
+               CurrentWordOffset < Distributed.SizeOnStack;
+               CurrentWordOffset += PointerSize) {
+            model::StructField Field;
+            Field.Offset() = Distributed.OffsetOnStack + CurrentWordOffset;
+            Field.Type() = Type.copy();
+            StackArguments.Fields().emplace(std::move(Field));
+          }
+        }
+
+        StackStructSize = Distributed.OffsetOnStack + Distributed.SizeOnStack;
+      }
+
+      ++Index;
+    } else {
+      // This is just a padding argument.
+      revng_assert(Distributed.SizeOnStack == 0,
+                   "Only padding register arguments are supported here. "
+                   "Stack padding is represented as normal struct padding.");
+      for (model::Register::Values Register : Distributed.Registers) {
+        model::NamedTypedRegister Argument(Register);
+        Argument.Type() = model::PrimitiveType::makeGeneric(Register);
+
+        revng_log(Log, "Adding a padding argument:\n" << toString(Argument));
+        NewPrototype.Arguments().emplace(std::move(Argument));
+      }
+    }
+  }
+
+  // If the stack argument struct is not empty, record it into the model.
+  if (StackStructSize != 0) {
+    revng_assert(!StackArguments.Fields().empty());
+    StackArguments.Size() = StackStructSize;
+
+    // If the resulting type is a single stack-like struct, reuse it.
+    if (StackArguments.Fields().size() == 1) {
+      const auto FirstFieldType = StackArguments.Fields().begin()->Type();
+      if (!FirstFieldType->isTypedef()) {
+        const model::StructDefinition *Struct = FirstFieldType->getStruct();
+        if (Struct && Struct->Size() == StackArguments.Size())
+          NewPrototype.StackArgumentsType() = std::move(FirstFieldType);
+      }
+    }
+
+    // Otherwise, add a new struct to the model.
+    if (NewPrototype.StackArgumentsType().isEmpty()) {
+      auto &&[_, T] = Binary->makeStructDefinition(std::move(StackArguments));
+      NewPrototype.StackArgumentsType() = T;
+    }
+  }
+
+  // Set the final stack offset
+  NewPrototype.FinalStackOffset() = finalStackOffset(StackStructSize);
+
+  // Populate the list of preserved registers
+  for (auto Inserter = NewPrototype.PreservedRegisters().batch_insert();
+       model::Register::Values Register : ABI.CalleeSavedRegisters())
+    Inserter.insert(Register);
+
+  revng_assert(NewPrototype.verify(true));
+
+  revng_log(Log, "Conversion successful:\n" << toString(NewPrototype));
+
+  // To finish up the conversion, remove all the references to the old type
+  // by carefully replacing them with references to the new one.
+  replaceTypeDefinition(FunctionType.key(), *NewType, Binary);
+
+  // And don't forget to remove the old type.
+  Binary->TypeDefinitions().erase(FunctionType.key());
+
+  return std::move(NewType);
+}
+
+uint64_t
+ToRawConverter::finalStackOffset(uint64_t SizeOfArgumentsOnStack) const {
+  const auto Architecture = model::ABI::getArchitecture(ABI.ABI());
+  uint64_t Result = model::Architecture::getCallPushSize(Architecture);
+
+  if (ABI.CalleeIsResponsibleForStackCleanup()) {
+    Result += SizeOfArgumentsOnStack;
+
+    // TODO: take return values into the account.
+
+    // TODO: take shadow space into the account if relevant.
+
+    revng_assert(llvm::isPowerOf2_64(ABI.StackAlignment()));
+    Result += ABI.StackAlignment() - 1;
+    Result &= ~(ABI.StackAlignment() - 1);
+  }
+
+  return Result;
+}
+
+using TRC = ToRawConverter;
+uint64_t
+TRC::combinedStackArgumentSize(const model::CABIFunctionDefinition &Def) const {
+  DistributedValue ReturnValue;
+  if (!Def.ReturnType().isEmpty())
+    ReturnValue = distributeReturnValue(*Def.ReturnType());
+
+  ArgumentDistributor Distributor(ABI);
+  if (ReturnValue.SizeOnStack != 0)
+    Distributor.addShadowPointerReturnValueLocationArgument();
+
+  for (const model::Argument &Argument : Def.Arguments())
+    Distributor.nextArgument(*Argument.Type());
+
+  return Distributor.UsedStackOffset;
+}
+
+DistributedValues
+ToRawConverter::distributeArguments(CFTArguments Arguments,
+                                    bool HasReturnValueLocationArgument) const {
+  ArgumentDistributor Distributor(ABI);
+  if (HasReturnValueLocationArgument == true)
+    Distributor.addShadowPointerReturnValueLocationArgument();
+
+  DistributedValues Result;
+  for (const model::Argument &Argument : Arguments)
+    std::ranges::move(Distributor.nextArgument(*Argument.Type()),
+                      std::back_inserter(Result));
+
+  if (ABI.PackStackArguments()) {
+    auto StackArguments = Result | std::views::filter([](const auto &Value) {
+                            return Value.SizeOnStack != 0;
+                          });
+    for (auto &&[Current, Next] : zip_pairs(StackArguments)) {
+      if (Current.OffsetOnStack + Current.SizeOnStack > Next.OffsetOnStack) {
+        Current.SizeOnStack -= Current.PostPaddingSize;
+        Current.PostPaddingSize = 0;
+
+        uint64_t NewOffset = Current.OffsetOnStack + Current.SizeOnStack;
+        revng_assert(NewOffset <= Next.OffsetOnStack);
+      }
+    }
+
+    if (not Result.empty()) {
+      if (auto &LastArgument = *std::prev(Result.end());
+          LastArgument.SizeOnStack) {
+        LastArgument.SizeOnStack -= LastArgument.PostPaddingSize;
+        LastArgument.PostPaddingSize = 0;
+      }
+    }
+  }
+
+  return Result;
+}
+
+model::UpcastableType
+convertToRaw(const model::CABIFunctionDefinition &FunctionType,
+             TupleTree<model::Binary> &Binary) {
+  ToRawConverter ToRaw(abi::Definition::get(FunctionType.ABI()));
+  return ToRaw.convert(FunctionType, Binary);
+}
+
+static Logger LayoutLog("function-type-layout");
+
+/// A value either takes a portion of a single register or one or more full
+/// registers
+static llvm::SmallVector<model::Register::Portion, 2>
+toPortions(const DistributedValue &Value) {
+  revng_assert(not Value.RepresentsPadding);
+
+  llvm::SmallVector<model::Register::Portion, 2> Result;
+
+  if (Value.Registers.size() == 1 and Value.SizeOnStack == 0) {
+    Result.emplace_back(Value.Registers[0], Value.Size);
+  } else {
+    for (model::Register::Values Register : Value.Registers)
+      Result.emplace_back(Register, model::Register::getSize(Register));
+  }
+
+  return Result;
+}
+
+Layout::Layout(const model::CABIFunctionDefinition &Function) :
+  Architecture(model::ABI::getArchitecture(Function.ABI())) {
+  const abi::Definition &ABI = abi::Definition::get(Function.ABI());
+  ToRawConverter Converter(ABI);
+
+  //
+  // Handle return values first (since it might mean adding an extra argument).
+  //
+
+  bool UsesSPTAR = false;
+  if (!Function.ReturnType().isEmpty()) {
+    auto RV = Converter.distributeReturnValue(*Function.ReturnType());
+    if (RV.ShouldBeIgnored) {
+      // We do not have the means to handle this return value.
+      //
+      // Keep it in the layout as a placeholder with no registers, so that
+      // the consumers of the layout can make their own decisions on how to
+      // handle this.
+      revng_log(Log, "Return value is ignored.\n");
+      ReturnValues.emplace_back(Function.ReturnType().copy());
+
+    } else if (RV.SizeOnStack == 0) {
+      if (Function.ReturnType().isEmpty()) {
+        // This function returns `void`: no need to do anything special.
+      } else {
+        // Nothing on the stack, the return value fits into the registers.
+        auto &NewRV = ReturnValues.emplace_back(Function.ReturnType().copy());
+        NewRV.Registers = toPortions(RV);
+      }
+    } else {
+      revng_assert(RV.Registers.empty(),
+                   "Register and SPTAR return values should never be present "
+                   "at the same time.");
+
+      // Add an argument to represent the pointer to the return value location.
+      auto Pointer = model::PointerType::make(Function.ReturnType().copy(),
+                                              Architecture);
+      Argument &RVLocationIn = Arguments.emplace_back(std::move(Pointer));
+      RVLocationIn.Kind = ArgumentKind::ShadowPointerToAggregateReturnValue;
+      UsesSPTAR = true;
+
+      if (ABI.ReturnValueLocationRegister() != model::Register::Invalid) {
+        // Return value is passed using the stack (with a pointer to the
+        // location in the dedicated register).
+        RVLocationIn.Registers.emplace_back(ABI.ReturnValueLocationRegister(),
+                                            ABI.getPointerSize());
+      } else if (ABI.ReturnValueLocationOnStack()) {
+        // The location, where return value should be put in, is also
+        // communicated using the stack.
+        RVLocationIn.Stack = { 0, model::ABI::getPointerSize(ABI.ABI()) };
+      } else {
+        revng_abort("Big return values are not supported by the current ABI");
+      }
+
+      // Also return the same pointer using normal means.
+      if (ABI.ReturnValueLocationIsReturned()) {
+        auto &LocationOut = ReturnValues.emplace_back(RVLocationIn.Type.copy());
+
+        // To simplify selecting the register for it, use the full distribution
+        // routine again, but with the pointer instead of the original type.
+        auto RVOut = Converter.distributeReturnValue(*LocationOut.Type);
+        revng_assert(RVOut.Size == model::ABI::getPointerSize(ABI.ABI()));
+        revng_assert(RVOut.Registers.size() == 1);
+        revng_assert(RVOut.SizeOnStack == 0);
+        LocationOut.Registers = toPortions(RVOut);
+      }
+    }
+  }
+
+  //
+  // Then distribute the arguments.
+  //
+
+  auto Converted = Converter.distributeArguments(Function.Arguments(),
+                                                 UsesSPTAR);
+  revng_assert(Converted.size() >= Function.Arguments().size());
+  uint64_t Index = 0;
+  uint64_t StackStructSize = 0;
+  std::optional<uint64_t> FirstUnsupportedIndex;
+  for (const DistributedValue &Distributed : Converted) {
+    if (!Distributed.RepresentsPadding) {
+      auto &CurrentType = Function.Arguments().at(Index).Type();
+      Argument &Current = Arguments.emplace_back(CurrentType.copy());
+
+      // Disambiguate scalar and aggregate arguments.
+      // Scalars are passed by value,
+      // aggregates and pointer-to-copy values - as a pointer.
+      if (Distributed.UsesPointerToCopy)
+        Current.Kind = ArgumentKind::PointerToCopy;
+      else if (Current.Type->isScalar())
+        Current.Kind = ArgumentKind::Scalar;
+      else
+        Current.Kind = ArgumentKind::ReferenceToAggregate;
+
+      // TODO: consider marking as unsupported all the arguments after the first
+      //       unsupported one due to alignment issues.
+      if (not Distributed.ShouldBeIgnored) {
+        Current.Registers = toPortions(Distributed);
+        if (Distributed.SizeOnStack != 0) {
+          // The argument has a part (or is placed entirely) on the stack.
+          Current.Stack = Layout::Argument::StackSpan{
+            .Offset = Distributed.OffsetOnStack, .Size = Distributed.SizeOnStack
+          };
+
+          StackStructSize = Distributed.OffsetOnStack + Distributed.SizeOnStack;
+        }
+
+      } else {
+        // The ABI has no means of describing where this argument is passed.
+        // Keep the argument in the layout nonetheless, so that the layout
+        // stays in a one-to-one correspondence with `Function.Arguments()`,
+        // but leave it without any location. It's unsupported: no IR will
+        // ever refer to it, as there's no way of obtaining its value.
+        if (not FirstUnsupportedIndex.has_value())
+          FirstUnsupportedIndex = Index;
+
+        revng_assert(Current.isUnsupported());
+      }
+
+      ++Index;
+    }
+  }
+
+  uint64_t Expected = Function.Arguments().size() + (UsesSPTAR ? 1 : 0);
+  revng_assert(Arguments.size() == Expected);
+
+  CalleeSavedRegisters.resize(ABI.CalleeSavedRegisters().size());
+  llvm::copy(ABI.CalleeSavedRegisters(), CalleeSavedRegisters.begin());
+
+  FinalStackOffset = Converter.finalStackOffset(StackStructSize);
+
+  revng_log(LayoutLog,
+            "Layout of " + toString(Function.key()) + " is:\n"
+              << toString(*this));
+  if (FirstUnsupportedIndex.has_value()) {
+    std::string Message = "WARNING: argument "
+                          + std::to_string(*FirstUnsupportedIndex)
+                          + " cannot be placed correctly correctly.\n"
+                            "No argument placement after it can "
+                            "be trusted because of that.\n";
+    revng_log(LayoutLog, Message);
+  }
+
+  revng_assert(verify());
+}
+
+Layout::Layout(const model::RawFunctionDefinition &Function) :
+  Architecture(Function.Architecture()) {
+  // Lay register arguments out.
+  for (const model::NamedTypedRegister &Register : Function.Arguments()) {
+    revng_assert(Register.Type()->isScalar());
+
+    auto &Argument = Arguments.emplace_back(Register.Type().copy());
+    Argument.Registers.emplace_back(Register.Location(),
+                                    *Register.Type()->size());
+    Argument.Kind = ArgumentKind::Scalar;
+  }
+
+  // Lay the return value out.
+  for (const model::NamedTypedRegister &Register : Function.ReturnValues()) {
+    auto &ReturnValue = ReturnValues.emplace_back(Register.Type().copy());
+    ReturnValue.Registers.emplace_back(Register.Location(),
+                                       *Register.Type()->size());
+  }
+
+  // Lay stack arguments out.
+  if (not Function.StackArgumentsType().isEmpty()) {
+    auto &NewArg = Arguments.emplace_back(Function.StackArgumentsType().copy());
+
+    // Stack argument is always passed by pointer for RawFunctionDefinition
+    NewArg.Kind = ArgumentKind::ReferenceToAggregate;
+
+    // Record the size
+    const auto &StackStruct = Function.StackArgumentsType()->toStruct();
+    if (StackStruct.Size() != 0)
+      NewArg.Stack = { 0, StackStruct.Size() };
+  }
+
+  // Fill callee saved registers.
+  append(Function.PreservedRegisters(), CalleeSavedRegisters);
+
+  // Set the final offset.
+  FinalStackOffset = Function.FinalStackOffset();
+
+  revng_log(LayoutLog,
+            "Layout of " + toString(Function.key()) + " is:\n"
+              << toString(*this));
+
+  revng_assert(verify());
+}
+
+/// Verify that \p Registers and \p StackSize bytes of stack hold a value of
+/// \p Size bytes. A value either takes a portion of a single register or
+/// one or more full registers, possibly followed by the stack.
+static bool verifyValue(llvm::ArrayRef<model::Register::Portion> Registers,
+                        uint64_t StackSize,
+                        uint64_t Size) {
+  if (Registers.empty()) {
+    if (StackSize < Size) {
+      revng_log(LayoutLog,
+                "A value of " << Size << " bytes takes " << StackSize
+                              << " bytes of stack and no registers");
+      return false;
+    }
+
+    return true;
+  }
+
+  if (Registers.size() == 1 and StackSize == 0) {
+    const model::Register::Portion &Portion = Registers[0];
+    if (Portion.Size != Size) {
+      revng_log(LayoutLog,
+                "A value of " << Size << " bytes takes " << Portion.Size
+                              << " bytes of "
+                              << model::Register::getName(Portion.Register));
+      return false;
+    }
+
+    return true;
+  }
+
+  // TODO: some ABIs pass a value in portions of multiple registers. For
+  //       instance, on hard-float AAPCS, the second argument of
+  //       `void f(struct { float A, B; }, struct { float A, B, C; })` takes
+  //       s2, s3 and s4: the second half of q0 and a quarter of q1.
+  uint64_t RegistersSize = 0;
+  for (const model::Register::Portion &Portion : Registers) {
+    if (Portion.Size != model::Register::getSize(Portion.Register)) {
+      revng_log(LayoutLog,
+                "A value in multiple locations takes "
+                  << Portion.Size << " bytes of "
+                  << model::Register::getName(Portion.Register));
+      return false;
+    }
+
+    RegistersSize += Portion.Size;
+  }
+
+  if (StackSize == 0) {
+    // Every register but the last one is used in its entirety
+    uint64_t LastSize = Registers.back().Size;
+    if (RegistersSize < Size or RegistersSize - LastSize >= Size) {
+      revng_log(LayoutLog,
+                "A value of " << Size << " bytes takes " << RegistersSize
+                              << " bytes of registers");
+      return false;
+    }
+  } else {
+    // The registers hold the start of the value, the stack the rest
+    if (RegistersSize >= Size or RegistersSize + StackSize < Size) {
+      revng_log(LayoutLog,
+                "A value of " << Size << " bytes takes " << RegistersSize
+                              << " bytes of registers and " << StackSize
+                              << " bytes of stack");
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool Layout::verify() const {
+  if (Architecture == model::Architecture::Invalid) {
+    revng_log(LayoutLog, "The architecture is invalid");
+    return false;
+  }
+
+  std::unordered_set<model::Register::Values> LookupHelper;
+  auto VerificationHelper = [&](model::Register::Values Register) -> bool {
+    // Ensure each register is present only once
+    if (!LookupHelper.emplace(Register).second) {
+      revng_log(LayoutLog,
+                model::Register::getName(Register) << " is used twice");
+      return false;
+    }
+
+    // Ensure all the registers belong to the architecture
+    if (not model::Register::isUsedInArchitecture(Register, Architecture)) {
+      llvm::StringRef Name = model::Register::getName(Register);
+      revng_log(LayoutLog, Name << " belongs to another architecture");
+      return false;
+    }
+
+    return true;
+  };
+
+  // Verify arguments
+  LookupHelper.clear();
+  for (const model::Register::Portion &Portion : argumentRegisters())
+    if (!VerificationHelper(Portion.Register))
+      return false;
+
+  // Verify return values
+  LookupHelper.clear();
+  for (const model::Register::Portion &Portion : returnValueRegisters())
+    if (!VerificationHelper(Portion.Register))
+      return false;
+
+  // Verify callee saved registers
+  LookupHelper.clear();
+  for (model::Register::Values Register : CalleeSavedRegisters)
+    if (!VerificationHelper(Register))
+      return false;
+
+  using namespace abi::FunctionType::ArgumentKind;
+  uint64_t PointerSize = model::Architecture::getPointerSize(Architecture);
+  for (auto &&[Index, Argument] : llvm::enumerate(Arguments)) {
+    // No use verifying explicitly unsupported arguments.
+    if (Argument.isUnsupported())
+      continue;
+
+    uint64_t Size = *Argument.Type->size();
+    if (Argument.Kind == PointerToCopy)
+      Size = PointerSize;
+
+    if (Argument.Stack and Argument.Stack->Size == 0) {
+      revng_log(LayoutLog, "Argument " << Index << " takes 0 bytes of stack");
+      return false;
+    }
+
+    uint64_t StackSize = Argument.Stack ? Argument.Stack->Size : 0;
+    if (not verifyValue(Argument.Registers, StackSize, Size)) {
+      revng_log(LayoutLog, "Argument " << Index << " is invalid");
+      return false;
+    }
+  }
+
+  for (auto &&[Index, ReturnValue] : llvm::enumerate(ReturnValues)) {
+    // No use verifying explicitly unsupported return values.
+    if (ReturnValue.isUnsupported())
+      continue;
+
+    uint64_t Size = *ReturnValue.Type->size();
+    if (not verifyValue(ReturnValue.Registers, 0, Size)) {
+      revng_log(LayoutLog, "Return value " << Index << " is invalid");
+      return false;
+    }
+  }
+
+  auto SPTAR = ShadowPointerToAggregateReturnValue;
+  bool IsFirst = true;
+  for (const auto &Argument : Arguments) {
+    if (Argument.Kind == SPTAR) {
+      // SPTAR must be the first argument
+      if (!IsFirst) {
+        revng_log(LayoutLog, "The SPTAR is not the first argument");
+        return false;
+      }
+
+      if (Argument.Stack.has_value()) {
+        // SPTAR can be on the stack if ABI allows that.
+        //
+        // TODO: we should probably verify that, but such a verification would
+        //       require access to the ABI in question.
+
+        // The space SPTAR occupies on stack has to be that of a single pointer.
+        // It also has to be the first argument (with offset equal to zero).
+        if (Argument.Stack->Size != PointerSize
+            || Argument.Stack->Offset != 0) {
+          revng_log(LayoutLog,
+                    "The SPTAR on the stack is not a pointer at offset 0");
+          return false;
+        }
+
+        revng_assert(Argument.Registers.size() == 0);
+      } else {
+        // SPTAR is not on the stack, so it has to be a single register
+        if (Argument.Registers.size() != 1) {
+          revng_log(LayoutLog, "The SPTAR is not in a single register");
+          return false;
+        }
+      }
+    }
+
+    IsFirst = false;
+  }
+
+  // If we have more than one return value, each return value should take at
+  // most a single register
+  if (ReturnValues.size() > 1) {
+    for (const ReturnValue &ReturnValue : ReturnValues) {
+      if (ReturnValue.Registers.size() > 1) {
+        revng_log(LayoutLog,
+                  "One of multiple return values takes multiple registers");
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+size_t Layout::argumentRegisterCount() const {
+  size_t Result = 0;
+
+  for (const auto &Argument : Arguments)
+    Result += Argument.Registers.size();
+
+  return Result;
+}
+
+size_t Layout::returnValueRegisterCount() const {
+  size_t Result = 0;
+
+  for (const ReturnValue &ReturnValue : ReturnValues)
+    Result += ReturnValue.Registers.size();
+
+  return Result;
+}
+
+llvm::SmallVector<model::Register::Portion> Layout::argumentRegisters() const {
+  llvm::SmallVector<model::Register::Portion> Result;
+
+  for (const auto &Argument : Arguments)
+    Result.append(Argument.Registers.begin(), Argument.Registers.end());
+
+  return Result;
+}
+
+llvm::SmallVector<model::Register::Portion>
+Layout::returnValueRegisters() const {
+  llvm::SmallVector<model::Register::Portion> Result;
+
+  for (const ReturnValue &ReturnValue : ReturnValues)
+    Result.append(ReturnValue.Registers.begin(), ReturnValue.Registers.end());
+
+  return Result;
+}
+
+uint64_t finalStackOffset(const model::CABIFunctionDefinition &Function) {
+  const abi::Definition &ABI = abi::Definition::get(Function.ABI());
+  ToRawConverter Helper(ABI);
+
+  return Helper.finalStackOffset(ABI.CalleeIsResponsibleForStackCleanup() ?
+                                   Helper.combinedStackArgumentSize(Function) :
+                                   0);
+}
+
+UsedRegisters usedRegisters(const model::CABIFunctionDefinition &Function) {
+  UsedRegisters Result;
+
+  // Ready the return value register data.
+  const abi::Definition &ABI = abi::Definition::get(Function.ABI());
+  DistributedValue RV;
+  if (!Function.ReturnType().isEmpty())
+    RV = ToRawConverter(ABI).distributeReturnValue(*Function.ReturnType());
+
+  Result.ReturnValues = toPortions(RV);
+
+  // Handle shadow pointer return value gracefully.
+  ArgumentDistributor Distributor(ABI);
+  if (RV.SizeOnStack != 0) {
+    Distributor.addShadowPointerReturnValueLocationArgument();
+
+    revng_assert(Result.ReturnValues.empty());
+    if (ABI.ReturnValueLocationIsReturned()) {
+      const auto &GPRs = ABI.GeneralPurposeReturnValueRegisters();
+      revng_assert(!GPRs.empty());
+
+      // SPTAR is guaranteed to be a pointer, so the size is set as such.
+      Result.ReturnValues.emplace_back(GPRs[0], ABI.getPointerSize());
+    }
+
+    if (ABI.ReturnValueLocationRegister() != model::Register::Invalid)
+      Result.Arguments.emplace_back(ABI.ReturnValueLocationRegister(),
+                                    ABI.getPointerSize());
+  }
+
+  if (ABI.GeneralPurposeArgumentRegisters().empty()
+      && ABI.FloatArgumentRegisters().empty()) {
+    // Do not even look at the arguments if an ABI explicitly states that it
+    // never uses any registers in the first place.
+    return Result;
+  }
+
+  // Iterate over arguments until we are sure no further argument can use
+  // any registers.
+  for (const model::Argument &Argument : Function.Arguments().asVector()) {
+    // An argument the ABI's floating point strategy drops occupies no
+    // register.
+    auto Distributed = Distributor.nextArgument(*Argument.Type());
+    for (DistributedValue SingleArg : Distributed) {
+      if (SingleArg.ShouldBeIgnored)
+        continue;
+
+      if (!SingleArg.RepresentsPadding)
+        Result.Arguments.append(toPortions(SingleArg));
+    }
+  }
+
+  return Result;
+}
+
+} // namespace abi::FunctionType

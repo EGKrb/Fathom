@@ -1,0 +1,224 @@
+//
+// This file is distributed under the MIT License. See LICENSE.md for details.
+//
+
+#ifndef MLIR_CLIFT_PASSES
+#define MLIR_CLIFT_PASSES
+
+include "mlir/Pass/PassBase.td"
+include "mlir/Rewrite/PassUtil.td"
+
+class Clift_Pass<string arg, string operation = "clift::FunctionOp">
+  : Pass<arg, operation> {
+
+  let dependentDialects = ["clift::CliftDialect"];
+}
+
+def CliftHelperTranslation : Clift_Pass<"translate-helpers", "mlir::ModuleOp"> {
+  let summary =
+    "Translates helper functions to more useful forms.\\n"
+    "* Adds more specific typing (e.g. float in place of generic).\\n"
+    "* Discards unused arguments (e.g. floating point status).\\n"
+    "  Note that this process does not preserve semantics.\\n";
+
+  let constructor = "clift::createHelperTranslationPass()";
+}
+
+def CliftFloatingPointPromotion
+  : Clift_Pass<"promote-floating-point-operations"> {
+
+  let summary = "Promote external floating point operation function calls into "
+                "first class Clift operations.";
+
+  let constructor = "clift::createFloatingPointPromotionPass()";
+}
+
+def CliftVoidReturnToGotoConversion
+  : Clift_Pass<"convert-void-return-to-goto"> {
+
+  let summary = "Convert return statements into gotos in functions returning "
+                "void.";
+  let constructor = "clift::createVoidReturnToGotoConversionPass()";
+}
+
+def CliftJumpToVoidReturnConversion
+  : Clift_Pass<"convert-jump-to-void-return"> {
+
+  let summary = "Convert unconditional jumps whose target is the end of the "
+                "function into return statements in functions returning void.";
+  let constructor = "clift::createJumpToVoidReturnConversionPass()";
+}
+
+def CliftLoopDetection : Clift_Pass<"loop-detection"> {
+  let summary = "Detect Clift loops";
+  let constructor = "clift::createLoopDetectionPass()";
+}
+
+def CliftLabelMerging : Clift_Pass<"label-merging"> {
+  let summary = "Merge any two labels indicating the same statement.";
+  let constructor = "clift::createLabelMergingPass()";
+}
+
+def CliftOptimizeStatements : Clift_Pass<"optimize-statements"> {
+  let summary = "Optimize Clift statements";
+  let constructor = "clift::createOptimizeStatementsPass()";
+  let options = RewritePassUtils.options;
+}
+
+def CliftOptimizeExpressions : Clift_Pass<"optimize-expressions"> {
+  let summary = "Optimize Clift expressions";
+  let constructor = "clift::createOptimizeExpressionsPass()";
+  let options = RewritePassUtils.options;
+}
+
+def CliftBooleanNegationSimplification
+  : Clift_Pass<"simplify-boolean-negations"> {
+
+  let summary = "Simplify boolean negations";
+  let constructor = "clift::createBooleanNegationSimplificationPass()";
+  let options = RewritePassUtils.options;
+}
+
+def CliftEmitFieldAccesses : Clift_Pass<"emit-field-accesses"> {
+  let summary = "Emit field accesses.";
+  let constructor = "clift::createEmitFieldAccessesPass()";
+}
+
+def CliftTypeRefinement : Clift_Pass<"refine-types"> {
+  let summary = "Apply type refinement to expressions and variables.";
+  let constructor = "clift::createTypeRefinementPass()";
+}
+
+def CliftTypeRefinementWithEFA : Clift_Pass<"refine-types-and-accesses"> {
+  let summary = "Apply type refinement and field access emission together.";
+  let constructor = "clift::createTypeRefinementWithEFAPass()";
+  let options = RewritePassUtils.options;
+}
+
+def CliftUniqueFallthroughBranchHoisting
+  : Clift_Pass<"hoist-unique-fallthrough-branches"> {
+
+  let summary = "Hoist the unique fallthrough branches of any branch operation "
+                "into the enclosing scope.";
+
+  let constructor = "clift::createUniqueFallthroughBranchHoistingPass()";
+}
+
+def CliftWhileConditionPromotion : Clift_Pass<"promote-while-conditions"> {
+  let summary = "Promote leading conditional breaks of unconditional loops "
+                "into while-loop conditions.";
+  let constructor = "clift::createWhileConditionPromotionPass()";
+}
+
+def CliftDoWhileConditionPromotion : Clift_Pass<"promote-do-while-conditions"> {
+  let summary = "Promote trailing conditional breaks of unconditional loops "
+                "into do-while-loop conditions.";
+  let constructor = "clift::createDoWhileConditionPromotionPass()";
+}
+
+def CliftExpressionPostProcessing : Clift_Pass<"post-process-expressions"> {
+  let summary = "Post process Clift expressions";
+  let constructor = "clift::createExpressionPostProcessingPass()";
+  let options = RewritePassUtils.options;
+}
+
+def CliftTerminalBranchHoisting
+  : Clift_Pass<"hoist-terminal-branches"> {
+
+  let summary = "Hoist one branch of an N-way branch operation, where none of "
+                "the branches fall through.";
+
+  let constructor = "clift::createTerminalBranchHoistingPass()";
+}
+
+def CliftTightenVariableScopes : Clift_Pass<"tighten-variable-scopes"> {
+  let summary = "Tighten variable scopes";
+  let constructor = "clift::createVariableScopeTighteningPass()";
+}
+
+def CliftVariableInitializerHoisting
+  : Clift_Pass<"hoist-variable-initializers"> {
+
+  let summary = "Hoist variable initializers";
+  let constructor = "clift::createVariableInitializerHoistingPass()";
+}
+
+def CliftPromoteBreakContinue : Clift_Pass<"promote-break-continue"> {
+  let summary = "Promote break_to/continue_to targeting the innermost "
+                "enclosing loop to plain operand-less break/continue.";
+
+  let constructor = "clift::createPromoteBreakContinuePass()";
+}
+
+def CliftCLegalization : Clift_Pass<"c-legalization"> {
+  let summary = "Legalize the input for emitting C code.";
+  let constructor = "clift::createCLegalizationPass()";
+}
+
+def CliftImmediateRadixDeduction : Clift_Pass<"deduce-immediate-radices"> {
+  let summary = "Deduce most readable radices for integer immediates.";
+  let constructor = "clift::createImmediateRadixDeductionPass()";
+}
+
+def CliftImplicitCastElision : Clift_Pass<"elide-implicit-casts"> {
+  let summary = "Mark implicit casts for elision by the backend.";
+  let constructor = "clift::createImplicitCastElisionPass()";
+}
+
+def CliftBooleanCastElimination : Clift_Pass<"eliminate-boolean-casts",
+                                             "clift::FunctionOp"> {
+  let summary = "Convert explicit boolean casts to comparisons against zero.";
+  let constructor = "clift::createBooleanCastEliminationPass()";
+}
+
+def CliftVerifyC : Clift_Pass<"verify-c", "mlir::ModuleOp"> {
+  let summary = "Verify that the Clift semantics correspond to C semantics in "
+                "the specified target implementation.";
+
+  let constructor = "clift::createVerifyCPass()";
+}
+
+// A class gathering up options common for all the PTML emitters.
+class Clift_EmitPTMLPass<string arg, string operation = "mlir::ModuleOp">
+  : Clift_Pass<arg, operation> {
+
+  let options = [
+    Option<"EmitTags", "ptml", "bool", /*default=*/"false", "Emit PTML tags">,
+
+    Option<"Output",
+           "output",
+           "std::string",
+           /*default=*/"\"-\"",
+           "C output path">,
+
+    Option<"InlineStackFrameType",
+           "inline-stack-frame",
+           "bool",
+           /*default=*/"false",
+           "Inline the body of each function's stack-frame struct type.">
+  ];
+}
+
+def CliftEmitC : Clift_EmitPTMLPass<"emit-c"> {
+  let summary = "Emit C code (optionally with PTML tags) from the Clift code.";
+  let constructor = "clift::createEmitCPass()";
+}
+
+def CliftEmitTypeAndGlobalHeader
+  : Clift_EmitPTMLPass<"emit-type-and-global-header"> {
+
+  // NOTE: this header is a subject to be split into a set of smaller ones.
+  let summary = "Emit a C header containing the type system with some extras.";
+  let constructor = "clift::createEmitTypeAndGlobalHeaderPass()";
+}
+
+def CliftEmitHelperHeader : Clift_EmitPTMLPass<"emit-helper-header"> {
+  let summary = "Emit a C header containing *declarations* of all the helpers "
+                "used in the module.";
+
+  let constructor = "clift::createEmitHelperHeaderPass()";
+}
+
+// TODO: add the corresponding single-type pass if the need ever arises.
+
+#endif // MLIR_CLIFT_PASSES

@@ -1,0 +1,59 @@
+#pragma once
+
+//
+// This file is distributed under the MIT License. See LICENSE.md for details.
+//
+
+#include "revng/PipeboxCommon/Concepts.h"
+#include "revng/PipeboxCommon/Helpers/AnalysisRunner.h"
+#include "revng/PipeboxCommon/Helpers/Native/Container.h"
+#include "revng/PipeboxCommon/Helpers/Native/Helpers.h"
+
+namespace revng::pypeline::helpers::native {
+
+class Analysis {
+public:
+  virtual ~Analysis() = default;
+
+  virtual llvm::Error run(Model &TheModel,
+                          std::vector<Container *> Containers,
+                          const pypeline::Request &Incoming,
+                          llvm::StringRef Configuration) = 0;
+
+  virtual std::vector<ContainerArgument> signature() const = 0;
+};
+
+template<IsAnalysis T>
+class AnalysisImpl final : public Analysis {
+private:
+  T Instance;
+
+public:
+  AnalysisImpl() : Instance() {}
+  ~AnalysisImpl() override = default;
+
+  virtual llvm::Error run(Model &TheModel,
+                          std::vector<Container *> Containers,
+                          const revng::pypeline::Request &Incoming,
+                          llvm::StringRef Configuration) override {
+    auto ContainerTuple = containerVectorToTuple<T>(Containers);
+    return runAnalysis(Instance,
+                       TheModel,
+                       Incoming,
+                       Configuration,
+                       ContainerTuple);
+  }
+
+  virtual std::vector<ContainerArgument> signature() const override {
+    std::vector<ContainerArgument> Result;
+
+    using CT = AnalysisRunTraits<T>::ContainerTypes;
+    forEach<CT>([&Result]<typename A, size_t I>() {
+      Result.push_back({ A::Name, A::Name, Access::Read });
+    });
+
+    return Result;
+  }
+};
+
+} // namespace revng::pypeline::helpers::native

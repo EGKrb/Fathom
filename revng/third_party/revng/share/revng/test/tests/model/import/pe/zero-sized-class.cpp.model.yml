@@ -1,0 +1,55 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+#
+# NOTE: this file is stripped of any architecture-specific information (things
+#       like ABI, pointer sizes, and so on): it reflects all the _common_
+#       expectations for a specific source file (see revng-qa-side importPE
+#       sources) after being compiled and lifted by a variety of different
+#       msvc compiler versions.
+#
+
+---
+Functions:
+  - Name: main
+    Prototype:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/1815-CABIFunctionDefinition"
+  - Name: doSomething
+    Prototype:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/1818-CABIFunctionDefinition"
+TypeDefinitions:
+  - Kind: CABIFunctionDefinition
+    ID: 1815
+    ReturnType:
+      Kind: PrimitiveType
+      PrimitiveKind: Signed
+      Size: 4
+  - Kind: CABIFunctionDefinition
+    ID: 1818
+    Arguments:
+      - Index: 0
+        Type:
+          Kind: PointerType
+          PointeeType:
+            Kind: DefinedType
+            Definition: "/TypeDefinitions/1822-StructDefinition"
+  - Kind: StructDefinition
+    ID: 1822
+    Name: Foo
+    Size: 8
+    Fields:
+      - Offset: 0
+        Name: x
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Signed
+          Size: 4
+      - Offset: 4
+        Name: "y"
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Signed
+          Size: 4

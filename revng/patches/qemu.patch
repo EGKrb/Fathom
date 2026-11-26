@@ -1,0 +1,928 @@
+diff --git a/common-user/meson.build b/common-user/meson.build
+index ac9de5b..4a999bb 100644
+--- a/common-user/meson.build
++++ b/common-user/meson.build
+@@ -4,7 +4,9 @@ endif
+ 
+ common_user_inc += include_directories('host/' / host_arch)
+ 
+-user_ss.add(files(
+-  'safe-syscall.S',
+-  'safe-syscall-error.c',
+-))
++if targetos != 'windows'  # Fathom: libtcg on Windows makes no system calls
++  user_ss.add(files(
++    'safe-syscall.S',
++    'safe-syscall-error.c',
++  ))
++endif
+diff --git a/cpu-target.c b/cpu-target.c
+index 508013e..2edd58d 100644
+--- a/cpu-target.c
++++ b/cpu-target.c
+@@ -347,7 +347,7 @@ void cpu_abort(CPUState *cpu, const char *fmt, ...)
+     va_end(ap2);
+     va_end(ap);
+     replay_finish();
+-#if defined(CONFIG_USER_ONLY)
++#if defined(CONFIG_USER_ONLY) && !defined(_WIN32)
+     {
+         struct sigaction act;
+         sigfillset(&act.sa_mask);
+diff --git a/gdbstub/meson.build b/gdbstub/meson.build
+index 1d2e6ed..f1ed6d5 100644
+--- a/gdbstub/meson.build
++++ b/gdbstub/meson.build
+@@ -37,4 +37,6 @@ system_ss.add(gdb_system)
+ common_ss.add(files('syscalls.c'))
+ 
+ # The user-target is specialised by the guest
+-specific_ss.add(when: 'CONFIG_USER_ONLY', if_true: files('user-target.c'))
++if targetos != 'windows'  # Fathom: not with libtcg on Windows (no linux-user)
++  specific_ss.add(when: 'CONFIG_USER_ONLY', if_true: files('user-target.c'))
++endif
+diff --git a/include/sysemu/os-win32.h b/include/sysemu/os-win32.h
+index 1047d26..79b0aa5 100644
+--- a/include/sysemu/os-win32.h
++++ b/include/sysemu/os-win32.h
+@@ -265,6 +265,42 @@ win32_close_exception_handler(struct _EXCEPTION_RECORD*, void*,
+ void *qemu_win32_map_alloc(size_t size, HANDLE *h, Error **errp);
+ void qemu_win32_map_free(void *ptr, HANDLE h, Error **errp);
+ 
++/* CONFIG_LIBTCG_WIN32 is poisoned in the code common to all targets */
++#ifdef NEED_CPU_H
++#ifdef CONFIG_LIBTCG_WIN32
++/*
++ * Fathom: libtcg on Windows builds QEMU's user-mode code without linux-user.
++ * It names sigset_t (only with _POSIX in MinGW) and protects the pages of
++ * translated code with mprotect, restoring the signal mask after a write to
++ * them (never reached: libtcg translates, it does not run code).
++ */
++#ifndef _POSIX
++typedef _sigset_t sigset_t;
++#endif
++#define PROT_NONE  0
++#define PROT_READ  1
++#define PROT_WRITE 2
++#define PROT_EXEC  4
++static inline int mprotect(void *addr, size_t len, int prot)
++{
++    DWORD old, flags;
++    if (prot & PROT_EXEC) {
++        flags = prot & PROT_WRITE ? PAGE_EXECUTE_READWRITE
++              : prot & PROT_READ ? PAGE_EXECUTE_READ : PAGE_EXECUTE;
++    } else {
++        flags = prot & PROT_WRITE ? PAGE_READWRITE
++              : prot & PROT_READ ? PAGE_READONLY : PAGE_NOACCESS;
++    }
++    return VirtualProtect(addr, len, flags, &old) ? 0 : -1;
++}
++#define SIG_SETMASK 2
++static inline int sigprocmask(int how, const sigset_t *set, sigset_t *old)
++{
++    return 0;
++}
++#endif
++#endif
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/libtcg/libtcg.c b/libtcg/libtcg.c
+index 322ab02..0772a2a 100644
+--- a/libtcg/libtcg.c
++++ b/libtcg/libtcg.c
+@@ -1,7 +1,9 @@
+ #include "qemu/osdep.h"
+ #include "qemu/accel.h"
+ 
++#ifndef CONFIG_LIBTCG_WIN32
+ #include "qemu.h"
++#endif
+ #include "cpu.h"
+ #include "cpu-param.h"
+ #include "tcg/insn-start-words.h"
+@@ -11,8 +13,14 @@
+ #include "tcg/tcg-internal.h"
+ #include "tcg/startup.h"
+ #include "elf.h"
++#ifdef CONFIG_LIBTCG_WIN32
++/* Fathom: Windows, without linux-user (libtcg/win32-user.c) */
++const char *cpu_get_model(uint32_t eflags);
++void libtcg_win32_setup_cpu(CPUArchState *env);
++#else
+ #include "target_elf.h"
+ #include "cpu_loop-common.h" /* for target_cpu_copy_regs */
++#endif
+ 
+ /*
+  * Including our header last, otherwise we run into trouble with
+@@ -370,6 +378,9 @@ LibTcgContext *libtcg_context_create(void)
+     context->cpu = cpu_create(cpu_type);
+     cpu_reset(context->cpu);
+     tcg_prologue_init();
++#ifdef CONFIG_LIBTCG_WIN32
++    libtcg_win32_setup_cpu(cpu_env(context->cpu));
++#else
+     struct target_pt_regs regs = {0};
+ 
+     struct image_info info = {0};
+@@ -381,6 +392,7 @@ LibTcgContext *libtcg_context_create(void)
+ #endif
+     context->cpu->opaque = &ts;
+     target_cpu_copy_regs(cpu_env(context->cpu), &regs);
++#endif
+ 
+ #if defined(TARGET_S390X)
+     cpu_env(context->cpu)->psw.mask = PSW_MASK_DAT | PSW_MASK_IO | PSW_MASK_EXT |
+diff --git a/libtcg/meson.build b/libtcg/meson.build
+index 6a9beeb..1d98721 100644
+--- a/libtcg/meson.build
++++ b/libtcg/meson.build
+@@ -6,3 +6,5 @@ libtcg_sources = files(
+   'libtcg.c',
+   'dump_tinycode_instruction.c'
+ )
++# Fathom: Windows, without linux-user
++libtcg_win32_sources = files('win32-user.c')
+diff --git a/libtcg/win32-user.c b/libtcg/win32-user.c
+new file mode 100644
+index 0000000..1115bd0
+--- /dev/null
++++ b/libtcg/win32-user.c
+@@ -0,0 +1,202 @@
++/*
++ * Fathom: libtcg on Windows, without linux-user.
++ *
++ * libtcg only needs QEMU's front ends (gen_intermediate_code) and a CPU in the
++ * state a user-mode process starts in: on Linux, linux-user provides it
++ * (target_cpu_copy_regs). Here, the x86 CPU is set up directly, as the
++ * CONFIG_LIBTCG path of linux-user/i386/cpu_loop.c does: protected mode,
++ * paging, long mode for x86_64, flat segments whose caches are loaded
++ * directly (no GDT, so no guest memory).
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include "qemu/osdep.h"
++#include "qemu/sockets.h"
++#include "cpu.h"
++#include "exec/exec-all.h"
++
++#if !defined(TARGET_I386)
++#error "libtcg on Windows: only the x86 targets (i386-libtcg, x86_64-libtcg)"
++#endif
++
++/* The selectors of Linux (arch/x86/include/asm/segment.h), as linux-user */
++#ifdef TARGET_X86_64
++#define WIN32_USER_CS 0x33
++#define WIN32_USER_DS 0x2b
++#else
++#define WIN32_USER_CS 0x23
++#define WIN32_USER_DS 0x2b
++#endif
++
++const char *cpu_get_model(uint32_t eflags)
++{
++    return "max";
++}
++
++void libtcg_win32_setup_cpu(CPUArchState *env)
++{
++    bool is64 = (env->features[FEAT_8000_0001_EDX] & CPUID_EXT2_LM) != 0;
++    uint32_t flat = 0x000f0000 | DESC_G_MASK | DESC_B_MASK | DESC_P_MASK
++                    | DESC_S_MASK | DESC_A_MASK | (3 << DESC_DPL_SHIFT);
++    uint32_t data = flat | (0x2 << DESC_TYPE_SHIFT);
++    uint32_t code = flat | (0xa << DESC_TYPE_SHIFT);
++
++    env->cr[0] = CR0_PG_MASK | CR0_WP_MASK | CR0_PE_MASK;
++    env->hflags |= HF_PE_MASK | HF_CPL_MASK;
++    if (env->features[FEAT_1_EDX] & CPUID_SSE) {
++        env->cr[4] |= CR4_OSFXSR_MASK;
++        env->hflags |= HF_OSFXSR_MASK;
++    }
++    if (is64) {
++        env->cr[4] |= CR4_PAE_MASK;
++        env->efer |= MSR_EFER_LMA | MSR_EFER_LME;
++        env->hflags |= HF_LMA_MASK;
++    }
++    env->eflags |= IF_MASK;
++
++#ifdef TARGET_X86_64
++    code |= DESC_L_MASK;
++    cpu_x86_load_seg_cache(env, R_CS, WIN32_USER_CS, 0, 0xffffffff, code);
++    cpu_x86_load_seg_cache(env, R_SS, WIN32_USER_DS, 0, 0xffffffff, data);
++    cpu_x86_load_seg_cache(env, R_DS, 0, 0, 0, 0);
++    cpu_x86_load_seg_cache(env, R_ES, 0, 0, 0, 0);
++    cpu_x86_load_seg_cache(env, R_FS, 0, 0, 0, 0);
++    cpu_x86_load_seg_cache(env, R_GS, 0, 0, 0, 0);
++#else
++    cpu_x86_load_seg_cache(env, R_CS, WIN32_USER_CS, 0, 0xffffffff, code);
++    cpu_x86_load_seg_cache(env, R_SS, WIN32_USER_DS, 0, 0xffffffff, data);
++    cpu_x86_load_seg_cache(env, R_DS, WIN32_USER_DS, 0, 0xffffffff, data);
++    cpu_x86_load_seg_cache(env, R_ES, WIN32_USER_DS, 0, 0xffffffff, data);
++    cpu_x86_load_seg_cache(env, R_FS, 0, 0, 0xffffffff, data);
++    cpu_x86_load_seg_cache(env, R_GS, WIN32_USER_DS, 0, 0xffffffff, data);
++#endif
++}
++
++/*
++ * What linux-user provides to the rest of QEMU's user-mode code. libtcg
++ * translates, it does not run guest code: the paths that would deliver a
++ * signal to the guest or kick a running CPU are not reached.
++ */
++
++/* linux-user/mmap.c: the lock of the guest's memory map (recursive per thread) */
++static __thread int mmap_lock_count;
++static GRecMutex mmap_mutex;
++
++void mmap_lock(void)
++{
++    if (mmap_lock_count++ == 0) {
++        g_rec_mutex_lock(&mmap_mutex);
++    }
++}
++
++void mmap_unlock(void)
++{
++    assert(mmap_lock_count > 0);
++    if (--mmap_lock_count == 0) {
++        g_rec_mutex_unlock(&mmap_mutex);
++    }
++}
++
++bool have_mmap_lock(void)
++{
++    return mmap_lock_count > 0;
++}
++
++/* linux-user/signal.c: a fault of the guest */
++void cpu_loop_exit_sigsegv(CPUState *cpu, target_ulong addr,
++                           MMUAccessType access_type, bool maperr,
++                           uintptr_t ra)
++{
++    fprintf(stderr, "libtcg: guest fault at 0x" TARGET_FMT_lx "\n", addr);
++    abort();
++}
++
++void cpu_loop_exit_sigbus(CPUState *cpu, target_ulong addr,
++                          MMUAccessType access_type, uintptr_t ra)
++{
++    fprintf(stderr, "libtcg: guest alignment fault at 0x" TARGET_FMT_lx "\n",
++            addr);
++    abort();
++}
++
++/* linux-user/main.c */
++void qemu_cpu_kick(CPUState *cpu)
++{
++    cpu_exit(cpu);
++}
++
++bool qemu_cpu_is_self(CPUState *cpu)
++{
++    return true;
++}
++
++uint64_t cpu_get_tsc(CPUX86State *env)
++{
++    return cpu_get_host_ticks();
++}
++
++/* util/qemu-sockets.c (not built here), used by util/oslib-win32.c */
++bool fd_is_socket(int fd)
++{
++    int optval;
++    socklen_t optlen = sizeof(optval);
++    return !getsockopt(fd, SOL_SOCKET, SO_TYPE, &optval, &optlen);
++}
++
++/* gdbstub/user-target.c (the debugging of a Linux process): no gdbstub here */
++#include "../gdbstub/internals.h"
++
++int gdb_get_cpu_index(CPUState *cpu)
++{
++    return cpu->cpu_index + 1;
++}
++
++int gdb_signal_to_target(int sig)
++{
++    return sig;
++}
++
++int gdb_target_signal_to_gdb(int sig)
++{
++    return sig;
++}
++
++static void gdb_unsupported(GArray *params, void *user_ctx)
++{
++    gdb_put_packet("");
++}
++
++void gdb_handle_query_offsets(GArray *params, void *user_ctx)
++{
++    gdb_unsupported(params, user_ctx);
++}
++
++void gdb_handle_v_file_open(GArray *params, void *user_ctx)
++{
++    gdb_unsupported(params, user_ctx);
++}
++
++void gdb_handle_v_file_close(GArray *params, void *user_ctx)
++{
++    gdb_unsupported(params, user_ctx);
++}
++
++void gdb_handle_v_file_pread(GArray *params, void *user_ctx)
++{
++    gdb_unsupported(params, user_ctx);
++}
++
++void gdb_handle_v_file_readlink(GArray *params, void *user_ctx)
++{
++    gdb_unsupported(params, user_ctx);
++}
++
++void gdb_handle_query_xfer_exec_file(GArray *params, void *user_ctx)
++{
++    gdb_unsupported(params, user_ctx);
++}
++
++/* linux-user/main.c: guest addresses are host addresses (libtcg reads the code from a buffer) */
++uintptr_t guest_base;
++bool have_guest_base;
++unsigned long reserved_va;
+diff --git a/libtcg/win32/gen-helpers.py b/libtcg/win32/gen-helpers.py
+new file mode 100644
+index 0000000..3185388
+--- /dev/null
++++ b/libtcg/win32/gen-helpers.py
+@@ -0,0 +1,136 @@
++#!/usr/bin/env python3
++#
++# Fathom: libtcg-helpers-<target>.bc for libtcg on Windows.
++#
++# On Linux, the -llvm-helpers targets of QEMU compile the helpers (the C
++# functions the translated code calls: target/i386/tcg/*_helper.c, softfloat...)
++# with clang into an emulator that embeds their bitcode, and
++# python/scripts/link-embedded-objects extracts and links it. That build needs
++# linux-user. Here, the same sources are compiled to bitcode directly, with the
++# options of the Windows libtcg build (compile_commands.json): the structures
++# (CPUX86State, its offset in X86CPU) are then those of libtcg-<target>.dll.
++# linux-user's files are left out (system calls, signals: not used to decompile).
++#
++# SPDX-License-Identifier: GPL-2.0-or-later
++#
++#   gen-helpers.py <build dir> <clang> <llvm-link> <output dir> [target ...]
++import json
++import re
++import os
++import shlex
++import subprocess
++import sys
++
++COMMON = [
++    'accel/tcg/tcg-runtime.c',
++    'accel/tcg/tcg-runtime-gvec.c',
++    'accel/tcg/cpu-exec-common.c',
++    'accel/tcg/user-exec.c',
++    'util/cutils.c',
++    'util/error.c',
++    'util/interval-tree.c',
++    'fpu/softfloat.c',
++    'trace/control.c',
++    'stubs/iothread-lock.c',
++]
++X86 = [
++    'target/i386/tcg/misc_helper.c',
++    'target/i386/tcg/translate.c',
++    'target/i386/tcg/bpt_helper.c',
++    'target/i386/tcg/cc_helper.c',
++    'target/i386/tcg/excp_helper.c',
++    'target/i386/tcg/fpu_helper.c',
++    'target/i386/tcg/int_helper.c',
++    'target/i386/tcg/mem_helper.c',
++    'target/i386/tcg/mpx_helper.c',
++    'target/i386/tcg/seg_helper.c',
++    'target/i386/tcg/user/seg_helper.c',
++    'target/i386/helper.c',
++    # Fathom: what linux-user gives to the helpers (not built on Windows)
++    'libtcg/win32/helpers-win32.c',
++]
++# files of this directory: compiled with the options of a file of the target
++REFERENCE = 'target/i386/helper.c'
++HELPERS = {'x86_64': X86, 'i386': X86}
++
++# options of GCC that clang does not know, or that only matter for the object code
++DROP = {'-fno-pie', '-no-pie', '-pthread', '-MD', '-Winvalid-pch', '-fstack-protector-strong'}
++DROP_PREFIX = ('-W', '-fdiagnostics-color')
++DROP_WITH_VALUE = {'-MQ', '-MF', '-o'}
++
++
++def compile_options(entry, source, output, clang):
++    arguments = entry.get('arguments') or shlex.split(entry['command'], posix=True)
++    result = [clang]
++    skip = False
++    for argument in arguments[1:]:
++        if skip:
++            skip = False
++            continue
++        if argument in DROP_WITH_VALUE:
++            skip = True
++            continue
++        if argument in DROP or argument.startswith(DROP_PREFIX) or argument == '-c':
++            continue
++        if os.path.normpath(os.path.join(entry['directory'], argument)) == os.path.normpath(source):
++            continue
++        result.append(argument)
++    # as the -llvm-helpers targets: GEN_LLVM_HELPERS (revng's sections, no GETPC...)
++    return result + ['-DGEN_LLVM_HELPERS', '-Wno-everything', '-emit-llvm', '-c', source, '-o', output]
++
++
++def main():
++    build, clang, llvm_link, out_dir = (os.path.abspath(a) for a in sys.argv[1:5])
++    targets = sys.argv[5:] or list(HELPERS)
++    entries = json.load(open(os.path.join(build, 'compile_commands.json')))
++    os.makedirs(out_dir, exist_ok=True)
++    status = 0
++    for target in targets:
++        library = f'libqemu-{target}-libtcg'
++        work = os.path.join(build, f'helpers-{target}')
++        os.makedirs(work, exist_ok=True)
++        bitcode = []
++        for relative in COMMON + HELPERS[target]:
++            own_file = relative.startswith('libtcg/win32/')
++            lookup = REFERENCE if own_file else relative
++            # the options of this file in this target's library, else in a common library
++            candidates = [e for e in entries if os.path.normpath(e['file']).replace('\\', '/').endswith('/' + lookup)
++                          or os.path.normpath(os.path.join(e['directory'], e['file'])).replace('\\', '/').endswith('/' + lookup)]
++            own = [e for e in candidates if library in e.get('output', '') or library in e.get('command', '')]
++            entry = (own or candidates or [None])[0]
++            if entry is None:
++                print(f'{target}: no compile options for {relative}', file=sys.stderr)
++                status = 1
++                continue
++            # the source in the options (the reference's, for a file of this directory)
++            listed = os.path.normpath(os.path.join(entry['directory'], entry['file']))
++            source = listed
++            if own_file:
++                source = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', relative))
++            output = os.path.join(work, relative.replace('/', '_') + '.bc')
++            command = compile_options(entry, listed, output, clang)
++            command[command.index('-c') + 1] = source
++            run = subprocess.run(command, cwd=entry['directory'], capture_output=True, text=True)
++            if run.returncode != 0:
++                print(f'{target}: {relative} failed:\n{run.stderr[-3000:]}', file=sys.stderr)
++                status = 1
++                continue
++            bitcode.append(output)
++        if status == 0:
++            result = os.path.join(out_dir, f'libtcg-helpers-{target}.bc')
++            linked = os.path.join(work, 'linked.ll')
++            subprocess.run([llvm_link, '-S', *bitcode, '-o', linked], check=True)
++            # What compiling for Windows adds and rev.ng's passes do not expect (they give bodies to some
++            # declarations): dllimport (glib's functions), and !dbg on declarations (call site information)
++            text = open(linked, encoding='utf-8').read()
++            text = re.sub(r'\bdllimport ', '', text)
++            text = re.sub(r'^declare !dbg ![0-9]+ ', 'declare ', text, flags=re.M)
++            open(linked, 'w', encoding='utf-8', newline='\n').write(text)
++            llvm_as = os.path.join(os.path.dirname(llvm_link), 'llvm-as' + os.path.splitext(llvm_link)[1])
++            subprocess.run([llvm_as, linked, '-o', result], check=True)
++            print(f'{result}: {len(bitcode)} files')
++    return status
++
++
++if __name__ == '__main__':
++    sys.exit(main())
+diff --git a/libtcg/win32/helpers-win32.c b/libtcg/win32/helpers-win32.c
+new file mode 100644
+index 0000000..916fd4d
+--- /dev/null
++++ b/libtcg/win32/helpers-win32.c
+@@ -0,0 +1,130 @@
++/*
++ * Fathom: what linux-user gives to the helpers' bitcode (the -llvm-helpers
++ * targets, GEN_LLVM_HELPERS), for libtcg on Windows, where linux-user is not
++ * built. rev.ng looks these up in libtcg-helpers-<target>.bc:
++ *
++ * - arch_cpu_type_beacon (linux-user/main.c): finds the ArchCPU type in the IR;
++ * - invoke_handle_exception / handle_exception: what the CPU loop does with an
++ *   exception (cpu_loop_exit): the system calls, as in linux-user's x86
++ *   cpu_loop.c under GEN_LLVM_HELPERS, the others end in abort();
++ * - helper_initialize_env: the initial state of the CPU, with the flat segments
++ *   of a user-mode process (their caches loaded directly, as libtcg does on
++ *   Windows: libtcg/win32-user.c).
++ *
++ * do_syscall stays a declaration: the system calls of the analyzed program are
++ * calls to it in the lifted code.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include "qemu/osdep.h"
++#include "qemu/thread.h"
++#include "cpu.h"
++#include "exec/exec-all.h"
++#include "exec/user/abitypes.h"
++
++#if !defined(TARGET_I386)
++#error "helpers-win32.c: x86 targets only"
++#endif
++
++ArchCPU arch_cpu_type_beacon;
++
++abi_long do_syscall(CPUArchState *cpu_env, int num, abi_long arg1,
++                    abi_long arg2, abi_long arg3, abi_long arg4,
++                    abi_long arg5, abi_long arg6, abi_long arg7,
++                    abi_long arg8);
++void handle_exception(CPUArchState *env, int trapnr);
++void invoke_handle_exception(CPUState *cpu);
++void helper_initialize_env(CPUArchState *env);
++
++/* linux-user's errno values for a restarted system call and sigreturn */
++#define WIN32_QEMU_ERESTARTSYS 512
++#define WIN32_QEMU_ESIGRETURN 513
++
++void handle_exception(CPUX86State *env, int trapnr)
++{
++    abi_ulong ret;
++
++    switch (trapnr) {
++    case 0x80:
++#ifndef TARGET_X86_64
++    case EXCP_SYSCALL:
++#endif
++        /* int $0x80 */
++        ret = do_syscall(env, env->regs[R_EAX], env->regs[R_EBX],
++                         env->regs[R_ECX], env->regs[R_EDX], env->regs[R_ESI],
++                         env->regs[R_EDI], env->regs[R_EBP], 0, 0);
++        env->eip = env->exception_next_eip;
++        if (ret == -WIN32_QEMU_ERESTARTSYS) {
++            env->eip -= 2;
++        } else if (ret != -WIN32_QEMU_ESIGRETURN) {
++            env->regs[R_EAX] = ret;
++        }
++        break;
++#ifdef TARGET_X86_64
++    case EXCP_SYSCALL:
++        /* syscall */
++        ret = do_syscall(env, env->regs[R_EAX], env->regs[R_EDI],
++                         env->regs[R_ESI], env->regs[R_EDX], env->regs[10],
++                         env->regs[8], env->regs[9], 0, 0);
++        env->eip = env->exception_next_eip;
++        if (ret == -WIN32_QEMU_ERESTARTSYS) {
++            env->eip -= 2;
++        } else if (ret != -WIN32_QEMU_ESIGRETURN) {
++            env->regs[R_EAX] = ret;
++        }
++        break;
++#endif
++    default:
++        abort();
++    }
++}
++
++void invoke_handle_exception(CPUState *cpu)
++{
++    handle_exception(cpu_env(cpu), cpu->exception_index);
++}
++
++/* The selectors of Linux, as linux-user and libtcg/win32-user.c */
++#ifdef TARGET_X86_64
++#define WIN32_HELPERS_USER_CS 0x33
++#else
++#define WIN32_HELPERS_USER_CS 0x23
++#endif
++#define WIN32_HELPERS_USER_DS 0x2b
++
++void helper_initialize_env(CPUX86State *env)
++{
++    uint32_t flat = 0x000f0000 | DESC_G_MASK | DESC_B_MASK | DESC_P_MASK
++                    | DESC_S_MASK | DESC_A_MASK | (3 << DESC_DPL_SHIFT);
++    uint32_t data = flat | (0x2 << DESC_TYPE_SHIFT);
++    uint32_t code = flat | (0xa << DESC_TYPE_SHIFT);
++
++    CC_SRC = env->eflags & (CC_O | CC_S | CC_Z | CC_A | CC_P | CC_C);
++    env->df = 1 - (2 * ((env->eflags >> 10) & 1));
++    CC_OP = CC_OP_EFLAGS;
++    env->eflags &= ~(DF_MASK | CC_O | CC_S | CC_Z | CC_A | CC_P | CC_C);
++
++#ifdef TARGET_X86_64
++    code |= DESC_L_MASK;
++    cpu_x86_load_seg_cache(env, R_CS, WIN32_HELPERS_USER_CS, 0, 0xffffffff,
++                           code);
++    cpu_x86_load_seg_cache(env, R_SS, WIN32_HELPERS_USER_DS, 0, 0xffffffff,
++                           data);
++    cpu_x86_load_seg_cache(env, R_DS, 0, 0, 0, 0);
++    cpu_x86_load_seg_cache(env, R_ES, 0, 0, 0, 0);
++    cpu_x86_load_seg_cache(env, R_FS, 0, 0, 0, 0);
++    cpu_x86_load_seg_cache(env, R_GS, 0, 0, 0, 0);
++#else
++    cpu_x86_load_seg_cache(env, R_CS, WIN32_HELPERS_USER_CS, 0, 0xffffffff,
++                           code);
++    cpu_x86_load_seg_cache(env, R_SS, WIN32_HELPERS_USER_DS, 0, 0xffffffff,
++                           data);
++    cpu_x86_load_seg_cache(env, R_DS, WIN32_HELPERS_USER_DS, 0, 0xffffffff,
++                           data);
++    cpu_x86_load_seg_cache(env, R_ES, WIN32_HELPERS_USER_DS, 0, 0xffffffff,
++                           data);
++    cpu_x86_load_seg_cache(env, R_FS, 0, 0, 0xffffffff, data);
++    cpu_x86_load_seg_cache(env, R_GS, WIN32_HELPERS_USER_DS, 0, 0xffffffff,
++                           data);
++#endif
++}
+diff --git a/libtcg/win32/qemu.h b/libtcg/win32/qemu.h
+new file mode 100644
+index 0000000..79259cf
+--- /dev/null
++++ b/libtcg/win32/qemu.h
+@@ -0,0 +1,28 @@
++/*
++ * Fathom: libtcg on Windows, without linux-user. What the user-mode code of
++ * QEMU (accel/tcg, cpu-target.c) includes from linux-user's qemu.h.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#ifndef LIBTCG_WIN32_QEMU_H
++#define LIBTCG_WIN32_QEMU_H
++
++#include "cpu.h"
++#include "exec/cpu_ldst.h"
++
++/* cpu_memory_rw_debug (cpu-target.c): guest memory is host memory */
++#define VERIFY_READ  PAGE_READ
++#define VERIFY_WRITE (PAGE_READ | PAGE_WRITE)
++
++static inline void *lock_user(int type, abi_ulong guest_addr, ssize_t len,
++                              bool copy)
++{
++    return g2h_untagged(guest_addr);
++}
++
++static inline void unlock_user(void *host_ptr, abi_ulong guest_addr,
++                               ssize_t len)
++{
++}
++
++#endif
+diff --git a/libtcg/win32/test-libtcg.c b/libtcg/win32/test-libtcg.c
+new file mode 100644
+index 0000000..85d57b9
+--- /dev/null
++++ b/libtcg/win32/test-libtcg.c
+@@ -0,0 +1,123 @@
++/*
++ * Fathom: test of libtcg on Windows. Loads libtcg-<target>.dll as rev.ng does
++ * (dlopen, then libtcg_load), translates a few x86 instructions to TCG and
++ * checks what rev.ng relies on: the CPU state offsets (env_offset, xmm0 / st0
++ * at the offsets of lib/Model/Register.cpp plus the Windows delta 0x30), the
++ * globals (registers) and the translated operations.
++ *
++ *   test-libtcg <libtcg-x86_64.dll | libtcg-i386.dll>
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++#include <windows.h>
++
++#include "libtcg/libtcg.h"
++
++static int failures;
++
++static void check(const char *what, bool ok)
++{
++    printf("%s %s\n", ok ? "ok  " : "FAIL", what);
++    if (!ok) {
++        failures++;
++    }
++}
++
++static intptr_t global_offset(LibTcgArchInfo *info, const char *name)
++{
++    for (int i = 0; i < info->num_globals; i++) {
++        if (info->globals[i].name && strcmp(info->globals[i].name, name) == 0) {
++            return info->globals[i].offset;
++        }
++    }
++    return -1;
++}
++
++int main(int argc, char **argv)
++{
++    if (argc < 2) {
++        fprintf(stderr, "usage: test-libtcg <libtcg dll>\n");
++        return 2;
++    }
++    bool x86_64 = strstr(argv[1], "x86_64") != NULL;
++    HMODULE dll = LoadLibraryExA(argv[1], NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
++    check("the DLL loads", dll != NULL);
++    if (!dll) {
++        fprintf(stderr, "LoadLibrary: error %lu\n", GetLastError());
++        return 1;
++    }
++    LIBTCG_FUNC_TYPE(libtcg_load) *load =
++        (LIBTCG_FUNC_TYPE(libtcg_load) *) GetProcAddress(dll, "libtcg_load");
++    check("libtcg_load exported", load != NULL);
++    if (!load) {
++        return 1;
++    }
++    LibTcgInterface tcg = load();
++    LibTcgContext *context = tcg.context_create();
++    check("context created", context != NULL);
++    LibTcgArchInfo info = tcg.get_arch_info();
++    printf("     %s: %u globals, env_offset 0x%llx, pc 0x%llx, sp 0x%llx\n",
++           info.arch_cpu_name ? info.arch_cpu_name : "?", info.num_globals,
++           (unsigned long long) info.env_offset, (unsigned long long) info.pc,
++           (unsigned long long) info.sp);
++
++    /* the offsets rev.ng hardcodes (lib/Model/Register.cpp), plus 0x30 on Windows */
++    const char *ax = x86_64 ? "rax" : "eax";
++    check("the accumulator is a global", global_offset(&info, ax) >= 0);
++    check("pc and sp known", info.pc != 0 && info.sp != 0);
++
++    /* mov rax, rbx; add rax, 1; movaps xmm0, xmm1; ret (i386: the 32-bit forms) */
++    static const unsigned char code64[] = { 0x48, 0x89, 0xd8, 0x48, 0x83, 0xc0, 0x01,
++                                            0x0f, 0x28, 0xc1, 0xc3 };
++    static const unsigned char code32[] = { 0x89, 0xd8, 0x83, 0xc0, 0x01, 0x0f, 0x28, 0xc1, 0xc3 };
++    const unsigned char *code = x86_64 ? code64 : code32;
++    size_t size = x86_64 ? sizeof(code64) : sizeof(code32);
++    LibTcgTranslationBlock block = tcg.translate_block(context, code, size, 0x401000, 0);
++    printf("     %zu TCG instructions for %zu bytes (%zu translated)\n", block.instruction_count, size,
++           block.size_in_bytes);
++    check("the block is translated", block.instruction_count > 5 && block.size_in_bytes == size);
++
++    bool add = false, call = false, exit = false, xmm = false;
++    /* xmm0 in CPUX86State: 0x2b10 + 0x30 - env_offset (x86_64), as the static assertions of cpu.h */
++    const uint64_t xmm0 = 0x2b10 + 0x30 - info.env_offset;
++    char text[256];
++    for (size_t i = 0; i < block.instruction_count; i++) {
++        LibTcgInstruction *insn = &block.list[i];
++        tcg.dump_instruction_to_buffer(insn, text, sizeof(text));
++        if (i < 40) {
++            printf("       %s\n", text);
++        }
++        const char *name = tcg.get_instruction_name(insn->opcode);
++        if (strncmp(name, "add_i", 5) == 0) {
++            add = true;
++        }
++        if (insn->opcode == LIBTCG_op_call) {
++            call = true;
++        }
++        if (strcmp(name, "exit_tb") == 0 || strcmp(name, "goto_ptr") == 0 || strcmp(name, "goto_tb") == 0) {
++            exit = true;
++        }
++        /* movaps: a copy within env, from xmm1 to xmm0 (offsets as constants) */
++        for (int c = 0; c < insn->nb_cargs; c++) {
++            if (insn->constant_args[c].kind == LIBTCG_ARG_CONSTANT && insn->constant_args[c].constant == xmm0) {
++                xmm = true;
++            }
++        }
++        if (strstr(text, "xmm_regs") || strstr(text, "xmm0")) {
++            xmm = true;
++        }
++    }
++    check("add translated", add);
++    check("ret ends the block", exit || call);
++    if (x86_64) {
++        check("movaps writes xmm0 at the offset rev.ng expects (0x2b40 from the CPU)", xmm);
++    }
++    tcg.translation_block_destroy(context, block);
++    tcg.context_destroy(context);
++    printf("%s: %d failure(s)\n", argv[1], failures);
++    return failures ? 1 : 0;
++}
+diff --git a/meson.build b/meson.build
+index b602008..a0a7e60 100644
+--- a/meson.build
++++ b/meson.build
+@@ -74,7 +74,8 @@ foreach target : target_dirs
+   have_system = have_system or target.endswith('-softmmu')
+ endforeach
+ have_emulator = have_linux_user or have_bsd_user or have_system
+-have_linux_user = have_linux_user or have_libtcg or have_llvm_helpers
++# Fathom: on Windows, libtcg is built without linux-user
++have_linux_user = have_linux_user or ((have_libtcg or have_llvm_helpers) and targetos == 'linux')
+ have_user = have_linux_user or have_bsd_user or have_libtcg or have_llvm_helpers
+ have_tools = get_option('tools') \
+   .disable_auto_if(not have_system) \
+@@ -2915,7 +2916,12 @@ actual_target_dirs = []
+ fdt_required = []
+ foreach target : target_dirs
+   config_target = { 'TARGET_NAME': target.split('-')[0] }
+-  if target.endswith('linux-user') or target.endswith('-libtcg') or target.endswith('-llvm-helpers')
++  if targetos == 'windows' and target.endswith('-libtcg')
++    # Fathom: libtcg on Windows: the translators of QEMU (TCG front ends) without linux-user, whose
++    # emulation of Linux system calls libtcg does not use (libtcg/win32-user.c provides what it needs)
++    config_target += { 'CONFIG_LIBTCG': 'y', 'CONFIG_LIBTCG_WIN32': 'y' }
++    assert(not get_option('plugins'))
++  elif target.endswith('linux-user') or target.endswith('-libtcg') or target.endswith('-llvm-helpers')
+     if targetos != 'linux'
+       if default_targets
+         continue
+@@ -3820,10 +3826,15 @@ foreach target : target_dirs
+       dir = base_dir / abi
+       arch_srcs += files(dir / 'signal.c', dir / 'target_arch_cpu.c')
+     endif
+-    target_inc += include_directories(
+-      base_dir,
+-      base_dir / abi,
+-    )
++    if 'CONFIG_LIBTCG_WIN32' in config_target
++      # Fathom: what libtcg needs of linux-user's headers
++      target_inc += include_directories('libtcg/win32')
++    else
++      target_inc += include_directories(
++        base_dir,
++        base_dir / abi,
++      )
++    endif
+     if 'CONFIG_LINUX_USER' in config_target
+       dir = base_dir / abi
+       arch_srcs += files(dir / 'signal.c', dir / 'cpu_loop.c')
+@@ -3858,6 +3869,9 @@ foreach target : target_dirs
+ 
+   if target.endswith('-libtcg')
+     arch_srcs += libtcg_sources
++    if targetos == 'windows'
++      arch_srcs += libtcg_win32_sources
++    endif
+   endif
+ 
+   lib = static_library('qemu-' + target,
+diff --git a/scripts/symlink-install-tree.py b/scripts/symlink-install-tree.py
+index 8ed97e3..c8248fd 100644
+--- a/scripts/symlink-install-tree.py
++++ b/scripts/symlink-install-tree.py
+@@ -29,7 +29,7 @@ def destdir_join(d1: str, d2: str) -> str:
+     except BaseException as e:
+         if not isinstance(e, OSError) or e.errno != errno.EEXIST:
+             if os.name == 'nt':
+-                print('Please enable Developer Mode to support soft link '
+-                      'without Administrator permission')
++                # Fathom: qemu-bundle only serves to run from the build tree
++                continue
+             print(f'error making symbolic link {dest}', file=sys.stderr)
+             raise e
+diff --git a/target/i386/cpu.h b/target/i386/cpu.h
+index f2e5757..c9c0add 100644
+--- a/target/i386/cpu.h
++++ b/target/i386/cpu.h
+@@ -2038,17 +2038,31 @@ struct ArchCPU {
+     bool xen_vapic;
+ };
+ 
++#if defined(FATHOM_LAYOUT_PROBE)
++/* Fathom: probe of the layout, without the checks */
++#else
++/*
++ * rev.ng relies on these offsets (lib/Model/Register.cpp). Fathom, libtcg on
++ * Windows: CPUState is 0x30 bytes larger there (jmp_buf, the thread handle...),
++ * and rev.ng built for Windows adds the same delta.
++ */
++#ifdef CONFIG_LIBTCG_WIN32
++#define LIBTCG_CPUSTATE_DELTA 0x30
++#else
++#define LIBTCG_CPUSTATE_DELTA 0
++#endif
+ #ifdef TARGET_X86_64
+-_Static_assert(offsetof(ArchCPU, env) + offsetof(CPUX86State, xmm_regs[0]) == 0x2b10, "");
+-_Static_assert(offsetof(ArchCPU, env) + offsetof(CPUX86State, xmm_regs[1]) == 0x2b50, "");
+-_Static_assert(offsetof(ArchCPU, env) + offsetof(CPUX86State, xmm_regs[2]) == 0x2b90, "");
+-_Static_assert(offsetof(ArchCPU, env) + offsetof(CPUX86State, xmm_regs[3]) == 0x2bd0, "");
+-_Static_assert(offsetof(ArchCPU, env) + offsetof(CPUX86State, xmm_regs[4]) == 0x2c10, "");
+-_Static_assert(offsetof(ArchCPU, env) + offsetof(CPUX86State, xmm_regs[5]) == 0x2c50, "");
+-_Static_assert(offsetof(ArchCPU, env) + offsetof(CPUX86State, xmm_regs[6]) == 0x2c90, "");
+-_Static_assert(offsetof(ArchCPU, env) + offsetof(CPUX86State, xmm_regs[7]) == 0x2cd0, "");
++_Static_assert(offsetof(ArchCPU, env) + offsetof(CPUX86State, xmm_regs[0]) == 0x2b10 + LIBTCG_CPUSTATE_DELTA, "");
++_Static_assert(offsetof(ArchCPU, env) + offsetof(CPUX86State, xmm_regs[1]) == 0x2b50 + LIBTCG_CPUSTATE_DELTA, "");
++_Static_assert(offsetof(ArchCPU, env) + offsetof(CPUX86State, xmm_regs[2]) == 0x2b90 + LIBTCG_CPUSTATE_DELTA, "");
++_Static_assert(offsetof(ArchCPU, env) + offsetof(CPUX86State, xmm_regs[3]) == 0x2bd0 + LIBTCG_CPUSTATE_DELTA, "");
++_Static_assert(offsetof(ArchCPU, env) + offsetof(CPUX86State, xmm_regs[4]) == 0x2c10 + LIBTCG_CPUSTATE_DELTA, "");
++_Static_assert(offsetof(ArchCPU, env) + offsetof(CPUX86State, xmm_regs[5]) == 0x2c50 + LIBTCG_CPUSTATE_DELTA, "");
++_Static_assert(offsetof(ArchCPU, env) + offsetof(CPUX86State, xmm_regs[6]) == 0x2c90 + LIBTCG_CPUSTATE_DELTA, "");
++_Static_assert(offsetof(ArchCPU, env) + offsetof(CPUX86State, xmm_regs[7]) == 0x2cd0 + LIBTCG_CPUSTATE_DELTA, "");
+ #else
+-_Static_assert(offsetof(ArchCPU, env) + offsetof(CPUX86State, fpregs[0]) == 0x2960, "");
++_Static_assert(offsetof(ArchCPU, env) + offsetof(CPUX86State, fpregs[0]) == 0x2960 + LIBTCG_CPUSTATE_DELTA, "");
++#endif
+ #endif
+ 
+ typedef struct X86CPUModel X86CPUModel;
+diff --git a/util/meson.build b/util/meson.build
+index c2322ef..fb5914d 100644
+--- a/util/meson.build
++++ b/util/meson.build
+@@ -65,7 +65,9 @@ util_ss.add(files('interval-tree.c'))
+ util_ss.add(files('lockcnt.c'))
+ 
+ if have_user
+-  util_ss.add(files('selfmap.c'))
++  if targetos != 'windows'  # Fathom: /proc/self/maps, for linux-user only
++    util_ss.add(files('selfmap.c'))
++  endif
+ endif
+ 
+ if have_system

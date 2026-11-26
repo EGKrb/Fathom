@@ -1,0 +1,241 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+import asyncio
+import sys
+from pathlib import Path
+
+import click
+
+from revng.pypeline.cli.backend import BackendFactory, BackendFeature, backend_factory_for
+from revng.pypeline.cli.common_options import add_pipeline_config_options
+from revng.pypeline.cli.common_options import container_format_options, debug_option, full_help
+from revng.pypeline.cli.common_options import list_objects_option, project_id_option, token_option
+from revng.pypeline.cli.context import ClickContext, pass_context
+from revng.pypeline.cli.utils import build_help_text, detect_autocomplete, normalize_whitespace
+from revng.pypeline.cli.utils import not_none
+from revng.pypeline.cli.wrappers import WrappablePypeCommand, exec_wrapper_if_needed
+from revng.pypeline.container import ContainerFormat
+from revng.pypeline.model import ReadOnlyModel
+from revng.pypeline.object import ObjectSet
+from revng.pypeline.pipeline import Artifact, Pipeline
+from revng.pypeline.pipeline_node import PipelineConfiguration
+from revng.pypeline.runner_context import RunnerContext
+from revng.pypeline.storage.storage_provider import LockType
+from revng.pypeline.utils.logger import pypeline_logger
+
+
+class ArtifactGroup(click.Group):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def list_commands(self, ctx: ClickContext):  # type: ignore
+        base = super().list_commands(ctx)
+        pipeline = ctx.obj.pipeline
+        if ctx.obj.show_hidden or detect_autocomplete(ctx):
+            return base + sorted(pipeline.artifacts.keys())
+        else:
+            result = [*base]
+            for artifact_name, artifact in pipeline.artifacts.items():
+                if artifact.category.show_by_default:
+                    result.append(artifact_name)
+            return sorted(result)
+
+    def get_command(self, ctx, cmd_name):  # type: ignore
+        pipeline = ctx.obj.pipeline
+        if cmd_name not in pipeline.artifacts:
+            return super().get_command(ctx, cmd_name)
+        return self._build_artifact_command(
+            artifact_name=cmd_name,
+            pipeline=pipeline,
+        )
+
+    def _build_artifact_command(self, artifact_name: str, pipeline: Pipeline):
+        """Dynamically create a command for getting an artifact."""
+        artifact: Artifact = pipeline.artifacts[artifact_name]
+
+        if artifact.description is not None:
+            help_text = click.wrap_text(f"\n{normalize_whitespace(artifact.description)}")
+        else:
+            help_text = f"Get the artifact: {artifact_name}"
+
+        help_text = build_help_text(
+            prologue=help_text,
+            args=[],
+            extra_args=["OBJECTS: Comma-separated list of object IDs to produce (default: all)"],
+            model_help=False,
+        )
+
+        # Build the actual function that will be the command
+        run_artifact_command = build_artifact_command(
+            artifact=artifact,
+            help_text=help_text,
+            pipeline=pipeline,
+        )
+
+        # Add the `objects` argument to the command to specify the objects to produce
+        run_artifact_command = click.argument(
+            "objects",
+            type=str,
+            default=None,
+            required=False,
+        )(run_artifact_command)
+
+        return run_artifact_command
+
+
+def build_artifact_command(
+    artifact: Artifact,
+    help_text: str,
+    pipeline: Pipeline,
+):
+    artifact_name: str = artifact.name
+
+    async def async_part_of_command(
+        backend_factory: BackendFactory,
+        project_id: str,
+        token: str,
+        objects: str | None,
+        configuration: PipelineConfiguration,
+        result_path: Path | None,
+        container_format: ContainerFormat,
+        runner_context: RunnerContext,
+        kwargs,
+    ):
+        """Since the backend session is an async context manager, the code that
+        uses it has to be an async function.
+        """
+        async with backend_factory.session(
+            lock_type=LockType.ARTIFACT,
+            project_id=project_id,
+            token=token,
+            runner_context=runner_context,
+        ) as session:
+            loaded_model = ReadOnlyModel(session.get_model(configuration)[0])
+            pypeline_logger.debug_log(f'Model loaded: "{loaded_model}"')
+
+            artifact_kind = artifact.container.container_type.kind
+            if kwargs["list"]:
+                # If the user requested to list the available objects, we print them
+                # and exit
+                print(f'Available objects for kind: "{artifact_kind.serialize()}"')
+                for object_id in loaded_model.all_objects(artifact_kind):
+                    aliases = loaded_model.aliases(object_id)
+                    if aliases:
+                        print(f" - {object_id} ({', '.join(aliases)})")
+                    else:
+                        print(f" - {object_id}")
+                return
+
+            # Compute the requests for the incoming containers of the
+            # analysis
+            incoming: ObjectSet
+
+            if objects is None:
+                incoming = loaded_model.all_objects(artifact_kind)
+            else:
+                incoming = ObjectSet(
+                    kind=artifact_kind,
+                    objects={
+                        not_none(
+                            loaded_model.resolve_alias(artifact_kind, specification),
+                            ValueError(
+                                f'Unknown object or alias "{specification}" '
+                                f'for kind "{artifact_kind.serialize()}"'
+                            ),
+                        )
+                        for specification in objects.split(",")
+                        if specification.strip() != ""
+                    },
+                )
+
+            # Finally, produce the artifact
+            res_container = session.get_artifact(loaded_model, artifact, incoming, configuration)
+            pypeline_logger.debug_log("Artifact computed")
+
+            if result_path is not None:
+                pypeline_logger.debug_log(f'Writing result to: "{result_path}"')
+                res_container.to_file(result_path, container_format=container_format)
+            else:
+                # Write to stdout the bytes of the container
+                sys.stdout.buffer.write(res_container.to_bytes(container_format=container_format))
+                sys.stdout.buffer.flush()
+
+    @click.command(
+        cls=WrappablePypeCommand,
+        name=artifact_name,
+        help=help_text,
+        context_settings={
+            "show_default": True,
+        },
+    )
+    @list_objects_option
+    @project_id_option
+    @token_option
+    @click.option(
+        "-o",
+        "result_path",
+        type=click.Path(dir_okay=False, writable=True),
+        help=(
+            "Path to write the computed artifacts to, if not specified, the "
+            "result will be printed to stdout. "
+            "The default output format is 'auto' (see --format)."
+        ),
+    )
+    @debug_option
+    @container_format_options(ContainerFormat.AUTO)
+    @add_pipeline_config_options(pipeline, artifact.node)
+    @exec_wrapper_if_needed
+    @pass_context
+    def run_artifact_command(
+        ctx: ClickContext,
+        project_id: str,
+        token: str,
+        objects: str | None,
+        result_path: Path | None,
+        container_format: ContainerFormat,
+        runner_context: RunnerContext,
+        **kwargs,
+    ) -> None:
+        pypeline_logger.debug_log(f'Running artifact: "{artifact_name}"')
+        pypeline_logger.debug_log(f'container_format: "{container_format}"')
+        pypeline_logger.debug_log(f'kwargs: "{kwargs}"')
+
+        # Setup the backend factory (local compute or a remote daemon, per the
+        # backend URL)
+        backend_factory = backend_factory_for(
+            ctx.obj.storage_provider_url,
+            pipeline=ctx.obj.pipeline,
+            base_directory=ctx.obj.base_directory,
+            cache_dir=ctx.obj.cache_dir,
+        )
+        if runner_context.use_system and BackendFeature.DEBUG not in backend_factory.features:
+            raise click.UsageError(
+                "--debug is not supported by the selected backend: pipes and "
+                "analyses do not run locally, so there is nothing to inspect."
+            )
+        # Switch to the async portion
+        asyncio.run(
+            async_part_of_command(
+                backend_factory=backend_factory,
+                project_id=project_id,
+                token=token,
+                objects=objects,
+                configuration=ctx.obj.configuration,
+                result_path=result_path,
+                container_format=container_format,
+                runner_context=runner_context,
+                kwargs=kwargs,
+            )
+        )
+
+    return run_artifact_command
+
+
+@click.group(
+    cls=ArtifactGroup,
+    help="Compute an Artifact",
+)
+@full_help
+def artifact() -> None:
+    pass

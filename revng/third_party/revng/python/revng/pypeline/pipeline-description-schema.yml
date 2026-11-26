@@ -1,0 +1,268 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+$schema: http://json-schema.org/draft-07/schema#
+title: PipelineDescription
+type: object
+required:
+  - version
+  - model
+  - kinds
+  - container_types
+  - containers
+  - root_node_id
+  - nodes
+  - artifacts
+  - analyses
+  - analyses_lists
+properties:
+  version:
+    type: string
+    description: The version of the pipeline
+  model:
+    type: object
+    description: Metadata about the type of the model
+    required:
+      - identifier
+      - name
+      - mime_type
+      - is_text
+    properties:
+      identifier:
+        type: string
+        description: >
+          An identifier unique to the model class used by the pipeline
+      name:
+        type: string
+        description: The expected name of the model file
+      mime_type:
+        type: string
+        description: The MIME type of the model
+      is_text:
+        type: boolean
+        description: Whether the model holds text content
+  kinds:
+    type: array
+    description: List of object kinds in the pipeline
+    items:
+      type: object
+      required:
+        - name
+        - parent
+      properties:
+        name:
+          type: string
+          description: The name of the kind
+        parent:
+          type:
+            - string
+            - "null"
+          description: >
+            The name of the parent kind, or null if this is a root kind
+  container_types:
+    type: array
+    description: List of container types available in the pipeline
+    items:
+      type: object
+      required:
+        - class
+        - mime_type
+        - is_text
+        - kind
+        - compression
+      properties:
+        class:
+          type: string
+          description: The class name of the container
+        mime_type:
+          type: string
+          description: The MIME type of the container's content
+        is_text:
+          type: boolean
+          description: Whether the container holds text content
+        kind:
+          type: string
+          description: The kind of objects this container holds
+        compression:
+          type: string
+          description: The compression used by this container
+  containers:
+    type: object
+    description: Mapping of container names to their type
+    patternProperties:
+      "^.*$":
+        type: string
+  root_node_id:
+    type: integer
+    description: The ID of the root node in the pipeline
+  nodes:
+    type: array
+    description: List of all nodes in the pipeline
+    items:
+      type: object
+      required:
+        - id
+        - type
+        - class
+        - arguments
+        - successors
+        - predecessors
+        - savepoint_range
+      properties:
+        id:
+          type: integer
+          description: The unique identifier of the node
+        type:
+          type: string
+          enum:
+            - pipe
+            - savepoint
+          description: The type of the node
+        class:
+          type: string
+          description: The class name of the node
+        arguments:
+          type: array
+          items:
+            type: string
+          description: List of container names this node operates on
+        successors:
+          type: array
+          items:
+            type: integer
+          description: List of node IDs that follow this node
+        predecessors:
+          type: array
+          items:
+            type: integer
+          description: List of node IDs that precede this node
+        savepoint_range:
+          type: object
+          required:
+            - start
+            - end
+          properties:
+            start:
+              type: integer
+              description: The starting savepoint ID
+            end:
+              type: integer
+              description: The ending savepoint ID
+          description: The range of savepoints this node spans
+  artifacts:
+    type: array
+    description: List of artifacts that can be produced by the pipeline
+    items:
+      type: object
+      required:
+        - name
+        - savepoint_id
+        - container
+        - category
+        - pipe_dependencies
+        - defined_locations
+        - preferred_artifacts
+      properties:
+        name:
+          type: string
+          description: The name of the artifact
+        savepoint_id:
+          type: integer
+          description: The node_id that the artifact is associated to
+        container:
+          type: string
+          description: The name of the container instance
+        pipe_dependencies:
+          type: array
+          description: >
+            List of pipes (starting from the root node) that this artifact
+            depends on. This is required to compute, given a global
+            configuration, which keys effect the artifact.
+          items:
+            type: string
+        category:
+          type: object
+          required:
+            - name
+            - show_by_default
+          properties:
+            name:
+              type: string
+              description: The name of the category
+            show_by_default:
+              type: boolean
+              description: >
+                Setting this to true will show the artifacts of this category
+                by default
+        filename:
+          type: string
+          description: The filename to use when representing this artifact
+        defined_locations:
+          type: array
+          description: PTML locations that are present in this artifact
+          items:
+            type: string
+        preferred_artifacts:
+          type: array
+          description: >
+            Other artifacts where it's preferred to look for definitions of
+            locations referenced in this one
+          items:
+            type: string
+  analyses:
+    type: array
+    description: List of analyses available in the pipeline
+    items:
+      type: object
+      required:
+        - name
+        - bindings
+        - node
+        - is_available
+      properties:
+        name:
+          type: string
+          description: The name of the analysis
+        is_available:
+          type: boolean
+          description: if the analysis can be currently run
+        bindings:
+          type: array
+          items:
+            type: object
+            required:
+              - name
+              - container_type
+            properties:
+              name:
+                type: string
+                description: The name of the bound container
+              container_type:
+                type: string
+                description: The class name of the container type
+          description: List of container bindings for this analysis
+        node:
+          type: integer
+          description: The ID of the node this analysis is bound to
+  analyses_lists:
+    type: array
+    description: List of named groups of analyses
+    items:
+      type: object
+      required:
+        - name
+        - analyses
+        - description
+      properties:
+        name:
+          type: string
+          description: The name of the analysis list
+        analyses:
+          type: array
+          items:
+            type: string
+          description: List of analysis names in this group
+        description:
+          type: ["string", "null"]
+          description: A description of the analysis list

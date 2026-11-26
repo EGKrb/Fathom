@@ -1,0 +1,16 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+commands:
+  #
+  # Run simplify-switch and test against ground truth
+  #
+  - type: revng.test-simplify-switch
+    from:
+      - type: revng-qa.compiled-with-debug-info
+        filter: for-simplify-switch
+    command: |-
+      revng quick artifact simplify-switch "$INPUT" --tar -- --abi-enforcement-level=no |
+        revng merge llvm |
+        FileCheck "${SOURCE}.filecheck";

@@ -1,0 +1,82 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+extra_columns:
+  - name: text_size
+    label: .text size
+    type: int
+    renderer: filesize
+    align: right
+  - name: text_speed
+    label: .text/s
+    type: float
+    generator: text_size / elapsed_time
+    renderer: filesize
+    align: right
+
+ordering:
+  - name: text_size
+    dir: asc
+
+crash_components_filters:
+  - category: OOM
+    type: percentile
+    variable: text_size
+    value: 10
+    suffix: 10th_percentile_on_text_size
+    label: 10th percentile on .text
+  - category: OOM
+    type: percentile
+    variable: text_size
+    value: 50
+    suffix: 50th_percentile_on_text_size
+    label: 50th percentile on .text
+  - category: TIMED_OUT
+    type: percentile
+    variable: text_size
+    value: 10
+    suffix: 10th_percentile_on_text_size
+    label: 10th percentile on .text
+  - category: TIMED_OUT
+    type: percentile
+    variable: text_size
+    value: 50
+    suffix: 50th_percentile_on_text_size
+    label: 50th percentile on .text
+
+hooks:
+  pre: |
+    REVNG_TEST_PATH=$(command -v revng-test)
+    TEMP_DIR=$(mktemp -d)
+    ln -s "$REVNG_TEST_PATH" "$TEMP_DIR/revng"
+    export PATH="$TEMP_DIR:$PATH"
+  post: |
+    rm -rf "$TEMP_DIR"
+    if [[ "$RC" -eq 0 && ! -f "$TEST_OUTPUT_DIR/stacktrace.json" ]]; then
+      rm "$TEST_OUTPUT_DIR/trace.json.gz"
+    fi
+
+stacktrace_aggregation:
+  exclude_paths:
+    - /llvm/include/
+    - /llvm/lib/
+    - /clang-release/include/
+    - /PipeboxCommon/
+  exclude_libs:
+    - ADT.*
+    - Pipeline.*
+    - Support.*
+    - TupleTree.*
+    - Model
+    - Pipes
+
+flamegraph_exclude_paths:
+  - libpython[^/]*\.so[^/]*
+  - lib/python[^/]*/lib-dynload
+
+highlights:
+  - query: WHERE status = 'TIMED_OUT' ORDER BY text_size ASC
+    description: "Smallest timed-out binary"
+  - query: WHERE status = 'OOM' ORDER BY text_size ASC
+    description: "Smallest out-of-memory binary"

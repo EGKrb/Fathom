@@ -1,0 +1,127 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+commands:
+  #
+  # Run revng's initial autoanalysis
+  #
+  - type: revng.analyzed-model
+    from:
+      - type: revng-qa.compiled
+        filter: one-per-architecture
+    suffix: /
+    command: revng -C "$OUTPUT" project init --overwrite "$INPUT"
+
+  #
+  # Perform lifting
+  #
+  - type: revng.lifted
+    from:
+      - type: revng.analyzed-model
+    suffix: /
+    command: |-
+      cp -Tar "$INPUT" "$OUTPUT";
+      revng -C "$OUTPUT" project artifact lift -o /dev/null;
+
+  #
+  # Produce enforce-abi artifact from revng.lifted
+  #
+  - type: revng.enforce-abi
+    from:
+      - type: revng.lifted
+    suffix: /
+    command: |-
+      cp -Tar "$INPUT" "$OUTPUT";
+      revng -C "$OUTPUT" project artifact enforce-abi -o /dev/null;
+
+  #
+  # Produce hexdump artifact from revng.lifted
+  #
+  - type: revng.hexdump
+    from:
+      - type: revng.lifted
+    suffix: /
+    command: |-
+      cp -Tar "$INPUT" "$OUTPUT";
+      revng -C "$OUTPUT" project artifact hexdump -o /dev/null;
+
+  #
+  # Produce render-svg-call-graph artifact from revng.lifted
+  #
+  - type: revng.render-svg-call-graph
+    from:
+      - type: revng.lifted
+    suffix: /
+    command: |-
+      cp -Tar "$INPUT" "$OUTPUT";
+      revng -C "$OUTPUT" project artifact render-svg-call-graph -o /dev/null;
+
+  #
+  # Produce render-svg-call-graph-slice artifact from revng.lifted
+  #
+  - type: revng.render-svg-call-graph-slice
+    from:
+      - type: revng.lifted
+    suffix: /
+    command: |-
+      cp -Tar "$INPUT" "$OUTPUT";
+      revng -C "$OUTPUT" project artifact render-svg-call-graph-slice -o /dev/null;
+
+  #
+  # Produce disassemble artifact from revng.lifted
+  #
+  - type: revng.disassemble
+    from:
+      - type: revng.lifted
+    suffix: /
+    command: |-
+      cp -Tar "$INPUT" "$OUTPUT";
+      revng -C "$OUTPUT" project artifact disassemble -o /dev/null;
+
+  #
+  # Produce render-svg-cfg artifact from revng.lifted
+  #
+  - type: revng.render-svg-cfg
+    from:
+      - type: revng.lifted
+    suffix: /
+    command: |-
+      cp -Tar "$INPUT" "$OUTPUT";
+      revng -C "$OUTPUT" project artifact render-svg-cfg -o /dev/null;
+
+  #
+  # Produce a tarball of decompile files from revng.analyzed-model
+  # Also compare the members of the produced tar file and the input model,
+  # both should contain the same members (except the extension).
+  #
+  - type: revng.decompiled-c-tar
+    from:
+      - type: revng.lifted
+    suffix: /
+    command: |-
+      cp -Tar "$INPUT" "$OUTPUT";
+      revng -C "$OUTPUT" project artifact emit-c > "$OUTPUT/decompiled.tar.gz";
+
+      diff -u <(yq -r '.Functions[].Entry | "/function/" + .' "$OUTPUT/revng.yml" | sort)
+              <(yq -r '. | keys | .[]' "$OUTPUT/decompiled.tar.gz" | sort);
+
+  #
+  # Produce the emit-c artifact and check the resulting C code
+  #
+  - type: revng.emit-and-check-c
+    from:
+      - type: revng.lifted
+    suffix: /
+    command: |-
+      cp -Tar "$INPUT" "$OUTPUT";
+      revng -C "$OUTPUT" project artifact emit-recompilable-archive > "$OUTPUT/recompilable-archive.tar.gz";
+
+      mkdir -p "$OUTPUT";
+      tar -xzf "$OUTPUT/recompilable-archive.tar.gz" -C "$OUTPUT";
+
+      if [[ "$POINTER_SIZE" -ne 64 ]] && grep -wq pointer64_t "$OUTPUT/decompiled/functions.c"; then echo "pointer64_t found in $POINTER_SIZE bit decompiled functions.c"; exit 1; fi;
+
+      revng check-decompiled-c "$OUTPUT/decompiled/functions.c"
+        -I"$OUTPUT/decompiled/" "$$@" -m"$POINTER_SIZE"
+        |& tee "$OUTPUT/check-decompiled-c.log";

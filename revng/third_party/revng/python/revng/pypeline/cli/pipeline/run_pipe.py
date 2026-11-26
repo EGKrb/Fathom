@@ -1,0 +1,312 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+import tarfile
+from io import BytesIO
+from pathlib import Path
+from typing import cast
+
+import click
+import yaml
+
+from revng.pypeline.cli.common_options import container_format_options, list_objects_option
+from revng.pypeline.cli.common_options import read_configuration_file
+from revng.pypeline.cli.context import ClickContext, pass_context
+from revng.pypeline.cli.utils import build_arg_objects, build_help_text, compute_objects
+from revng.pypeline.cli.wrappers import WrappablePypeCommand, exec_wrapper_if_needed
+from revng.pypeline.container import ContainerFormat
+from revng.pypeline.model import Model, ReadOnlyModel
+from revng.pypeline.object import ObjectSet
+from revng.pypeline.storage.file_provider import FileProvider, FileRequest
+from revng.pypeline.task.pipe import Pipe
+from revng.pypeline.task.task import TaskArgumentAccess
+from revng.pypeline.utils.logger import pypeline_logger
+from revng.pypeline.utils.naming import normalize_kwarg_name, normalize_whitespace
+from revng.pypeline.utils.registry import get_registry, get_singleton
+
+
+# A file storage implementation that works with a provided directory. Will look
+# in the directory for a file named as the requested hash.
+class SimpleFileProvider(FileProvider):
+    def __init__(self, directory: Path):
+        self._directory = directory
+
+    def get_files(self, requests: list[FileRequest]) -> dict[str, bytes]:
+        if len(requests) == 0:
+            return {}
+
+        for request in requests:
+            if not (self._directory / request.hash).is_file():
+                raise ValueError(
+                    f"File {request.hash} not found, please specify a directory"
+                    " with all input files via the --file-storage option"
+                )
+
+        return {r.hash: (self._directory / r.hash).read_bytes() for r in requests}
+
+
+class RunPipeGroup(click.Group):
+    """We need to create a custom command for each pipe we loaded from the registry.
+    Since we already have to generate the code dynamically, we do it lazily so
+    we generate only the commands that are requested."""
+
+    @property
+    def registry(self) -> dict[str, type[Pipe]]:
+        return get_registry(Pipe)  # type: ignore[type-abstract]
+
+    def list_commands(self, ctx):
+        base = super().list_commands(ctx)
+        return base + sorted(self.registry.keys())
+
+    def get_command(self, ctx, cmd_name):
+        if cmd_name in self.registry:
+            return self._build_pipe_command(cmd_name)
+        return super().get_command(ctx, cmd_name)
+
+    def _build_pipe_command(self, pipe_name: str):
+        """Dynamically create a command for running a pipe."""
+        pipe_type: type[Pipe] = self.registry[pipe_name]
+
+        if pipe_type.__doc__:
+            help_text = click.wrap_text(f"\n{normalize_whitespace(pipe_type.__doc__)}")
+        else:
+            help_text = f"Run the pipe: {pipe_name}"
+
+        help_text = build_help_text(
+            prologue=help_text,
+            args=pipe_type.signature(),
+        )
+
+        # Add options for static configuration and configuration, only if the
+        # pipe doesn't disable them by defining them as None
+        static_config = (
+            pipe_type.static_configuration_help()
+            or f'Path to a YAML file with the static configuration for the pipe "{pipe_name}".'
+        )
+
+        # Build the actual function that will be the command
+        run_pipe_command = build_pipe_command(
+            pipe_name=pipe_name,
+            help_text=help_text,
+            pipe_type=pipe_type,
+            model_type=get_singleton(Model),  # type: ignore[type-abstract]
+        )
+
+        # Decorate it to add the arguments it needs
+        if static_config is not None:
+            run_pipe_command = click.option(
+                "-s",
+                "--static-configuration",
+                type=click.Path(exists=True, dir_okay=False, readable=True),
+                default=None,
+                callback=read_configuration_file,
+                help=normalize_whitespace(static_config),
+            )(run_pipe_command)
+        config = getattr(
+            pipe_type,
+            "configuration_help",
+            f'Path to a file with the configuration for the pipe "{pipe_name}".',
+        )
+        if config is not None:
+            run_pipe_command = click.option(
+                "-c",
+                "--configuration",
+                type=click.Path(exists=True, dir_okay=False, readable=True),
+                default=None,
+                callback=read_configuration_file,
+                help=normalize_whitespace(config),
+            )(run_pipe_command)
+
+        # For each argument, call the `click.argument` decorator to dynamically add
+        # them to the command
+        for arg in pipe_type.signature():
+            if TaskArgumentAccess.READ in arg.access:
+                run_pipe_command = click.argument(
+                    f"{arg.name}-input",
+                    type=click.Path(exists=True, dir_okay=False, readable=True),
+                )(run_pipe_command)
+            if TaskArgumentAccess.WRITE in arg.access:
+                run_pipe_command = click.argument(
+                    f"{arg.name}-output",
+                    type=click.Path(dir_okay=False, writable=True),
+                )(run_pipe_command)
+                run_pipe_command = build_arg_objects(arg)(run_pipe_command)
+
+        return run_pipe_command
+
+
+def build_pipe_command(
+    pipe_name: str,
+    help_text: str,
+    pipe_type: type[Pipe],
+    model_type: type[Model],
+):
+    @click.command(
+        cls=WrappablePypeCommand,
+        name=pipe_name,
+        help=help_text,
+    )
+    @click.argument(
+        "model",
+        type=click.Path(exists=True, dir_okay=False, readable=True),
+        required=True,
+    )
+    @click.option(
+        "--file-storage",
+        type=click.Path(exists=True, file_okay=False, path_type=Path),
+    )
+    @click.option(
+        "--dependencies",
+        type=click.Path(dir_okay=False, path_type=Path),
+        default=None,
+        help=(
+            "Output dependency data as a tar file. This will contain a"
+            " `dependency.yml` file for plain dependencies and a file for each"
+            " advanced invalidation entry."
+        ),
+    )
+    @container_format_options(ContainerFormat.AUTO)
+    @list_objects_option
+    @exec_wrapper_if_needed
+    @pass_context
+    def run_pipe_command(
+        ctx: ClickContext,
+        model: str,
+        static_configuration: str,
+        configuration: str,
+        file_storage: Path | None,
+        container_format: ContainerFormat,
+        dependencies: Path | None,
+        **kwargs,
+    ) -> None:
+        pypeline_logger.debug_log(f"Running pipe: {pipe_name}")
+        pypeline_logger.debug_log(f"with static configuration: {static_configuration}")
+        pypeline_logger.debug_log(f"configuration: {configuration}")
+        pypeline_logger.debug_log(f"model: {model}")
+        pypeline_logger.debug_log(f'container_format: "{container_format}"')
+        pypeline_logger.debug_log(f"and kwargs: {kwargs}")
+
+        # Create the pipe
+        pipe = pipe_type(static_configuration)
+        # Load the model
+        with open(model, "rb") as model_file:
+            loaded_model = model_type.deserialize(model_file.read())[0]
+        # Load the containers with args form the command line
+        containers = []
+        for arg in pipe.arguments:
+            arg_name = normalize_kwarg_name(arg.name)
+            # Write-only containers can be empty
+            if arg.access == TaskArgumentAccess.WRITE:
+                containers.append(arg.container_type())
+                continue
+
+            # Otherwise we need to load the container from the filesystem
+            path = kwargs[f"{arg_name}_input"]
+            pypeline_logger.debug_log(f"Loading container {path} for argument {arg_name}")
+            containers.append(arg.container_type.from_file(path))
+
+        # From the command line figure out the requests for each argument
+        outgoing: list[ObjectSet] = []
+        for arg in pipe.signature():
+            if arg.access == TaskArgumentAccess.READ:
+                # If the argument is read-only, we don't need to request anything
+                outgoing.append(ObjectSet(kind=arg.container_type.kind))
+                continue
+            # If the argument is writable, we need to request the objects
+            outgoing.append(
+                compute_objects(
+                    model=ReadOnlyModel(loaded_model),
+                    arg_name=arg.name,
+                    kind=arg.container_type.kind,
+                    kwargs=kwargs,
+                )
+            )
+
+        pypeline_logger.debug_log(f"Outgoing requests: {outgoing}")
+
+        # Ask the pipe for the requests it needs
+        incoming = pipe.prerequisites_for(
+            model=ReadOnlyModel(loaded_model),
+            requests=outgoing,
+        )
+        pypeline_logger.debug_log(f"Incoming requests: {incoming}")
+
+        # Ensure that the user provided all the required arguments
+        for container, request in zip(containers, incoming):
+            if not request:
+                # If the request is empty, we don't need to load anything
+                continue
+            if not request.issubset(container.objects()):
+                raise click.UsageError(
+                    f"Container {container} does not have the required objects: {request}"
+                )
+
+        if file_storage is None:
+            file_storage = ctx.obj.base_directory
+
+        # Enable model caching
+        loaded_model.enable_caching()
+
+        # Finally, run the pipe
+        object_deps = pipe.run(
+            file_provider=SimpleFileProvider(cast(Path, file_storage)),
+            model=ReadOnlyModel(loaded_model),
+            containers=containers,
+            incoming=incoming,
+            outgoing=outgoing,
+            configuration=configuration,
+        )
+        pypeline_logger.debug_log(f"Pipe run completed, object dependencies: {object_deps}")
+
+        # Dump dependencies if the path was specified
+        if dependencies is not None:
+            dependencies_data = []
+            for index, container_dependencies in enumerate(object_deps.dependencies):
+                for container_dependency in container_dependencies:
+                    dependencies_data.append(
+                        (index, container_dependency[0].serialize(), container_dependency[1])
+                    )
+
+            with tarfile.open(dependencies, mode="w") as tar:
+                # Save the plain invalidation into "dependencies.yml"
+                serialized_dependencies = yaml.safe_dump(dependencies_data).encode()
+                info = tarfile.TarInfo()
+                info.size = len(serialized_dependencies)
+                info.name = "dependencies.yml"
+                info.mode = 0o644
+                info.type = tarfile.REGTYPE
+                tar.addfile(info, BytesIO(serialized_dependencies))
+
+                # Save advanced invalidation (if present)
+                for index, invalidation_data_list in enumerate(object_deps.custom_invalidation):
+                    for invalidation_data in invalidation_data_list:
+                        info = tarfile.TarInfo()
+                        info.size = len(memoryview(invalidation_data[1]))
+                        info.name = f"{index}{invalidation_data[0].serialize()}"
+                        info.mode = 0o644
+                        info.type = tarfile.REGTYPE
+
+                        tar.addfile(info, BytesIO(invalidation_data[1]))
+
+        # Dump back the modified containers to the filesystem
+        for arg, container in zip(pipe.signature(), containers):
+            if arg.access == TaskArgumentAccess.READ:
+                continue
+
+            arg_name = normalize_kwarg_name(arg.name)
+            # If the argument is writable, we dump the container
+            # to the filesystem
+            path = kwargs[f"{arg_name}_output"]
+            pypeline_logger.debug_log(f"Dumping container {arg_name} to {path}")
+            container.to_file(path, container_format=container_format)
+
+    return run_pipe_command
+
+
+@click.group(
+    cls=RunPipeGroup,
+    help="Run a pipe",
+)
+def run_pipe() -> None:
+    pass

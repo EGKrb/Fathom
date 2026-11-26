@@ -1,0 +1,20 @@
+{
+  "pluginmetadataversion": 2,
+  "name": "Fathom",
+  "type": ["ui"],
+  "api": ["python3"],
+  "description": "Binary Ninja and the Fathom debugger side by side: follow the debuggee, breakpoints, run to here, traces.",
+  "longdescription": "Connects to Fathom (an x64dbg-based debugger) through its pybridge plugin: the view follows the debuggee's instruction pointer, addresses are shown in the debugger, breakpoints and run-to-here are set from Binary Ninja, and traces exported by Fathom are highlighted. In Fathom: pybridge.start.",
+  "license": {
+    "name": "GPL-3.0-or-later",
+    "text": "Part of Fathom (https://github.com/EGKrb/Fathom), GPL-3.0-or-later."
+  },
+  "platforms": ["Windows"],
+  "installinstructions": {
+    "Windows": "Copy the fathom_binja folder into %APPDATA%\\Binary Ninja\\plugins (with x64dbg_bridge.py from Fathom's pybridge\\python, already there in a Fathom release)."
+  },
+  "dependencies": {},
+  "version": "1.0.0",
+  "author": "EGKrb",
+  "minimumbinaryninjaversion": 4000
+}

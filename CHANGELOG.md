@@ -8,6 +8,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-11-26
+
+### Added
+- NoVmp for x86 (`NoVmp32.exe`, [`novmp/`](novmp/README.md)): Fathom's port
+  of NoVmp to VMProtect's x86 virtual machine. VTIL built as a 32-bit program
+  has x86 as its native architecture; what NoVmp assumed of x64 (register size,
+  native registers, TEB, PE32+, self-references of the image, base of the
+  virtual instruction pointer, the native emulator of the decryption blocks)
+  goes through `vmprotect/native.hpp`. `novmp` uses `NoVmp32.exe` for the
+  modules of x32dbg; `vipbase:` sets the base of the virtual instruction
+  pointer. Built and its emulator tested (`emulator_test`, x64 and x86); not
+  checked on a VMProtect x86 program.
+- remill for Windows ([`remill/`](remill/README.md)): `remill.lift [address[,
+  size]]` lifts a function, read from memory, to LLVM IR with remill
+  (vendored; its semantics are found next to the executable), built by
+  `remill\build.ps1`: LLVM 17 and its dependencies with MSVC, remill with
+  the clang-cl of that LLVM.
+- rev.ng for Windows ([`revng/`](revng/README.md)): `revng.decompile [address]`
+  decompiles a function of the debuggee (its module read from memory) to C with
+  the rev.ng decompiler, which runs on Linux only, ported to Windows natively:
+  QEMU's translators (libtcg, rev.ng's fork) built without linux-user, QEMU's
+  helpers compiled to LLVM bitcode with the options of that build, rev.ng
+  (vendored, with LLVM 16 and MLIR) linked into its Python module instead of
+  plugins, and what assumed Linux adapted (`revng/third_party/FATHOM.md`).
+  x64 and x86 modules. `revng\build.ps1` builds it in MSYS2 (UCRT64 for libtcg,
+  CLANG64 and libc++ for LLVM and rev.ng) and stages a self-contained
+  `revng\dist`; the release ships it in its own archive
+  (`Fathom_<version>_revng.zip`).
+- Binary Ninja ([`binja/`](binja/README.md)): `binja [address]` opens the
+  module, read from memory at its load address, in Binary Ninja at the address
+  (`binaryninja:` URL, every edition); the `fathom_binja` plugin (paid
+  editions) synchronizes Binary Ninja with Fathom through pybridge: follow the
+  debuggee, show in Fathom, breakpoints, run to here, traces highlighted.
+
+### Changed
+- `novmp`, `binja` and `revng.decompile` write the module read from memory
+  under its file name (with its extension).
+- remill's LLVM is built without zlib and zstd: `remill-lift-17.exe` needs no
+  other DLL than Windows' and the Visual C++ runtime.
+
 ## [1.10.0] - 2026-11-26
 
 ### Added
@@ -479,6 +519,7 @@ First release under the Fathom name.
 Fathom is a modified distribution of x64dbg; see [NOTICE](NOTICE) and
 [CONTRIBUTING](CONTRIBUTING.md).
 
+[1.11.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.11.0
 [1.10.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.10.0
 [1.9.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.9.0
 [1.8.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.8.0

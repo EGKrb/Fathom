@@ -280,7 +280,7 @@ namespace vmp
 
 			// Disassemble the instruction
 			//
-			std::vector i1 = vtil::amd64::disasm( img->rva_to_ptr( rva_rip ), rva_rip );
+			std::vector i1 = vmp::disasm( img->rva_to_ptr( rva_rip ), rva_rip );
 			fassert( !i1.empty() );
 			vtil::amd64::instruction& instruction = i1[ 0 ];
 			output.stream.push_back( { ++instruction_idx, instruction } );

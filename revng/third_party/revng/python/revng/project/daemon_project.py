@@ -1,0 +1,114 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+import os
+import re
+from pathlib import Path
+from typing import Dict, List, Set, Union
+from urllib.parse import urlparse
+
+import httpx2
+
+from revng.project.common import ALL_OBJECTS, AllObjects, HTTPError, ProjectError
+from revng.project.model import Binary  # type: ignore[attr-defined]
+from revng.project.project import Project
+from revng.support import TarDictionary
+from revng.support.buffered_reader import BufferedReader
+
+
+class DaemonProject(Project):
+    """
+    This class is used to run revng analysis and artifact through
+    the revng daemon via HTTP.
+    """
+
+    def __init__(self, url: str, project_id: str | None = None, token: str | None = None):
+        self._base_url = urlparse(url)
+        self._session = httpx2.Client(
+            http2=True, timeout=None, event_hooks={"response": [self._response_hook]}
+        )
+        if project_id is not None:
+            self._session.headers["x-project-id"] = project_id
+        if token is not None:
+            self._session.headers["authorization"] = f"Bearer {token}"
+
+        # The constructor calls `_get_pipeline_description`, so we need to
+        # initialize our variables first
+        super().__init__()
+        self._set_model(self._get_model())
+
+    @staticmethod
+    def _response_hook(response: httpx2.Response):
+        try:
+            response.raise_for_status()
+        except httpx2.HTTPStatusError as e:
+            raise HTTPError from e
+
+    def upload_binary(self, binary_path: Union[str, Path]) -> str:
+        with open(binary_path, "rb") as f:
+            response = self._session.post(
+                self._join_url("/api/put-file"),
+                files={"file": (Path(binary_path).name, f)},
+            )
+        return response.json()["hash"]
+
+    def _get_artifact_impl(
+        self,
+        artifact_name: str,
+        objects: Union[Set[str], AllObjects],
+        configuration: Dict[str, str],
+    ) -> Dict[str, bytes]:
+        body: dict = {
+            "artifact": artifact_name,
+            "epoch": self._get_epoch(),
+            "format": "tar",
+        }
+        if objects is not ALL_OBJECTS:
+            body["objects"] = list(objects)
+        if len(configuration) > 0:
+            body["configuration"] = configuration
+
+        with self._session.stream("POST", self._join_url("/api/artifact"), json=body) as response:
+            # TODO: right now we return the response as a dict, with BufferedReader
+            #       we could return things more lazily and leverage pipelining
+            #       (e.g. parsing input while the rest of the request is incoming)
+            return dict(TarDictionary(BufferedReader(response)))
+
+    def _analyze_impl(
+        self,
+        analysis_name: str,
+        configuration: Dict[str, str] = {},
+        containers: Dict[str, List[str]] = {},
+    ) -> int:
+        body = {
+            "analysis": analysis_name,
+            "epoch": self._epoch,
+            "configuration": configuration,
+            "containers": containers,
+        }
+
+        if analysis_name not in self._analyses_list and analysis_name not in self._analysis_names:
+            raise ProjectError(f"Analysis {analysis_name} does not exist")
+
+        req = self._session.post(self._join_url("/api/analysis"), json=body)
+        self._set_model(self._get_model())
+        return req.json()["epoch"]
+
+    def _get_pipeline_description(self):
+        response = self._session.get(self._join_url("/api/pipeline"))
+        return response.json()
+
+    def _get_model(self) -> Binary:
+        response = self._session.get(self._join_url("/api/model"))
+        data = response.json()
+        return Binary.deserialize(data["model"], self)
+
+    def _get_epoch(self) -> int:
+        response = self._session.get(self._join_url("/api/epoch"))
+        return response.json()["epoch"]
+
+    def _join_url(self, path: str) -> str:
+        new_path = os.path.normpath(self._base_url.path + path)
+        new_path = re.sub(r"^/+", "/", new_path)
+        return self._base_url._replace(path=new_path).geturl()

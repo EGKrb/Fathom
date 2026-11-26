@@ -1,0 +1,18 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+Component: revng-test
+Branches:
+  - Steps:
+      - Name: convert-functions-to-raw
+        Analyses:
+          - Name: convert-functions-to-raw
+            Type: convert-functions-to-raw
+            UsedContainers: []
+  - Steps:
+      - Name: convert-functions-to-cabi
+        Analyses:
+          - Name: convert-functions-to-cabi
+            Type: convert-functions-to-cabi
+            UsedContainers: []

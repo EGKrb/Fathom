@@ -1,0 +1,19 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+commands:
+  # This reuses abi-centric test binaries to ensure they can always go through
+  # the whole pipeline (without any analyses) without crashing.
+  - type: revng.decompiling-runtime-abi-test-binaries
+    from:
+      - type: revng-qa.runtime-abi-tests
+    command: |-
+      INPUT=$$(realpath "$INPUT");
+      cd "$$(temp -d)";
+      revng project init --overwrite --no-initial-auto-analysis "$$INPUT/functions";
+      revng project analyze parse-binary -o /dev/null -- --use-pdb="$$INPUT/functions.pdb";
+      python3 "${SOURCES_ROOT}/share/revng/test/tests/abi/prepare-tested-model.py"
+        "${ABI_NAME}" revng.yml revng.yml;
+      revng project artifact emit-c-as-single-file -o decompiled.c.ptml;
+      revng ptml decompiled.c.ptml -o decompiled.c

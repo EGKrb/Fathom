@@ -1,0 +1,3593 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1d71c3c..f4bfc0e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -10,6 +10,18 @@ include(share/revng/cmake/Common.cmake)
+ 
+ find_program(CLANG_PATH NAMES clang)
+ 
++if(WIN32)
++  # Fathom: custom commands run through cmd: shell scripts through sh (MSYS2),
++  # and the clang of rev.ng's LLVM compiles the support modules
++  find_program(REVNG_SH NAMES sh REQUIRED)
++  set(REVNG_OPT_TARGET revng-opt)
++  # warnings of a newer toolchain are not errors here
++  set(REVNG_NO_WERROR ON)
++else()
++  set(REVNG_SH "")
++  set(REVNG_OPT_TARGET "")
++endif()
++
+ # Copy system configuration.yml
+ if(REVNG_SYSTEM_CONFIG AND EXISTS "${REVNG_SYSTEM_CONFIG}")
+   set(REVNG_CONFIG_PATH "${CMAKE_BINARY_DIR}/etc/revng/configuration.yml")
+@@ -41,7 +53,9 @@ set(CMAKE_SHARED_LIBRARY_LINK_C_FLAGS)
+ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++20")
+ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall")
+ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wextra")
+-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
++if(NOT REVNG_NO_WERROR)
++  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
++endif()
+ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti")
+ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-exceptions")
+ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fvisibility-inlines-hidden")
+@@ -100,7 +114,10 @@ endif()
+ #
+ find_package(LLVM REQUIRED CONFIG)
+ include_directories(${LLVM_INCLUDE_DIRS})
+-add_definitions(${LLVM_DEFINITIONS})
++# (one string of several -D: separate them, or CMake reads a single definition
++# when the first one has a value, as LLVM's are on Windows)
++separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND "${LLVM_DEFINITIONS}")
++add_definitions(${LLVM_DEFINITIONS_LIST})
+ link_directories(${LLVM_LIBRARY_DIRS})
+ llvm_map_components_to_libnames(
+   LLVM_LIBRARIES
+@@ -128,19 +145,42 @@ include_directories(${MLIR_INCLUDE_DIRS})
+ #
+ find_package(Clang REQUIRED CONFIG)
+ 
++if(WIN32 AND NOT TARGET_CLANG)
++  # Fathom: the clang of rev.ng's LLVM compiles the early-linked module (LLVM
++  # 16 reads its IR), with the C headers of the MinGW toolchain building rev.ng
++  set(TARGET_CLANG "${LLVM_TOOLS_BINARY_DIR}/clang.exe")
++  get_filename_component(REVNG_MINGW_ROOT "${CMAKE_C_COMPILER}" DIRECTORY)
++  get_filename_component(REVNG_MINGW_ROOT "${REVNG_MINGW_ROOT}" DIRECTORY)
++  set(REVNG_TARGET_CLANG_FLAGS "--sysroot=${REVNG_MINGW_ROOT}")
++endif()
++
+ #
+ # Component hash
+ #
+ file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/share/revng/component-hashes")
+ set(COMPONENT_HASH_PATH
+     "${CMAKE_BINARY_DIR}/share/revng/component-hashes/revng")
+-add_custom_command(
+-  OUTPUT "${COMPONENT_HASH_PATH}"
+-  COMMAND
+-    sh -c
+-    ' (git -C "${CMAKE_SOURCE_DIR}" rev-parse HEAD || echo "\"${CMAKE_PROJECT_VERSION}\"") '
+-    > "${COMPONENT_HASH_PATH}")
+-add_custom_target(generate-component-hash ALL DEPENDS "${COMPONENT_HASH_PATH}")
++if(WIN32)
++  # Fathom: when configuring (custom commands run through cmd on Windows)
++  execute_process(
++    COMMAND git -C "${CMAKE_SOURCE_DIR}" rev-parse HEAD
++    OUTPUT_VARIABLE COMPONENT_HASH
++    RESULT_VARIABLE COMPONENT_HASH_RESULT
++    ERROR_QUIET)
++  if(NOT COMPONENT_HASH_RESULT EQUAL 0)
++    set(COMPONENT_HASH "\"${CMAKE_PROJECT_VERSION}\"\n")
++  endif()
++  file(WRITE "${COMPONENT_HASH_PATH}" "${COMPONENT_HASH}")
++  add_custom_target(generate-component-hash ALL)
++else()
++  add_custom_command(
++    OUTPUT "${COMPONENT_HASH_PATH}"
++    COMMAND
++      sh -c
++      ' (git -C "${CMAKE_SOURCE_DIR}" rev-parse HEAD || echo "\"${CMAKE_PROJECT_VERSION}\"") '
++      > "${COMPONENT_HASH_PATH}")
++  add_custom_target(generate-component-hash ALL DEPENDS "${COMPONENT_HASH_PATH}")
++endif()
+ install(FILES "${COMPONENT_HASH_PATH}"
+         DESTINATION "${CMAKE_INSTALL_DIR}/share/revng/component-hashes/")
+ 
+@@ -155,11 +195,14 @@ install(
+   DESTINATION share/
+   USE_SOURCE_PERMISSIONS)
+ 
+-# Export CMake targets
+-install(
+-  EXPORT revng
+-  NAMESPACE DESTINATION
+-  share/revng/cmake)
++# Export CMake targets (Fathom: none on Windows, where the libraries are
++# OBJECT libraries linked into the modules and programs)
++if(NOT WIN32)
++  install(
++    EXPORT revng
++    NAMESPACE DESTINATION
++    share/revng/cmake)
++endif()
+ 
+ # Create share/revng/additional-bin-paths
+ set(ADDITIONAL_BIN_PATHS "${CMAKE_BINARY_DIR}/share/revng/additional-bin-paths")
+@@ -186,15 +229,25 @@ set(SUPPORT_MODULES_CONFIG_trace "-DTRACE")
+ # Their names are the ones the C backend has to stay away from.
+ set(MODULES_TO_INLINE "")
+ 
+-foreach(
+-  ARCH
+-  aarch64
+-  arm
+-  mips
+-  mipsel
+-  x86_64
+-  i386
+-  s390x)
++if(WIN32)
++  # Fathom: libtcg is built for x86 and x86-64 on Windows
++  set(REVNG_ARCHITECTURES x86_64 i386)
++  # revng opt: LLVM's opt with rev.ng linked in (tools/win32-opt), no plugins
++  set(REVNG_OPT_COMMAND "${CMAKE_BINARY_DIR}/libexec/revng/revng-opt.exe"
++                        -enable-new-pm=0)
++else()
++  set(REVNG_ARCHITECTURES
++      aarch64
++      arm
++      mips
++      mipsel
++      x86_64
++      i386
++      s390x)
++  set(REVNG_OPT_COMMAND ./bin/revng opt)
++endif()
++
++foreach(ARCH ${REVNG_ARCHITECTURES})
+   set(OUTPUT "early-linked-${ARCH}.ll")
+   add_custom_command(
+     OUTPUT "${CMAKE_BINARY_DIR}/share/revng/${OUTPUT}"
+@@ -203,14 +256,20 @@ foreach(
+       ${TARGET_CLANG} ARGS "${CMAKE_SOURCE_DIR}/share/revng/early-linked.c" -o
+       "${CMAKE_BINARY_DIR}/share/revng/${OUTPUT}" -S -emit-llvm -g
+       -DTARGET_${ARCH} -I"${CMAKE_SOURCE_DIR}/share/revng"
+-      -I"${CMAKE_CURRENT_SOURCE_DIR}/include")
++      -I"${CMAKE_CURRENT_SOURCE_DIR}/include" ${REVNG_TARGET_CLANG_FLAGS})
+   add_custom_target("early-linked-module-${OUTPUT}" ALL
+                     DEPENDS "${CMAKE_BINARY_DIR}/share/revng/${OUTPUT}")
+   add_dependencies(revng-all-binaries "early-linked-module-${OUTPUT}")
+ 
+   # Enable the support for C exceptions to avoid optimizations that break
+-  # exception support when linking a module with isolated functions
+-  foreach(CONFIG ${SUPPORT_MODULES_CONFIGS})
++  # exception support when linking a module with isolated functions (Fathom:
++  # support.c is the runtime of recompiled Linux programs: not on Windows)
++  if(WIN32)
++    set(REVNG_SUPPORT_CONFIGS "")
++  else()
++    set(REVNG_SUPPORT_CONFIGS ${SUPPORT_MODULES_CONFIGS})
++  endif()
++  foreach(CONFIG ${REVNG_SUPPORT_CONFIGS})
+     set(OUTPUT "support-${ARCH}-${CONFIG}.ll")
+     add_custom_command(
+       OUTPUT "${CMAKE_BINARY_DIR}/share/revng/${OUTPUT}"
+@@ -269,9 +328,9 @@ foreach(
+   add_custom_command(
+     OUTPUT "${LIBTCG_HELPERS_FULL}"
+     DEPENDS "${LIBTCG_HELPERS}" revng-all-binaries revngHelperArgumentsAnalysis
+-            revngHelperInliningAnalyses
++            revngHelperInliningAnalyses ${REVNG_OPT_TARGET}
+     COMMAND
+-      ./bin/revng opt -mark-inline-helpers-up-to -sroa -instsimplify
++      ${REVNG_OPT_COMMAND} -mark-inline-helpers-up-to -sroa -instsimplify
+       -cpu-loop-exit -analyze-helper-arguments ${EXTRA_HELPER_PASSES}
+       -fix-helpers -fix-helpers-architecture="${ARCH}" -function-attrs -dce
+       -detect-uninlinable-helpers "${LIBTCG_HELPERS}" -o
+@@ -293,7 +352,7 @@ foreach(
+       OUTPUT "${PROCESS_HELPER_MODULE_OUTPUT}"
+       DEPENDS "${LIBTCG_HELPERS_FULL}" revng-all-binaries
+               revngHelperArgumentsAnalysis revngHelperInliningAnalyses
+-      COMMAND ./bin/revng opt ${OPT_PASSES} "${LIBTCG_HELPERS_FULL}" -o
++      COMMAND ${REVNG_OPT_COMMAND} ${OPT_PASSES} "${LIBTCG_HELPERS_FULL}" -o
+               "${PROCESS_HELPER_MODULE_OUTPUT}")
+     add_custom_target("annotated-libtcg-helpers-${OPT_NAME}-${ARCH}" ALL
+                       DEPENDS "${PROCESS_HELPER_MODULE_OUTPUT}")
+@@ -337,8 +396,10 @@ add_custom_command(
+     --print-clang-format-config >
+     "${CMAKE_BINARY_DIR}/share/revng/.clang-format")
+ 
+-add_custom_target(clang-format-dot-file ALL
+-                  DEPENDS "${CMAKE_BINARY_DIR}/share/revng/.clang-format")
++if(NOT WIN32)
++  add_custom_target(clang-format-dot-file ALL
++                    DEPENDS "${CMAKE_BINARY_DIR}/share/revng/.clang-format")
++endif()
+ 
+ #
+ # libexec/revng
+@@ -373,6 +434,30 @@ find_package(
+   REQUIRED)
+ file(RELATIVE_PATH PYTHON_INSTALL_PATH "${CMAKE_INSTALL_PREFIX}"
+      "${Python3_SITELIB}")
++if(WIN32 AND PYTHON_INSTALL_PATH MATCHES "^\\.\\.")
++  # Fathom: the Python of the build (a venv) is outside the prefix: rev.ng's
++  # packages go to the prefix's own lib/pythonX.Y/site-packages
++  set(PYTHON_INSTALL_PATH
++      "lib/python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}/site-packages")
++endif()
++
++if(WIN32)
++  # Fathom: nanobind's core library, static, under the name rev.ng links. It
++  # is rev.ng's fork of nanobind (without RTTI and exceptions, as rev.ng is
++  # built), given by REVNG_NANOBIND_DIR (a clone of github.com/revng/nanobind)
++  find_package(
++    Python
++    COMPONENTS Interpreter Development.Module
++    REQUIRED)
++  if(NOT REVNG_NANOBIND_DIR)
++    message(FATAL_ERROR "REVNG_NANOBIND_DIR: a clone of rev.ng's nanobind")
++  endif()
++  set(nanobind_ROOT "${REVNG_NANOBIND_DIR}/cmake")
++  find_package(nanobind CONFIG REQUIRED NO_DEFAULT_PATH PATHS
++               "${REVNG_NANOBIND_DIR}/cmake")
++  nanobind_build_library(nanobind-static)
++  add_library(nanobind ALIAS nanobind-static)
++endif()
+ 
+ #
+ # Build docs
+@@ -448,7 +533,9 @@ add_custom_command(
+           mkdocs-output
+   COMMAND mv -T mkdocs-output "${HTML_DOCS_PATH}"
+   COMMENT "Generating mkdocs")
+-add_custom_target(mkdocs ALL DEPENDS share/doc/revng/html/404.html)
++if(NOT WIN32)
++  add_custom_target(mkdocs ALL DEPENDS share/doc/revng/html/404.html)
++endif()
+ 
+ #
+ # Gather helper names
+@@ -456,7 +543,7 @@ add_custom_target(mkdocs ALL DEPENDS share/doc/revng/html/404.html)
+ add_custom_command(
+   OUTPUT "${CMAKE_BINARY_DIR}/share/revng/helper-list.csv"
+   COMMAND
+-    ${CMAKE_SOURCE_DIR}/scripts/extract-helper-names.sh ${MODULES_TO_INLINE} >
++    ${REVNG_SH} ${CMAKE_SOURCE_DIR}/scripts/extract-helper-names.sh ${MODULES_TO_INLINE} >
+     "${CMAKE_BINARY_DIR}/share/revng/helper-list.csv"
+   DEPENDS copy_share ${MODULES_TO_INLINE})
+ add_custom_target(helper-list ALL
+@@ -465,10 +552,22 @@ add_custom_target(helper-list ALL
+ #
+ # Proceed to subdirectories
+ #
+-add_subdirectory(docs)
++if(NOT WIN32)
++  add_subdirectory(docs)
++endif()
+ add_subdirectory(include)
+ add_subdirectory(lib)
+ add_subdirectory(python)
+-add_subdirectory(tests)
++if(NOT WIN32)
++  add_subdirectory(tests)
++endif()
+ add_subdirectory(tools)
+-add_subdirectory(typescript)
++if(NOT WIN32)
++  add_subdirectory(typescript)
++else()
++  # the TypeScript client (Node.js) is not built: the code generators only
++  # wait for its node_modules
++  add_custom_target(generate-node_modules)
++  # Fathom: every module and program gets all of rev.ng (see Common.cmake)
++  revng_win32_link_all()
++endif()
+diff --git a/include/revng/ADT/Concepts.h b/include/revng/ADT/Concepts.h
+index 57fb37b..2730620 100644
+--- a/include/revng/ADT/Concepts.h
++++ b/include/revng/ADT/Concepts.h
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include <vector>
++
+ //
+ // This file is distributed under the MIT License. See LICENSE.md for details.
+ //
+diff --git a/include/revng/ADT/LazySmallBitVector.h b/include/revng/ADT/LazySmallBitVector.h
+index 179e075..a0b5802 100644
+--- a/include/revng/ADT/LazySmallBitVector.h
++++ b/include/revng/ADT/LazySmallBitVector.h
+@@ -30,6 +30,14 @@ inline unsigned requiredBits(T Value) {
+   return Result;
+ }
+ 
++#ifdef _WIN32
++// Fathom: ffs, ffsl and ffsll are POSIX (strings.h); the compiler's builtins
++// are the same functions
++#define ffs __builtin_ffs
++#define ffsl __builtin_ffsl
++#define ffsll __builtin_ffsll
++#endif
++
+ template<typename T, typename A, typename B>
+ concept is_either = std::is_same_v<T, A> or std::is_same_v<T, B>;
+ 
+diff --git a/include/revng/ADT/RecursiveCoroutine-coroutine.h b/include/revng/ADT/RecursiveCoroutine-coroutine.h
+index 4e41c52..0742fd2 100644
+--- a/include/revng/ADT/RecursiveCoroutine-coroutine.h
++++ b/include/revng/ADT/RecursiveCoroutine-coroutine.h
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include <exception>
++
+ //
+ // This file is distributed under the MIT License. See LICENSE.md for details.
+ //
+diff --git a/include/revng/ADT/TraitfulAny.h b/include/revng/ADT/TraitfulAny.h
+index ed98ae4..0832ac2 100644
+--- a/include/revng/ADT/TraitfulAny.h
++++ b/include/revng/ADT/TraitfulAny.h
+@@ -12,6 +12,19 @@
+ // original file.
+ 
+ #include <memory>
++#include <type_traits>
++
++// libc++'s <any>, of LLVM 16's time, uses these macros; newer libc++ (Fathom's
++// Windows build: MSYS2 CLANG64) no longer defines them
++#ifndef _LIBCPP_INLINE_VISIBILITY
++#define _LIBCPP_INLINE_VISIBILITY _LIBCPP_HIDE_FROM_ABI
++#endif
++#ifndef _LIBCPP_TEMPLATE_VIS
++#define _LIBCPP_TEMPLATE_VIS
++#endif
++#ifndef _LIBCPP_AVAILABILITY_THROW_BAD_ANY_CAST
++#define _LIBCPP_AVAILABILITY_THROW_BAD_ANY_CAST
++#endif
+ 
+ 
+ namespace revng {
+diff --git a/include/revng/Support/DynamicHierarchy.h b/include/revng/Support/DynamicHierarchy.h
+index 313930b..341830d 100644
+--- a/include/revng/Support/DynamicHierarchy.h
++++ b/include/revng/Support/DynamicHierarchy.h
+@@ -4,6 +4,7 @@
+ // This file is distributed under the MIT License. See LICENSE.md for details.
+ //
+ 
++#include <atomic>
+ #include <iostream>
+ #include <vector>
+ 
+diff --git a/include/revng/Support/ExplicitSpecializations.h b/include/revng/Support/ExplicitSpecializations.h
+index 9440cd1..cfd4798 100644
+--- a/include/revng/Support/ExplicitSpecializations.h
++++ b/include/revng/Support/ExplicitSpecializations.h
+@@ -12,7 +12,11 @@
+ // functions that would be otherwise heavy on build times. Make sure this file
+ // is included by a header that's included by all the translation units.
+ 
++// (an internal function of libc++ of LLVM 16's time, gone from newer ones:
++// Fathom's Windows build uses a newer libc++)
++#if defined(_LIBCPP_VERSION) && _LIBCPP_VERSION < 190000
+ extern template void std::vector<unsigned int>::__push_back_slow_path<
+   const unsigned int &>(const unsigned int &);
++#endif
+ 
+ #endif
+diff --git a/include/revng/Support/InitRevng.h b/include/revng/Support/InitRevng.h
+index cb66ed2..04f0096 100644
+--- a/include/revng/Support/InitRevng.h
++++ b/include/revng/Support/InitRevng.h
+@@ -13,7 +13,20 @@ namespace revng {
+ ///
+ /// By default this performs the regular LLVM initialization steps.
+ /// This is required in order to initialize the stack trace printers on signal.
+-class InitRevng : public llvm::InitLLVM {
++namespace detail {
++
++/// Fathom: copies of the arguments, given to llvm::InitLLVM, which replaces
++/// them on Windows with the command line of the process (in UTF-8): right for
++/// a program, not for the arguments the Python module (_pipebox) passes
++struct InitLLVMArguments {
++  int Argc;
++  char **Argv;
++  InitLLVMArguments(int Argc, char **Argv) : Argc(Argc), Argv(Argv) {}
++};
++
++} // namespace detail
++
++class InitRevng : private detail::InitLLVMArguments, public llvm::InitLLVM {
+ private:
+   static inline bool Initialized = false;
+ 
+diff --git a/include/revng/Support/Statistics.h b/include/revng/Support/Statistics.h
+index 6a6c290..c5d4e69 100644
+--- a/include/revng/Support/Statistics.h
++++ b/include/revng/Support/Statistics.h
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include <cmath>
++
+ //
+ // This file is distributed under the MIT License. See LICENSE.md for details.
+ //
+diff --git a/include/revng/Support/Tar.h b/include/revng/Support/Tar.h
+index fd1930f..6405259 100644
+--- a/include/revng/Support/Tar.h
++++ b/include/revng/Support/Tar.h
+@@ -54,7 +54,8 @@ public:
+   }
+ 
+ private:
+-  static long
++  // libarchive's type (Fathom: long is 32-bit on Windows)
++  static la_ssize_t
+   archiveWrite(archive *Ptr, void *ClassPtr, const void *Data, size_t Size);
+ };
+ 
+diff --git a/include/revng/Support/TemporaryFile.h b/include/revng/Support/TemporaryFile.h
+index 96ecb23..eec7b81 100644
+--- a/include/revng/Support/TemporaryFile.h
++++ b/include/revng/Support/TemporaryFile.h
+@@ -6,6 +6,7 @@
+ 
+ #include "llvm/ADT/SmallString.h"
+ #include "llvm/Support/FileSystem.h"
++#include "llvm/Support/Process.h"
+ #include "llvm/Support/Signals.h"
+ 
+ #include "revng/Support/Debug.h"
+@@ -15,6 +16,16 @@ class TemporaryFile {
+ private:
+   llvm::SmallString<32> Path;
+ 
++  static void removeFile(llvm::StringRef Path) {
++#ifdef _WIN32
++    // Fathom: Windows does not delete a read-only file (BinariesContainer
++    // makes its files read-only): writable again first
++    using namespace llvm::sys::fs;
++    setPermissions(Path, perms::owner_read | perms::owner_write);
++#endif
++    revng::cantFail(llvm::sys::fs::remove(Path));
++  }
++
+   TemporaryFile(llvm::StringRef Path, int /* dummy */) : Path(Path.str()) {
+     llvm::sys::RemoveFileOnSignal(Path);
+   }
+@@ -36,6 +47,10 @@ public:
+                                        + EC.message());
+     }
+ 
++    // The file is used by its path: close it (Fathom: Windows does not delete
++    // an open file, and the descriptor was leaked)
++    llvm::sys::Process::SafelyCloseFileDescriptor(FD);
++
+     return TemporaryFile(TempPath, 0);
+   }
+ 
+@@ -45,7 +60,7 @@ public:
+       return *this;
+ 
+     if (not Path.empty()) {
+-      revng::cantFail(llvm::sys::fs::remove(Path));
++      removeFile(Path);
+       llvm::sys::DontRemoveFileOnSignal(Path);
+     }
+ 
+@@ -57,7 +72,7 @@ public:
+ 
+   ~TemporaryFile() {
+     if (not Path.empty()) {
+-      revng::cantFail(llvm::sys::fs::remove(Path));
++      removeFile(Path);
+       llvm::sys::DontRemoveFileOnSignal(Path);
+     }
+   }
+diff --git a/include/revng/TupleTree/Visits.h b/include/revng/TupleTree/Visits.h
+index d0a45a7..0d42eec 100644
+--- a/include/revng/TupleTree/Visits.h
++++ b/include/revng/TupleTree/Visits.h
+@@ -105,7 +105,7 @@ bool polymorphicTupleImpl(Visitor &V,
+                           llvm::ArrayRef<TupleTreeKeyWrapper> Path,
+                           KindT Kind) {
+   if constexpr (I < std::tuple_size_v<RootT>) {
+-    if (Path[0].get<unsigned long>() == I) {
++    if (Path[0].get<size_t>() == I) { // size_t, as pushed (Fathom: Windows)
+       if constexpr (std::is_same_v<KindT, size_t>)
+         V.template visitTupleElement<RootT, I>();
+       else
+diff --git a/lib/DataLayoutAnalysis/Backend/DLAUpdateModelTypes.cpp b/lib/DataLayoutAnalysis/Backend/DLAUpdateModelTypes.cpp
+index 77f1984..46c247c 100644
+--- a/lib/DataLayoutAnalysis/Backend/DLAUpdateModelTypes.cpp
++++ b/lib/DataLayoutAnalysis/Backend/DLAUpdateModelTypes.cpp
+@@ -36,6 +36,17 @@
+ #include "../FuncOrCallInst.h"
+ #include "DLAMakeModelTypes.h"
+ 
++// llvm::Value::getNameOrAsOperand exists only in LLVM builds with assertions
++// (Fathom's Windows build of LLVM has none): the same, for the logs
++static std::string nameOrAsOperand(const llvm::Value *V) {
++  if (not V->getName().empty())
++    return V->getName().str();
++  std::string Result;
++  llvm::raw_string_ostream Stream(Result);
++  V->printAsOperand(Stream, false);
++  return Stream.str();
++}
++
+ using namespace model;
+ using namespace dla;
+ 
+@@ -106,7 +117,7 @@ static bool updateArgumentTypes(model::Binary &Model,
+       const llvm::Value *LLVMStackArg = toLLVMValue(*std::prev(LLVMArgs.end()));
+ 
+       revng_log(Log,
+-                "Updating stack arg " << LLVMStackArg->getNameOrAsOperand());
++                "Updating stack arg " << nameOrAsOperand(LLVMStackArg));
+       LayoutTypePtr Key{ LLVMStackArg, LayoutTypePtr::FieldNumNone };
+ 
+       if (auto NewTypeIt = DLATypes.find(Key); NewTypeIt != DLATypes.end()) {
+@@ -153,7 +164,7 @@ static bool updateArgumentTypes(model::Binary &Model,
+     revng_assert(ModelArg.Type()->isScalar());
+ 
+     const llvm::Value *LLVMVal = toLLVMValue(LLVMArg);
+-    revng_log(Log, "Updating argument " << LLVMVal->getNameOrAsOperand());
++    revng_log(Log, "Updating argument " << nameOrAsOperand(LLVMVal));
+ 
+     // Don't update if the type is already fine-grained or if the DLA has
+     // nothing to say.
+@@ -211,7 +222,7 @@ static bool updateReturnType(model::Binary &Model,
+                                     ModelRet.index();
+     revng_log(Log,
+               "Updating elem " << Index << " of "
+-                               << LLVMRetVal->getNameOrAsOperand());
++                               << nameOrAsOperand(LLVMRetVal));
+ 
+     // Don't update if the type is already fine-grained or if the DLA has
+     // nothing to say.
+@@ -261,7 +272,7 @@ static bool updateArgumentTypes(model::Binary &Model,
+ 
+   for (const auto &[LLVMArg, ModelArg] : llvm::zip_first(LLVMArgs, ModelArgs)) {
+     const llvm::Value *LLVMVal = toLLVMValue(LLVMArg);
+-    revng_log(Log, "Updating argument " << LLVMVal->getNameOrAsOperand());
++    revng_log(Log, "Updating argument " << nameOrAsOperand(LLVMVal));
+ 
+     // Don't update if the type is already fine-grained or if the DLA has
+     // nothing to say.
+@@ -313,7 +324,7 @@ static bool updateReturnType(model::Binary &Model,
+                 "WARNING: model::CABIFunctionDefinition returns a scalar type, "
+                 "the associated llvm::Function should return an integer or a "
+                 "pointer: "
+-                  << LLVMRetVal->getNameOrAsOperand());
++                  << nameOrAsOperand(LLVMRetVal));
+       // If this happens we have an aggregate on LLVMIR and a scalar on
+       // CABIFunction type. This should only happen in corner cases and we don't
+       // have a general way to solve it properly right now, so we bail out and
+@@ -321,7 +332,7 @@ static bool updateReturnType(model::Binary &Model,
+       return false;
+     }
+ 
+-    revng_log(Log, "Is scalar: " << LLVMRetVal->getNameOrAsOperand());
++    revng_log(Log, "Is scalar: " << nameOrAsOperand(LLVMRetVal));
+ 
+     // Don't update if the type is already fine-grained or if the DLA has
+     // nothing to say.
+@@ -715,7 +726,7 @@ bool dla::updateFuncSignatures(const llvm::Module &M,
+ 
+     revng_log(Log,
+               "Updating prototype of function "
+-                << LLVMFunc.getNameOrAsOperand());
++                << nameOrAsOperand(&LLVMFunc));
+     Updated |= updatePrototype(*Model, ModelPrototype, &LLVMFunc, TypeMap);
+     Updated |= updateStackFrameType(*ModelFunc, LLVMFunc, TypeMap, *Model);
+ 
+@@ -726,7 +737,7 @@ bool dla::updateFuncSignatures(const llvm::Module &M,
+         if (Prototype != nullptr) {
+           revng_log(Log,
+                     "Updating prototype of indirect call "
+-                      << I->getNameOrAsOperand());
++                      << nameOrAsOperand(I));
+           Updated |= updatePrototype(*Model, *Prototype, I, TypeMap);
+         }
+       }
+diff --git a/lib/HelperArgumentsAnalysis/CPULoopExitPass.cpp b/lib/HelperArgumentsAnalysis/CPULoopExitPass.cpp
+index dc0b2f3..83bd131 100644
+--- a/lib/HelperArgumentsAnalysis/CPULoopExitPass.cpp
++++ b/lib/HelperArgumentsAnalysis/CPULoopExitPass.cpp
+@@ -50,6 +50,11 @@ static ReturnInst *createRet(Instruction *Position) {
+     auto *StructTy = cast<StructType>(ReturnType);
+     auto *Null = ConstantAggregateZero::get(StructTy);
+     return ReturnInst::Create(F->getParent()->getContext(), Null, Position);
++  } else if (ReturnType->isFloatingPointTy() or ReturnType->isVectorTy()) {
++    // Fathom: on Windows (x64 ABI), 128-bit integers are returned as vectors
++    // and long double as x86_fp80: zero too
++    auto *Null = Constant::getNullValue(ReturnType);
++    return ReturnInst::Create(F->getParent()->getContext(), Null, Position);
+   }
+ 
+   revng_abort("Return type not supported");
+diff --git a/lib/HelperArgumentsAnalysis/CPUStateUsage.h b/lib/HelperArgumentsAnalysis/CPUStateUsage.h
+index c4ea39c..4f07f5a 100644
+--- a/lib/HelperArgumentsAnalysis/CPUStateUsage.h
++++ b/lib/HelperArgumentsAnalysis/CPUStateUsage.h
+@@ -321,6 +321,10 @@ private:
+       return IntegerType->getIntegerBitWidth() / 8;
+     else if (isa<llvm::PointerType>(&Type))
+       return DL.getPointerTypeSize(&Type);
++    else if (Type.isVectorTy() or Type.isFloatingPointTy())
++      // Fathom: the helpers built for Windows (x64 ABI) move 128-bit values as
++      // vectors, and long double as x86_fp80
++      return DL.getTypeStoreSize(&Type);
+     revng_abort();
+   }
+ 
+diff --git a/lib/HelperArgumentsAnalysis/FixHelpers.cpp b/lib/HelperArgumentsAnalysis/FixHelpers.cpp
+index 9b3d3e0..534183a 100644
+--- a/lib/HelperArgumentsAnalysis/FixHelpers.cpp
++++ b/lib/HelperArgumentsAnalysis/FixHelpers.cpp
+@@ -84,7 +84,7 @@ static void setMetadata(VariableManager &Variables,
+ 
+       // If necessary, move on to the next field
+       int64_t AvailableSize = CSVSize - OffsetInField;
+-      RemainingSize = std::max(0L, RemainingSize - AvailableSize);
++      RemainingSize = std::max<int64_t>(0, RemainingSize - AvailableSize);
+       Offset = 0;
+     }
+   }
+@@ -335,7 +335,10 @@ setArgumentAlignment(CallBase &Call, unsigned ArgIdx, unsigned Align) {
+ std::pair<CallInst &, CallInst &>
+ AccessFixer::decomposeMemcpy(llvm::Instruction &I) {
+   auto &Call = cast<CallInst>(I);
+-  revng_assert(Call.getIntrinsicID() == Intrinsic::memcpy);
++  // (Fathom: a memmove too, which ArgumentUsageAnalysis handles as a memcpy,
++  // and which the copy through a temporary storage decomposes as well)
++  revng_assert(Call.getIntrinsicID() == Intrinsic::memcpy
++               or Call.getIntrinsicID() == Intrinsic::memmove);
+   auto *Size = cast<ConstantInt>(Call.getArgOperand(2));
+ 
+   BasicBlock &Entry = I.getFunction()->getEntryBlock();
+@@ -401,6 +404,55 @@ void AccessFixer::fixMemoryAccess(Instruction &I,
+   }
+ }
+ 
++/// Fathom: the helpers built for Windows (x64 ABI) move 128-bit values in the
++/// CPU state as vectors, and long double as x86_fp80, where the rest of this
++/// pass and VariableManager handle integers: such a load or store becomes an
++/// integer one of the same size, with a bitcast (same metadata, so the same
++/// annotation). Other accesses are returned as they are.
++static Instruction *toIntegerAccess(Instruction *I) {
++  auto IntegerTypeFor = [I](Type *T) -> IntegerType * {
++    if (not(T->isVectorTy() or T->isFloatingPointTy())
++        or T->getScalarType()->isPointerTy())
++      return nullptr;
++    const DataLayout &DL = I->getModule()->getDataLayout();
++    return IntegerType::get(I->getContext(), DL.getTypeSizeInBits(T));
++  };
++
++  if (auto *Load = dyn_cast<LoadInst>(I)) {
++    IntegerType *IntType = IntegerTypeFor(Load->getType());
++    if (IntType == nullptr)
++      return I;
++    llvm::IRBuilder<> Builder(Load);
++    LoadInst *NewLoad = Builder.CreateAlignedLoad(IntType,
++                                                  Load->getPointerOperand(),
++                                                  Load->getAlign(),
++                                                  Load->isVolatile());
++    NewLoad->copyMetadata(*Load);
++    Value *Cast = Builder.CreateBitCast(NewLoad, Load->getType());
++    Load->replaceAllUsesWith(Cast);
++    Load->eraseFromParent();
++    return NewLoad;
++  }
++
++  if (auto *Store = dyn_cast<StoreInst>(I)) {
++    Value *Stored = Store->getValueOperand();
++    IntegerType *IntType = IntegerTypeFor(Stored->getType());
++    if (IntType == nullptr)
++      return I;
++    llvm::IRBuilder<> Builder(Store);
++    Value *Cast = Builder.CreateBitCast(Stored, IntType);
++    StoreInst *NewStore = Builder.CreateAlignedStore(Cast,
++                                                     Store->getPointerOperand(),
++                                                     Store->getAlign(),
++                                                     Store->isVolatile());
++    NewStore->copyMetadata(*Store);
++    Store->eraseFromParent();
++    return NewStore;
++  }
++
++  return I;
++}
++
+ static void fixHelpers(VariableManager &Variables, Module &Module) {
+   LLVMContext &Context = Module.getContext();
+   auto &DL = Module.getDataLayout();
+@@ -429,6 +481,10 @@ static void fixHelpers(VariableManager &Variables, Module &Module) {
+       if (aua::Annotation::isAnnotated(I))
+         Annotated.push_back(&I);
+ 
++    // (Fathom: accesses of a vector or floating point type made integer ones)
++    for (Instruction *&I : Annotated)
++      I = toIntegerAccess(I);
++
+     for (Instruction *I : Annotated) {
+       Fixer.fixMemoryAccess(*I, *aua::Annotation::deserialize(*I));
+     }
+diff --git a/lib/HelperArgumentsAnalysis/Function.h b/lib/HelperArgumentsAnalysis/Function.h
+index 9467549..0cedd68 100644
+--- a/lib/HelperArgumentsAnalysis/Function.h
++++ b/lib/HelperArgumentsAnalysis/Function.h
+@@ -191,8 +191,10 @@ public:
+           // Ignore the rest
+           return &TheContext.getUnknown();
+         }
+-      } else if (isa<llvm::Constant>(&V)) {
++      } else if (isa<llvm::Constant>(&V) or isa<llvm::MetadataAsValue>(&V)) {
+         // Ignore globals, function pointer, constant expressions and so on
++        // (Fathom: and metadata operands, such as the scope of
++        // llvm.experimental.noalias.scope.decl, which inlining introduces)
+         return &TheContext.getUnknown();
+       } else {
+         return nullptr;
+diff --git a/lib/Lift/ExternalJumpsHandler.cpp b/lib/Lift/ExternalJumpsHandler.cpp
+index 6bcf556..9e24144 100644
+--- a/lib/Lift/ExternalJumpsHandler.cpp
++++ b/lib/Lift/ExternalJumpsHandler.cpp
+@@ -39,7 +39,7 @@ replace(string &Target, const StringRef Search, const StringRef Replace) {
+   return Target;
+ }
+ 
+-Logger Log("external-jump-handler");
++static Logger Log("external-jump-handler");
+ 
+ BasicBlock *ExternalJumpsHandler::createReturnFromExternal() {
+   // Create return_from_call BasicBlock
+diff --git a/lib/Lift/LibTcg.cpp b/lib/Lift/LibTcg.cpp
+index cadfcd8..82899cd 100644
+--- a/lib/Lift/LibTcg.cpp
++++ b/lib/Lift/LibTcg.cpp
+@@ -12,7 +12,12 @@ extern "C" {
+ static std::string
+ findLibTcgPath(const model::Architecture::Values Architecture) {
+   llvm::StringRef ArchName = model::Architecture::getQEMUName(Architecture);
++#ifdef _WIN32
++  // Fathom: libtcg built for Windows (QEMU's DLL naming)
++  const std::string LibTcgName = "/lib/libtcg-" + ArchName.str() + ".dll";
++#else
+   const std::string LibTcgName = "/lib/libtcg-" + ArchName.str() + ".so";
++#endif
+   auto OptionalLibTcg = revng::ResourceFinder.findFile(LibTcgName);
+   revng_assert(OptionalLibTcg.has_value(), "Cannot find libtinycode");
+   return OptionalLibTcg.value();
+diff --git a/lib/Lift/VariableManager.cpp b/lib/Lift/VariableManager.cpp
+index eb41421..5d1a7e4 100644
+--- a/lib/Lift/VariableManager.cpp
++++ b/lib/Lift/VariableManager.cpp
+@@ -361,10 +361,24 @@ void VariableManager::memOpAtEnvOffset(revng::IRBuilder &Builder,
+       Type *CSVType = EnvVar->getValueType();
+       Value *ToStore = nullptr;
+       if (IsMemset) {
+-        // TODO: handle non-zero memset
+         Value *SetValue = Call->getArgOperand(1);
+-        revng_assert(cast<ConstantInt>(SetValue)->getValue().isZero());
+-        ToStore = ConstantInt::get(CSVType, 0);
++        auto *ConstantSetValue = dyn_cast<ConstantInt>(SetValue);
++        if (ConstantSetValue != nullptr and ConstantSetValue->isZero()) {
++          // (Fathom: any type of CSV, such as the vectors of the helpers
++          // built for Windows)
++          ToStore = Constant::getNullValue(CSVType);
++        } else {
++          // Fathom: memset with another byte (or a variable one): that byte
++          // repeated over the integer CSV
++          auto *IntegerCSVType = cast<IntegerType>(CSVType);
++          unsigned Bits = IntegerCSVType->getBitWidth();
++          Value *Byte = Builder.CreateZExtOrTrunc(SetValue,
++                                                  Builder.getInt8Ty());
++          Value *Wide = Builder.CreateZExt(Byte, IntegerCSVType);
++          APInt Ones = APInt::getSplat(Bits, APInt(8, 1));
++          ToStore = Builder.CreateMul(Wide,
++                                      ConstantInt::get(IntegerCSVType, Ones));
++        }
+       } else {
+         ToStore = Builder.CreateLoad(EnvVar->getValueType(), OtherPtr);
+       }
+@@ -379,8 +393,11 @@ void VariableManager::memOpAtEnvOffset(revng::IRBuilder &Builder,
+     Offset += ModuleLayout->getTypeAllocSize(PointeeTy);
+   }
+ 
+-  if (OnlyPointersAndPadding)
+-    eraseFromParent(cast<Instruction>(OtherBasePtr));
++  // (Fathom: a memset has no other pointer, and a constant pointer, a global
++  // for instance, gives a folded constant expression, not an instruction)
++  if (OnlyPointersAndPadding and OtherBasePtr != nullptr)
++    if (auto *OtherBaseInstruction = dyn_cast<Instruction>(OtherBasePtr))
++      eraseFromParent(OtherBaseInstruction);
+ 
+   revng_assert(Offset == TotalSize);
+ }
+diff --git a/lib/Model/Importer/Binary/PECOFFLDDTree.cpp b/lib/Model/Importer/Binary/PECOFFLDDTree.cpp
+index 73871c2..a0716f0 100644
+--- a/lib/Model/Importer/Binary/PECOFFLDDTree.cpp
++++ b/lib/Model/Importer/Binary/PECOFFLDDTree.cpp
+@@ -152,9 +152,11 @@ public:
+     // Process `PATH` environment variable
+     if (Root.isHost()) {
+       if (auto MaybeLibraryPath = llvm::sys::Process::GetEnv("PATH")) {
+-        for (StringRef PathFromPath : split(*MaybeLibraryPath, ":")) {
++        // Fathom: PATH is separated by ';' on Windows, and the path is
++        // llvm::sys::path::append's (rev.ng's append copies a range)
++        for (StringRef PathFromPath : split(*MaybeLibraryPath, ";")) {
+           Path.clear();
+-          append(Path, PathFromPath);
++          llvm::sys::path::append(Path, PathFromPath);
+           SearchPaths.push_back(Path.str().str());
+         }
+       }
+diff --git a/lib/Model/Register.cpp b/lib/Model/Register.cpp
+index 288615a..6691ff1 100644
+--- a/lib/Model/Register.cpp
++++ b/lib/Model/Register.cpp
+@@ -32,37 +32,46 @@ struct RegisterCSVComposition {
+   }
+ };
+ 
++// The offsets of these registers in QEMU's CPU structure (checked by the static
++// assertions of target/i386/cpu.h in libtcg). Fathom, Windows: libtcg built for
++// Windows has a CPUState 0x30 bytes larger (jmp_buf, the thread handle...).
++#ifdef _WIN32
++static constexpr uint64_t CPUStateDelta = 0x30;
++#else
++static constexpr uint64_t CPUStateDelta = 0;
++#endif
++
+ // TODO: the only reason this map is not constexpr is because of the asserts
+ //       in the constructor, but IMO, those are worth it.
+ static const std::array<RegisterCSVComposition, 9> SpecialRegisters = {
+   // x86-64
+   RegisterCSVComposition(model::Register::zmm0_x86_64,
+-                         /* BaseOffset = */ 0x2b10,
++                         /* BaseOffset = */ 0x2b10 + CPUStateDelta,
+                          /* CSVCount = */ 8),
+   RegisterCSVComposition(model::Register::zmm1_x86_64,
+-                         /* BaseOffset = */ 0x2b50,
++                         /* BaseOffset = */ 0x2b50 + CPUStateDelta,
+                          /* CSVCount = */ 8),
+   RegisterCSVComposition(model::Register::zmm2_x86_64,
+-                         /* BaseOffset = */ 0x2b90,
++                         /* BaseOffset = */ 0x2b90 + CPUStateDelta,
+                          /* CSVCount = */ 8),
+   RegisterCSVComposition(model::Register::zmm3_x86_64,
+-                         /* BaseOffset = */ 0x2bd0,
++                         /* BaseOffset = */ 0x2bd0 + CPUStateDelta,
+                          /* CSVCount = */ 8),
+   RegisterCSVComposition(model::Register::zmm4_x86_64,
+-                         /* BaseOffset = */ 0x2c10,
++                         /* BaseOffset = */ 0x2c10 + CPUStateDelta,
+                          /* CSVCount = */ 8),
+   RegisterCSVComposition(model::Register::zmm5_x86_64,
+-                         /* BaseOffset = */ 0x2c50,
++                         /* BaseOffset = */ 0x2c50 + CPUStateDelta,
+                          /* CSVCount = */ 8),
+   RegisterCSVComposition(model::Register::zmm6_x86_64,
+-                         /* BaseOffset = */ 0x2c90,
++                         /* BaseOffset = */ 0x2c90 + CPUStateDelta,
+                          /* CSVCount = */ 8),
+   RegisterCSVComposition(model::Register::zmm7_x86_64,
+-                         /* BaseOffset = */ 0x2cd0,
++                         /* BaseOffset = */ 0x2cd0 + CPUStateDelta,
+                          /* CSVCount = */ 8),
+ 
+   // x86
+-  RegisterCSVComposition(model::Register::st0_x86, /* BaseOffset = */ 0x2960),
++  RegisterCSVComposition(model::Register::st0_x86, /* BaseOffset = */ 0x2960 + CPUStateDelta),
+ 
+   // TODO: extend!
+ };
+diff --git a/lib/PipeboxCommon/Python/_pipebox.cpp b/lib/PipeboxCommon/Python/_pipebox.cpp
+index 6f50e84..ae1fc52 100644
+--- a/lib/PipeboxCommon/Python/_pipebox.cpp
++++ b/lib/PipeboxCommon/Python/_pipebox.cpp
+@@ -20,6 +20,11 @@
+ #include "revng/PipeboxCommon/Model.h"
+ #include "revng/Support/InitRevng.h"
+ 
++#ifdef _WIN32
++// Fathom: the C runtime of Windows names it differently
++using sighandler_t = void (*)(int);
++#endif
++
+ static std::map<int, sighandler_t> SavedSignals;
+ 
+ static void handleSignal(int SigNo) {
+diff --git a/lib/Support/CMakeLists.txt b/lib/Support/CMakeLists.txt
+index 286ce2e..8d9ea97 100644
+--- a/lib/Support/CMakeLists.txt
++++ b/lib/Support/CMakeLists.txt
+@@ -6,6 +6,7 @@ revng_add_library_internal(
+   revngSupport
+   SHARED
+   Configuration.cpp
++  Win32LLVMDump.cpp
+   ProgramRunner.cpp
+   Assert.cpp
+   BasicBlockID.cpp
+diff --git a/lib/Support/Configuration.cpp b/lib/Support/Configuration.cpp
+index 4248611..08969ab 100644
+--- a/lib/Support/Configuration.cpp
++++ b/lib/Support/Configuration.cpp
+@@ -2,9 +2,11 @@
+ // This file is distributed under the MIT License. See LICENSE.md for details.
+ //
+ 
++#ifndef _WIN32
+ extern "C" {
+ #include "glob.h"
+ }
++#endif
+ 
+ #include <memory>
+ 
+@@ -12,6 +14,7 @@ extern "C" {
+ #include "llvm/ADT/StringExtras.h"
+ #include "llvm/Support/Error.h"
+ #include "llvm/Support/FileSystem.h"
++#include "llvm/Support/GlobPattern.h"
+ #include "llvm/Support/YAMLTraits.h"
+ 
+ #include "revng/ADT/STLExtras.h"
+@@ -432,6 +435,27 @@ private:
+   }
+ 
+   static cppcoro::generator<StringRef> glob(StringRef Pattern) {
++#ifdef _WIN32
++    // Fathom: Windows has no glob(3): the files of the pattern's directory
++    // that match it, with LLVM's GlobPattern
++    using namespace llvm;
++    SmallString<128> Directory(sys::path::parent_path(Pattern));
++    auto MaybeMatcher = GlobPattern::create(sys::path::filename(Pattern));
++    if (not MaybeMatcher) {
++      consumeError(MaybeMatcher.takeError());
++      co_return;
++    }
++    std::vector<std::string> Matches;
++    std::error_code EC;
++    for (sys::fs::directory_iterator It(Directory, EC), End;
++         It != End and not EC;
++         It.increment(EC))
++      if (MaybeMatcher->match(sys::path::filename(It->path())))
++        Matches.push_back(It->path());
++    llvm::sort(Matches);
++    for (const std::string &Match : Matches)
++      co_yield StringRef(Match);
++#else
+     glob64_t GlobResults;
+     int Result = glob64(Pattern.str().data(), 0, NULL, &GlobResults);
+ 
+@@ -454,6 +478,7 @@ private:
+       revng_abort();
+       break;
+     }
++#endif
+   }
+ };
+ 
+diff --git a/lib/Support/ExplicitSpecializations.cpp b/lib/Support/ExplicitSpecializations.cpp
+index c223153..8bf15ce 100644
+--- a/lib/Support/ExplicitSpecializations.cpp
++++ b/lib/Support/ExplicitSpecializations.cpp
+@@ -8,5 +8,7 @@
+ 
+ using IntVector = std::vector<unsigned int>;
+ 
++#if defined(_LIBCPP_VERSION) && _LIBCPP_VERSION < 190000
+ template void
+ IntVector::__push_back_slow_path<const unsigned int &>(const unsigned int &);
++#endif
+diff --git a/lib/Support/InitRevng.cpp b/lib/Support/InitRevng.cpp
+index 4a950b0..07de01d 100644
+--- a/lib/Support/InitRevng.cpp
++++ b/lib/Support/InitRevng.cpp
+@@ -22,7 +22,17 @@ revng::InitRevng::InitRevng(int &Argc,
+                             const char *Overview,
+                             llvm::ArrayRef<const llvm::cl::OptionCategory *>
+                               CategoriesToHide) :
+-  InitLLVM(Argc, Argv, true) {
++  detail::InitLLVMArguments(Argc, Argv),
++  InitLLVM(detail::InitLLVMArguments::Argc,
++           detail::InitLLVMArguments::Argv,
++           true) {
++
++  // The arguments InitLLVM chose (the process's own, in UTF-8, on Windows),
++  // except for the Python module, whose first argument is empty
++  if (Argc > 0 and Argv[0] != nullptr and Argv[0][0] != '\0') {
++    Argc = detail::InitLLVMArguments::Argc;
++    Argv = detail::InitLLVMArguments::Argv;
++  }
+ 
+   if (auto Error = revng::Configuration::reload()) {
+     std::string Message = llvm::toString(std::move(Error));
+diff --git a/lib/Support/OnQuit.cpp b/lib/Support/OnQuit.cpp
+index a79fc86..49196b5 100644
+--- a/lib/Support/OnQuit.cpp
++++ b/lib/Support/OnQuit.cpp
+@@ -21,11 +21,20 @@ struct Handler {
+ 
+ // Print statistics on SIGINT (Ctrl + C), SIGABRT (assertions) and SIGUSR1.
+ // For SIGUSR1, don't terminate program execution.
++#ifdef _WIN32
++// Fathom: Windows has no SIGUSR1 / SIGUSR2 (never received there)
++#define SIGUSR1 (-1)
++#define SIGUSR2 (-2)
++static std::array<Handler, 3> Handlers = { { { SIGINT, true, {} },
++                                             { SIGTERM, true, {} },
++                                             { SIGABRT, true, {} } } };
++#else
+ static std::array<Handler, 5> Handlers = { { { SIGINT, true, {} },
+                                              { SIGTERM, true, {} },
+                                              { SIGABRT, true, {} },
+                                              { SIGUSR1, false, {} },
+                                              { SIGUSR2, false, {} } } };
++#endif
+ 
+ llvm::ManagedStatic<OnQuitRegistry> OnQuit;
+ 
+diff --git a/lib/Support/PathList.cpp b/lib/Support/PathList.cpp
+index e620615..d573119 100644
+--- a/lib/Support/PathList.cpp
++++ b/lib/Support/PathList.cpp
+@@ -2,16 +2,24 @@
+ // This file is distributed under the MIT License. See LICENSE.md for details.
+ //
+ 
++#ifdef _WIN32
++// Fathom: Windows (no dl_iterate_phdr)
++#define NOMINMAX
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++#else
+ extern "C" {
+ #include "dlfcn.h"
+ #include "link.h"
+ }
++#endif
+ 
+ #include <map>
+ #include <set>
+ 
+ #include "llvm/ADT/StringRef.h"
+ #include "llvm/Support/FileSystem.h"
++#include "llvm/Support/ConvertUTF.h"
+ #include "llvm/Support/GlobPattern.h"
+ #include "llvm/Support/ManagedStatic.h"
+ #include "llvm/Support/MemoryBuffer.h"
+@@ -32,6 +40,7 @@ struct Resources {
+ 
+ llvm::ManagedStatic<Resources> Resources;
+ 
++#ifndef _WIN32
+ extern "C" {
+ static int
+ dlIteratePhdrCallback(struct dl_phdr_info *Info, size_t Size, void *Data) {
+@@ -50,6 +59,25 @@ dlIteratePhdrCallback(struct dl_phdr_info *Info, size_t Size, void *Data) {
+   return 0;
+ }
+ }
++#endif
++
++#ifdef _WIN32
++// The module that contains rev.ng (the Python module _pipebox.pyd or a
++// program: rev.ng is linked statically into each of them on Windows)
++static std::string currentModulePath() {
++  HMODULE Module = nullptr;
++  GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
++                       | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++                     reinterpret_cast<LPCWSTR>(&currentModulePath),
++                     &Module);
++  std::wstring Buffer(32768, L'\0');
++  DWORD Length = GetModuleFileNameW(Module, Buffer.data(), Buffer.size());
++  Buffer.resize(Length);
++  std::string Result;
++  llvm::convertWideToUTF8(Buffer, Result);
++  return Result;
++}
++#endif
+ 
+ static void initialize() {
+   if (not Resources->FirstCall)
+@@ -57,6 +85,26 @@ static void initialize() {
+ 
+   Resources->FirstCall = false;
+ 
++#ifdef _WIN32
++  {
++    // The root: the first folder above the module that holds share/revng
++    using namespace llvm::sys::path;
++    std::string ModulePath = currentModulePath();
++    Resources->LibrariesFullPath[stem(ModulePath).str()] = ModulePath;
++    llvm::SmallString<256> Root(parent_path(ModulePath));
++    while (not Root.empty()) {
++      llvm::SmallString<256> Share(Root);
++      append(Share, "share", "revng");
++      if (llvm::sys::fs::is_directory(Share))
++        break;
++      std::string Parent = parent_path(Root).str(); // a copy: Root changes
++      if (Parent == Root.str())
++        break;
++      Root = Parent;
++    }
++    Resources->CurrentRoot = Root.str().str();
++  }
++#else
+   dl_iterate_phdr(dlIteratePhdrCallback, nullptr);
+ 
+   using namespace llvm::sys::path;
+@@ -64,6 +112,7 @@ static void initialize() {
+   using llvm::StringRef;
+   StringRef MainLibraryFullPath = Resources->LibrariesFullPath.at(MainLibrary);
+   Resources->CurrentRoot = parent_path(parent_path(MainLibraryFullPath));
++#endif
+ }
+ 
+ llvm::StringRef getCurrentRoot() {
+diff --git a/lib/Support/Progress.cpp b/lib/Support/Progress.cpp
+index 37648ab..da5e9af 100644
+--- a/lib/Support/Progress.cpp
++++ b/lib/Support/Progress.cpp
+@@ -9,6 +9,15 @@ extern "C" {
+ #include "sys/ioctl.h"
+ }
+ #endif
++#ifdef _WIN32
++// Fathom: Windows (the memory of the process, its id)
++#define NOMINMAX
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++
++#include <process.h>
++#include <psapi.h>
++#endif
+ 
+ #include <chrono>
+ #include <fstream>
+@@ -162,6 +171,21 @@ private:
+     LastMemoryPoll = Now;
+   }
+ 
++#ifdef _WIN32
++  // Fathom: Windows, the working set of the process
++  static unsigned long long readWorkingSet() {
++    PROCESS_MEMORY_COUNTERS Counters = {};
++    Counters.cb = sizeof(Counters);
++    if (not K32GetProcessMemoryInfo(GetCurrentProcess(), &Counters,
++                                    sizeof(Counters)))
++      return 0;
++    return Counters.WorkingSetSize;
++  }
++
++  static unsigned long long readMemorySmaps() { return readWorkingSet(); }
++
++  static unsigned long long readMemoryStatm() { return readWorkingSet(); }
++#else
+   static unsigned long long readMemorySmaps() {
+     // TODO: linux-specific and requires `smaps_rollup` which is linux 4.14+.
+     // Use `std::ifstream` instead of `llvm::MemoryBuffer` as it avoids reading
+@@ -199,6 +223,7 @@ private:
+ 
+     return RSSPages * PageSize;
+   }
++#endif
+ };
+ 
+ class PlainProgressListener : public llvm::ProgressListener {
+diff --git a/lib/Support/Tar.cpp b/lib/Support/Tar.cpp
+index edd2669..741f6f3 100644
+--- a/lib/Support/Tar.cpp
++++ b/lib/Support/Tar.cpp
+@@ -112,7 +112,7 @@ void TarWriter::addMember(llvm::StringRef Filename,
+   }
+ }
+ 
+-long TarWriter::archiveWrite(archive *Ptr,
++la_ssize_t TarWriter::archiveWrite(archive *Ptr,
+                              void *ClassPtr,
+                              const void *Data,
+                              size_t Size) {
+diff --git a/lib/Support/Win32LLVMDump.cpp b/lib/Support/Win32LLVMDump.cpp
+new file mode 100644
+index 0000000..efa02b6
+--- /dev/null
++++ b/lib/Support/Win32LLVMDump.cpp
+@@ -0,0 +1,20 @@
++//
++// This file is distributed under the MIT License. See LICENSE.md for details.
++//
++
++// Fathom, Windows: LLVM is built without assertions there, so the dump()
++// methods of its classes (compiled only with assertions or LLVM_ENABLE_DUMP)
++// are not in its libraries. rev.ng calls some of them: their definitions, as
++// LLVM's AsmWriter.cpp has them.
++
++#include "llvm/Config/llvm-config.h"
++#include "llvm/IR/Value.h"
++#include "llvm/Support/Debug.h"
++#include "llvm/Support/raw_ostream.h"
++
++#if defined(_WIN32) && !defined(LLVM_ENABLE_DUMP)
++void llvm::Value::dump() const {
++  print(dbgs(), /*IsForDebug=*/true);
++  dbgs() << '\n';
++}
++#endif
+diff --git a/lib/Yield/CMakeLists.txt b/lib/Yield/CMakeLists.txt
+index 964cfb7..21a38d6 100644
+--- a/lib/Yield/CMakeLists.txt
++++ b/lib/Yield/CMakeLists.txt
+@@ -19,7 +19,14 @@ revng_add_library_internal(
+   Verify.cpp)
+ 
+ set(DISASSEMBLER_ARCHITECTURE_SUPPORT "")
+-foreach(CURRENT_ARCHITECTURE AArch64 ARM Mips SystemZ X86)
++if(WIN32)
++  # Fathom: Windows, where libtcg is built for x86 only (and LLVM with the X86
++  # target only)
++  set(DISASSEMBLER_ARCHITECTURES X86)
++else()
++  set(DISASSEMBLER_ARCHITECTURES AArch64 ARM Mips SystemZ X86)
++endif()
++foreach(CURRENT_ARCHITECTURE ${DISASSEMBLER_ARCHITECTURES})
+   set(DISASSEMBLER_ARCHITECTURE_SUPPORT
+       ${DISASSEMBLER_ARCHITECTURE_SUPPORT}
+       "${CURRENT_ARCHITECTURE}Disassembler" "${CURRENT_ARCHITECTURE}Info"
+diff --git a/python/CMakeLists.txt b/python/CMakeLists.txt
+index d539e60..b74316f 100644
+--- a/python/CMakeLists.txt
++++ b/python/CMakeLists.txt
+@@ -98,16 +98,37 @@ function(python_module)
+       "${WHEEL_FILES_${PYTHON_MODULE_WHEEL}}"
+       PARENT_SCOPE)
+ 
+-  add_custom_target(
+-    "${PYTHON_MODULE_TARGET_NAME}"
+-    DEPENDS ${PYTHON_MODULE_MODULE_FILES}
+-            ${PYTHON_MODULE_MODULE_GENERATED_FILES})
++  if(WIN32)
++    # Fathom: no wheels on Windows, which would pull the generated files: the
++    # generated Python files (not the native module, a library target) built
++    # with ALL, except those of the revng.project Python API generated by
++    # running rev.ng's command line or yq (mixins.py, pipeline_description.py)
++    set(GENERATED_OUTPUTS "")
++    foreach(MODULE_FILE ${PYTHON_MODULE_MODULE_GENERATED_FILES})
++      if(MODULE_FILE MATCHES "\\.py$" AND NOT MODULE_FILE MATCHES
++                                          "(mixins|pipeline_description)\\.py$")
++        list(APPEND GENERATED_OUTPUTS
++             "${CMAKE_BINARY_DIR}/${PYTHON_INSTALL_PATH}/${MODULE_FILE}")
++      endif()
++    endforeach()
++    add_custom_target("${PYTHON_MODULE_TARGET_NAME}" ALL
++                      DEPENDS ${GENERATED_OUTPUTS})
++  else()
++    add_custom_target(
++      "${PYTHON_MODULE_TARGET_NAME}"
++      DEPENDS ${PYTHON_MODULE_MODULE_FILES}
++              ${PYTHON_MODULE_MODULE_GENERATED_FILES})
++  endif()
+ endfunction()
+ 
+ #
+ # Wheel generation
+ #
+ function(python_wheel)
++  if(WIN32)
++    # Fathom: no wheels on Windows (their rule is a shell command line)
++    return()
++  endif()
+   set(options)
+   set(oneValueArgs NAME PYPROJECT README)
+   set(multiValueArgs)
+@@ -545,6 +566,16 @@ target_link_libraries(
+   "${CPP_MODULE_NAME}" PUBLIC ${Python3_LIBRARIES} ${LLVM_LIBRARIES} nanobind
+                               revngSupport revngModel)
+ target_include_directories("${CPP_MODULE_NAME}" PUBLIC ${Python3_INCLUDE_DIRS})
++if(WIN32)
++  # Fathom: on Windows the Python module holds all of rev.ng (its pipes,
++  # analyses and containers register themselves when it is loaded): see
++  # revng_win32_link_all in Common.cmake
++  set_target_properties("${CPP_MODULE_NAME}" PROPERTIES SUFFIX ".pyd")
++  revng_win32_link_all_later("${CPP_MODULE_NAME}")
++  set(CPP_MODULE_FILE "revng/internal/${CPP_MODULE_NAME}.pyd")
++else()
++  set(CPP_MODULE_FILE "revng/internal/${CPP_MODULE_NAME}.so")
++endif()
+ 
+ python_module(
+   TARGET_NAME
+@@ -554,7 +585,7 @@ python_module(
+   MODULE_FILES
+   "revng/internal/pipebox.py"
+   MODULE_GENERATED_FILES
+-  "revng/internal/${CPP_MODULE_NAME}.so")
++  "${CPP_MODULE_FILE}")
+ 
+ #
+ # Generate actual wheel rules
+diff --git a/python/revng/internal/cli/_commands/daemon_manager.py b/python/revng/internal/cli/_commands/daemon_manager.py
+index c10f8f7..db79408 100644
+--- a/python/revng/internal/cli/_commands/daemon_manager.py
++++ b/python/revng/internal/cli/_commands/daemon_manager.py
+@@ -12,7 +12,13 @@
+ # terminated once all clients request it to be stopped.
+ 
+ import asyncio
+-import fcntl
++
++try:
++    import fcntl
++except ImportError:
++    # Fathom: Windows, msvcrt's locks instead
++    fcntl = None  # type: ignore[assignment]
++    import msvcrt
+ import os
+ import signal
+ import sys
+@@ -353,10 +359,17 @@ def manager_lock():
+     path = manager_dir() / "manager.lock"
+     with open(path, "wb") as f:
+         try:
+-            fcntl.flock(f, fcntl.LOCK_EX)
++            if fcntl is not None:
++                fcntl.flock(f, fcntl.LOCK_EX)
++            else:
++                msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+             yield
+         finally:
+-            fcntl.flock(f, fcntl.LOCK_UN)
++            if fcntl is not None:
++                fcntl.flock(f, fcntl.LOCK_UN)
++            else:
++                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
++            f.close()
+             os.remove(path)
+ 
+ 
+diff --git a/python/revng/internal/pipebox.py b/python/revng/internal/pipebox.py
+index 1871d5c..58694a8 100644
+--- a/python/revng/internal/pipebox.py
++++ b/python/revng/internal/pipebox.py
+@@ -4,6 +4,7 @@
+ 
+ import inspect
+ import signal
++import sys
+ import tarfile
+ from io import BytesIO
+ 
+@@ -18,7 +19,8 @@ from revng.pypeline.task.pipe import Pipe, PipeDependencies
+ from revng.pypeline.task.task import TaskArgument, TaskArgumentAccess
+ from revng.support import get_root
+ 
+-_native_libraries = [get_root() / "lib/librevngPipebox.so"]
++# Fathom, Windows: rev.ng is linked into the _pipebox module itself (no separate library to load first)
++_native_libraries = [] if sys.platform == "win32" else [get_root() / "lib/librevngPipebox.so"]
+ _module, _handles = import_pipebox(_native_libraries)
+ 
+ _native_pipes: dict[str, type] = {}
+@@ -41,19 +43,9 @@ _collect_native_pipes_and_analyses()
+ 
+ 
+ def initialize(argv: list[str] = []):
+-    _module.initialize(
+-        {
+-            signal.SIGINT,
+-            signal.SIGTERM,
+-            signal.SIGHUP,
+-            signal.SIGQUIT,
+-            signal.SIGCHLD,
+-            signal.SIGPIPE,
+-            signal.SIGUSR1,
+-            signal.SIGUSR2,
+-        },
+-        argv,
+-    )
++    names = ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT", "SIGCHLD", "SIGPIPE", "SIGUSR1", "SIGUSR2")
++    # Fathom: the signals this platform has (Windows: SIGINT, SIGTERM)
++    _module.initialize({getattr(signal, name) for name in names if hasattr(signal, name)}, argv)
+ 
+ 
+ def argv_hook(input_: list[str]):
+diff --git a/python/revng/pypeline/cli/hypercorn.py b/python/revng/pypeline/cli/hypercorn.py
+index 4784c29..8350772 100644
+--- a/python/revng/pypeline/cli/hypercorn.py
++++ b/python/revng/pypeline/cli/hypercorn.py
+@@ -15,7 +15,13 @@ from typing import Any, Awaitable, Callable
+ 
+ import click
+ import hypercorn.__main__ as main_module
+-import uvloop
++try:
++    import uvloop
++except ImportError:
++    # Fathom: no uvloop on Windows: asyncio's own loop
++    import types
++
++    uvloop = types.SimpleNamespace(run=asyncio.run, new_event_loop=asyncio.new_event_loop)
+ from hypercorn.app_wrappers import ASGIWrapper
+ from hypercorn.asyncio import serve
+ from hypercorn.asyncio.run import _run, worker_serve
+diff --git a/python/revng/pypeline/utils/db_migrator.py b/python/revng/pypeline/utils/db_migrator.py
+index 41fb1fc..9b9a07b 100644
+--- a/python/revng/pypeline/utils/db_migrator.py
++++ b/python/revng/pypeline/utils/db_migrator.py
+@@ -3,7 +3,9 @@
+ #
+ 
+ import re
++import sys
+ from abc import ABC, abstractmethod
++from importlib.metadata import PackageNotFoundError
+ from importlib.metadata import files as metadata_files
+ from pathlib import Path, PurePath
+ 
+@@ -12,17 +14,30 @@ class DBMigrator(ABC):
+     def __init__(self, package: str, path: PurePath):
+         self._migrations: dict[int, Path] = {}
+ 
+-        files = metadata_files(package)
+-        assert files is not None
+-        for file in files:
+-            if not file.is_relative_to(path):
+-                continue
+-
+-            match = re.match(r"v(?P<version>\d+)\.sql", file.name)
+-            assert match is not None
+-            absolute_path = file.locate()
+-            assert isinstance(absolute_path, Path)
+-            self._migrations[int(match["version"])] = absolute_path
++        try:
++            files = metadata_files(package)
++        except PackageNotFoundError:
++            # Fathom: the package is not installed from its wheel (Windows):
++            # the migrations next to the module, on sys.path
++            files = None
++            for entry in sys.path:
++                directory = Path(entry) / path
++                if directory.is_dir():
++                    for file in sorted(directory.glob("v*.sql")):
++                        match = re.match(r"v(?P<version>\d+)\.sql", file.name)
++                        assert match is not None
++                        self._migrations[int(match["version"])] = file
++                    break
++        if files is not None:
++            for file in files:
++                if not file.is_relative_to(path):
++                    continue
++
++                match = re.match(r"v(?P<version>\d+)\.sql", file.name)
++                assert match is not None
++                absolute_path = file.locate()
++                assert isinstance(absolute_path, Path)
++                self._migrations[int(match["version"])] = absolute_path
+ 
+         for value in range(1, len(self._migrations) + 1):
+             assert value in self._migrations
+diff --git a/python/scripts/revng b/python/scripts/revng
+index 97cb61e..649c859 100644
+--- a/python/scripts/revng
++++ b/python/scripts/revng
+@@ -20,7 +20,7 @@ assert new_path.is_dir()
+ 
+ if str(new_path) not in sys.path:
+     if "PYTHONPATH" in os.environ:
+-        os.environ["PYTHONPATH"] = f"{new_path!s}:{os.environ['PYTHONPATH']}"
++        os.environ["PYTHONPATH"] = f"{new_path!s}{os.pathsep}{os.environ['PYTHONPATH']}"
+     else:
+         os.environ["PYTHONPATH"] = str(new_path)
+     sys.path.insert(0, str(new_path))
+diff --git a/share/revng/cmake/Common.cmake b/share/revng/cmake/Common.cmake
+index 9cc71e7..3ee1619 100644
+--- a/share/revng/cmake/Common.cmake
++++ b/share/revng/cmake/Common.cmake
+@@ -26,9 +26,85 @@ macro(append_target_property TARGET PROPERTY VALUE SEPARATOR)
+   set_target_properties("${TARGET}" PROPERTIES "${PROPERTY}" "${TMP}${VALUE}")
+ endmacro()
+ 
++# ~~~
++# Fathom, Windows: rev.ng's libraries are shared libraries (.so) loaded as
++# plugins (Python, revng opt), which would each carry their own copy of LLVM,
++# MLIR and clang in DLLs (separate registries, separate MLIR TypeIDs), and one
++# DLL exporting all of them would exceed the 65535 exports of a PE file. So
++# on Windows every library of rev.ng is an OBJECT library, and each module or
++# executable links all of them, with LLVM, MLIR and clang, statically:
++# revng_win32_link_all() at the end of the configuration (the Python module
++# _pipebox, revng-opt, the tools).
++# ~~~
++if(WIN32)
++  set_property(GLOBAL PROPERTY REVNG_WIN32_LIBRARIES "")
++  set_property(GLOBAL PROPERTY REVNG_WIN32_LINK_ALL "")
++endif()
++
++function(revng_win32_link_all_later TARGET)
++  set_property(GLOBAL APPEND PROPERTY REVNG_WIN32_LINK_ALL "${TARGET}")
++endfunction()
++
++# The libraries of rev.ng in dependency order (a library after those it
++# uses), into the global property REVNG_WIN32_SORTED
++function(revng_win32_visit LIBRARY)
++  get_property(VISITED GLOBAL PROPERTY REVNG_WIN32_VISITED)
++  if("${LIBRARY}" IN_LIST VISITED)
++    return()
++  endif()
++  set_property(GLOBAL APPEND PROPERTY REVNG_WIN32_VISITED "${LIBRARY}")
++  get_property(LIBRARIES GLOBAL PROPERTY REVNG_WIN32_LIBRARIES)
++  get_target_property(DEPENDENCIES "${LIBRARY}" LINK_LIBRARIES)
++  get_target_property(INTERFACE "${LIBRARY}" INTERFACE_LINK_LIBRARIES)
++  foreach(DEPENDENCY ${DEPENDENCIES} ${INTERFACE})
++    if("${DEPENDENCY}" IN_LIST LIBRARIES)
++      revng_win32_visit("${DEPENDENCY}")
++    endif()
++  endforeach()
++  set_property(GLOBAL APPEND PROPERTY REVNG_WIN32_SORTED "${LIBRARY}")
++endfunction()
++
++function(revng_win32_link_all)
++  get_property(LIBRARIES GLOBAL PROPERTY REVNG_WIN32_LIBRARIES)
++  get_property(TARGETS GLOBAL PROPERTY REVNG_WIN32_LINK_ALL)
++  # Static constructors run in the reverse order of the objects in the link
++  # with MinGW: link the users of a library before it (the order of static
++  # libraries), so that a library is initialized before its users, as the
++  # shared libraries are elsewhere (ScopeGraphUtils' helpers use the names of
++  # FunctionTags' tags when they are constructed, for instance)
++  set_property(GLOBAL PROPERTY REVNG_WIN32_VISITED "")
++  set_property(GLOBAL PROPERTY REVNG_WIN32_SORTED "")
++  foreach(LIBRARY ${LIBRARIES})
++    revng_win32_visit("${LIBRARY}")
++  endforeach()
++  get_property(SORTED GLOBAL PROPERTY REVNG_WIN32_SORTED)
++  list(REVERSE SORTED)
++  foreach(TARGET ${TARGETS})
++    # the objects of an OBJECT library are linked when it is a direct
++    # dependency: all of them, in that order, then the other libraries the
++    # target links
++    get_target_property(OWN "${TARGET}" LINK_LIBRARIES)
++    set(OTHERS "")
++    foreach(ITEM ${OWN})
++      if(NOT "${ITEM}" IN_LIST LIBRARIES)
++        list(APPEND OTHERS "${ITEM}")
++      endif()
++    endforeach()
++    set_property(TARGET "${TARGET}" PROPERTY LINK_LIBRARIES ${SORTED}
++                                                            ${OTHERS})
++    # a static program: no DLL of the toolchain to ship
++    target_link_options("${TARGET}" PRIVATE -static)
++  endforeach()
++endfunction()
++
+ function(revng_register_library NAME EXPORT_NAME)
+ 
+   add_dependencies(revng-all-binaries "${NAME}")
++  if(WIN32)
++    # Fathom: OBJECT libraries, nothing to install on their own
++    set_property(GLOBAL APPEND PROPERTY REVNG_WIN32_LIBRARIES "${NAME}")
++    return()
++  endif()
+   target_include_directories("${NAME}" INTERFACE $<INSTALL_INTERFACE:include/>)
+   prepend_target_property("${NAME}" BUILD_RPATH
+                           "\$ORIGIN:\$ORIGIN/revng/analyses" ":")
+@@ -49,7 +125,16 @@ endfunction()
+ 
+ macro(revng_add_library NAME TYPE EXPORT_NAME)
+ 
+-  add_library("${NAME}" "${TYPE}" ${ARGN})
++  if(WIN32)
++    if("${TYPE}" MATCHES "^(STATIC|SHARED|MODULE|OBJECT)$")
++      add_library("${NAME}" OBJECT ${ARGN})
++    else()
++      # no type given: TYPE is the first source
++      add_library("${NAME}" OBJECT "${TYPE}" ${ARGN})
++    endif()
++  else()
++    add_library("${NAME}" "${TYPE}" ${ARGN})
++  endif()
+   revng_register_library("${NAME}" "${EXPORT_NAME}")
+ 
+ endmacro()
+@@ -58,6 +143,12 @@ endmacro()
+ # revng-opt
+ macro(revng_add_analyses_library NAME EXPORT_NAME)
+ 
++  if(WIN32)
++    set(REVNG_ANALYSES_SOURCES ${ARGN})
++    list(REMOVE_ITEM REVNG_ANALYSES_SOURCES STATIC SHARED MODULE)
++    add_library("${NAME}" OBJECT ${REVNG_ANALYSES_SOURCES})
++    revng_register_library("${NAME}" "${EXPORT_NAME}")
++  else()
+   add_library("${NAME}" SHARED ${ARGN})
+   add_dependencies(revng-all-binaries "${NAME}")
+   target_include_directories("${NAME}" INTERFACE $<INSTALL_INTERFACE:include/>)
+@@ -74,6 +165,7 @@ macro(revng_add_analyses_library NAME EXPORT_NAME)
+     TARGETS "${NAME}"
+     EXPORT "${EXPORT_NAME}"
+     LIBRARY DESTINATION lib/revng/analyses)
++  endif()
+ 
+ endmacro()
+ 
+@@ -99,7 +191,11 @@ macro(revng_add_executable_internal NAME TARGET_PATH)
+   endif()
+ 
+   add_executable("${NAME}" ${ARGN})
+-  append_target_property("${NAME}" "LINK_FLAGS" "-pie" " ")
++  if(WIN32)
++    revng_win32_link_all_later("${NAME}")
++  else()
++    append_target_property("${NAME}" "LINK_FLAGS" "-pie" " ")
++  endif()
+ 
+   add_dependencies(revng-all-binaries "${NAME}")
+ 
+diff --git a/share/revng/cmake/TupleTreeGenerator.cmake b/share/revng/cmake/TupleTreeGenerator.cmake
+index c04f793..e020495 100644
+--- a/share/revng/cmake/TupleTreeGenerator.cmake
++++ b/share/revng/cmake/TupleTreeGenerator.cmake
+@@ -152,16 +152,20 @@ function(tuple_tree_generator_compute_generated_cpp_files SCHEMA_PATH
+     PROPERTY CMAKE_CONFIGURE_DEPENDS "${SCHEMA_PATH}")
+   execute_process(
+     COMMAND
+-      python3 "${SCRIPTS_ROOT_DIR}/tuple-tree-generate-cpp-paths.py"
++      "${Python3_EXECUTABLE}" "${SCRIPTS_ROOT_DIR}/tuple-tree-generate-cpp-paths.py"
+       "--forward-decls" "--early" "--late" "${SCHEMA_PATH}" "${HEADERS_DIR}"
+-    COMMAND "tr" "\n" ";"
+     OUTPUT_VARIABLE LOCAL_GENERATED_HEADERS_VARIABLE COMMAND_ERROR_IS_FATAL ANY)
++  # one path per line: a CMake list (Fathom: without tr, which does not get a
++  # newline argument on Windows, where Python ends its lines with \r\n)
++  string(REPLACE "\r" "" LOCAL_GENERATED_HEADERS_VARIABLE "${LOCAL_GENERATED_HEADERS_VARIABLE}")
++  string(REPLACE "\n" ";" LOCAL_GENERATED_HEADERS_VARIABLE "${LOCAL_GENERATED_HEADERS_VARIABLE}")
+ 
+   execute_process(
+-    COMMAND python3 "${SCRIPTS_ROOT_DIR}/tuple-tree-generate-cpp-paths.py"
++    COMMAND "${Python3_EXECUTABLE}" "${SCRIPTS_ROOT_DIR}/tuple-tree-generate-cpp-paths.py"
+             "--impl" "${SCHEMA_PATH}" "${HEADERS_DIR}"
+-    COMMAND "tr" "\n" ";"
+     OUTPUT_VARIABLE LOCAL_GENERATED_IMPLS_VARIABLE COMMAND_ERROR_IS_FATAL ANY)
++  string(REPLACE "\r" "" LOCAL_GENERATED_IMPLS_VARIABLE "${LOCAL_GENERATED_IMPLS_VARIABLE}")
++  string(REPLACE "\n" ";" LOCAL_GENERATED_IMPLS_VARIABLE "${LOCAL_GENERATED_IMPLS_VARIABLE}")
+ 
+   set("${GENERATED_HEADERS_VARIABLE}"
+       ${LOCAL_GENERATED_HEADERS_VARIABLE}
+@@ -171,6 +175,15 @@ function(tuple_tree_generator_compute_generated_cpp_files SCHEMA_PATH
+       PARENT_SCOPE)
+ endfunction()
+ 
++# Single quotes around the type names in custom commands: a shell removes them
++# elsewhere; on Windows (Fathom), cmd runs the custom commands and would pass
++# them on, so no quotes there
++if(WIN32)
++  set(REVNG_SHELL_QUOTE "")
++else()
++  set(REVNG_SHELL_QUOTE "'")
++endif()
++
+ set(TEMPLATES_DIR "${CMAKE_SOURCE_DIR}/scripts/tuple_tree_generator/templates")
+ 
+ set(CPP_TEMPLATES
+@@ -220,12 +233,12 @@ function(
+ 
+   set(SCALAR_TYPE_ARGS)
+   foreach(ST ${SCALAR_TYPES})
+-    list(APPEND SCALAR_TYPE_ARGS --scalar-type "'${ST}'")
++    list(APPEND SCALAR_TYPE_ARGS --scalar-type "${REVNG_SHELL_QUOTE}${ST}${REVNG_SHELL_QUOTE}")
+   endforeach()
+ 
+   add_custom_command(
+     COMMAND
+-      python3 "${SCRIPTS_ROOT_DIR}/tuple-tree-generate.py" docs
++      "${Python3_EXECUTABLE}" "${SCRIPTS_ROOT_DIR}/tuple-tree-generate.py" docs
+       ${SCALAR_TYPE_ARGS} "${YAML_DEFINITIONS}" >
+       "${EXPECTED_GENERATED_MARKDOWN}"
+     OUTPUT "${EXPECTED_GENERATED_MARKDOWN}"
+@@ -263,7 +276,7 @@ function(
+ 
+   set(SCALAR_TYPE_ARGS)
+   foreach(ST ${SCALAR_TYPES})
+-    list(APPEND SCALAR_TYPE_ARGS --scalar-type "'${ST}'")
++    list(APPEND SCALAR_TYPE_ARGS --scalar-type "${REVNG_SHELL_QUOTE}${ST}${REVNG_SHELL_QUOTE}")
+   endforeach()
+ 
+   if(${EMIT_TRACKING})
+@@ -274,7 +287,7 @@ function(
+ 
+   add_custom_command(
+     COMMAND
+-      python3 "${SCRIPTS_ROOT_DIR}/tuple-tree-generate.py" cpp --namespace
++      "${Python3_EXECUTABLE}" "${SCRIPTS_ROOT_DIR}/tuple-tree-generate.py" cpp --namespace
+       "${NAMESPACE}" --include-path-prefix "${INCLUDE_PATH_PREFIX}"
+       ${STRING_TYPE_ARGS} ${SCALAR_TYPE_ARGS} "${YAML_DEFINITIONS}"
+       "${OUTPUT_DIR}" ${TRACKING} ${TRACKING_DEBUG}
+@@ -306,12 +319,12 @@ function(
+ 
+   set(SCALAR_TYPE_ARGS)
+   foreach(ST ${SCALAR_TYPES})
+-    list(APPEND SCALAR_TYPE_ARGS --scalar-type "'${ST}'")
++    list(APPEND SCALAR_TYPE_ARGS --scalar-type "${REVNG_SHELL_QUOTE}${ST}${REVNG_SHELL_QUOTE}")
+   endforeach()
+ 
+   add_custom_command(
+     COMMAND
+-      python3 "${SCRIPTS_ROOT_DIR}/tuple-tree-generate.py" jsonschema --output
++      "${Python3_EXECUTABLE}" "${SCRIPTS_ROOT_DIR}/tuple-tree-generate.py" jsonschema --output
+       "${OUTPUT_PATH}" ${STRING_TYPE_ARGS} ${SEPARATE_STRING_TYPE_ARGS}
+       ${SCALAR_TYPE_ARGS} "${YAML_DEFINITIONS}"
+     OUTPUT "${OUTPUT_PATH}"
+@@ -354,12 +367,12 @@ function(
+ 
+   set(SCALAR_TYPE_ARGS)
+   foreach(ET ${SCALAR_TYPES})
+-    list(APPEND SCALAR_TYPE_ARGS --scalar-type "'${ET}'")
++    list(APPEND SCALAR_TYPE_ARGS --scalar-type "${REVNG_SHELL_QUOTE}${ET}${REVNG_SHELL_QUOTE}")
+   endforeach()
+ 
+   add_custom_command(
+     COMMAND
+-      python3 "${SCRIPTS_ROOT_DIR}/tuple-tree-generate.py" typescript --output
++      "${Python3_EXECUTABLE}" "${SCRIPTS_ROOT_DIR}/tuple-tree-generate.py" typescript --output
+       "${OUTPUT_PATH}" --global-name "${GLOBAL_NAME}" ${INCLUDE_FILE_ARGS}
+       ${STRING_TYPE_ARGS} ${EXTERNAL_TYPE_ARGS} ${SCALAR_TYPE_ARGS}
+       "${YAML_DEFINITIONS}"
+@@ -397,17 +410,17 @@ function(
+ 
+   set(SCALAR_TYPE_ARGS)
+   foreach(ET ${SCALAR_TYPES})
+-    list(APPEND SCALAR_TYPE_ARGS --scalar-type "'${ET}'")
++    list(APPEND SCALAR_TYPE_ARGS --scalar-type "${REVNG_SHELL_QUOTE}${ET}${REVNG_SHELL_QUOTE}")
+   endforeach()
+ 
+   set(PYTHON_MIXINS_ARGS)
+   foreach(PM ${PYTHON_MIXINS})
+-    list(APPEND PYTHON_MIXINS_ARGS --mixins "'${PM}'")
++    list(APPEND PYTHON_MIXINS_ARGS --mixins "${REVNG_SHELL_QUOTE}${PM}${REVNG_SHELL_QUOTE}")
+   endforeach()
+ 
+   add_custom_command(
+     COMMAND
+-      python3 "${SCRIPTS_ROOT_DIR}/tuple-tree-generate.py" python --output
++      "${Python3_EXECUTABLE}" "${SCRIPTS_ROOT_DIR}/tuple-tree-generate.py" python --output
+       "${OUTPUT_PATH}" ${PYTHON_MIXINS_ARGS} ${STRING_TYPE_ARGS}
+       ${EXTERNAL_TYPE_ARGS} ${SCALAR_TYPE_ARGS} "${YAML_DEFINITIONS}"
+     OUTPUT "${OUTPUT_PATH}"
+diff --git a/share/revng/early-linked.c b/share/revng/early-linked.c
+index 0916e21..e30bb89 100644
+--- a/share/revng/early-linked.c
++++ b/share/revng/early-linked.c
+@@ -11,11 +11,19 @@
+ PlainMetaAddress last_pc;
+ PlainMetaAddress current_pc;
+ 
++// Fathom, Windows: MinGW's setjmp is a macro around _setjmp, and rev.ng looks
++// for a function named setjmp in this module: declare one
++#if defined(_WIN32) && defined(setjmp)
++#undef setjmp
++int setjmp(jmp_buf Buffer);
++#endif
++#define REVNG_SETJMP_FUNCTION setjmp
++
+ // The only purpose of this function is keeping alive the references to some
+ // symbols that are needed by revng
+ intptr_t _ugly_name_ignore(void);
+ intptr_t _ugly_name_ignore(void) {
+-  return (intptr_t) &saved_registers + (intptr_t) &setjmp
++  return (intptr_t) &saved_registers + (intptr_t) &REVNG_SETJMP_FUNCTION
+          + (intptr_t) &jmp_buffer + (intptr_t) &is_executable
+          + (intptr_t) &unknown_pc + (intptr_t) &revng_abort;
+ }
+diff --git a/tools/CMakeLists.txt b/tools/CMakeLists.txt
+index ab507e5..0a42309 100644
+--- a/tools/CMakeLists.txt
++++ b/tools/CMakeLists.txt
+@@ -8,3 +8,6 @@ add_subdirectory(lddtree)
+ add_subdirectory(merge-llvm)
+ add_subdirectory(model)
+ add_subdirectory(pypeline)
++if(WIN32)
++  add_subdirectory(win32-opt)
++endif()
+diff --git a/tools/win32-opt/CMakeLists.txt b/tools/win32-opt/CMakeLists.txt
+new file mode 100644
+index 0000000..54b4571
+--- /dev/null
++++ b/tools/win32-opt/CMakeLists.txt
+@@ -0,0 +1,45 @@
++#
++# This file is distributed under the MIT License. See LICENSE.md for details.
++#
++
++# ~~~
++# Fathom, Windows: revng-opt, LLVM's opt (llvm/: its sources, from rev.ng's
++# LLVM 16, Apache-2.0 WITH LLVM-exception) with all of rev.ng linked in, where
++# `revng opt` loads rev.ng's libraries into opt as plugins (-load) elsewhere.
++# ~~~
++revng_add_executable(revng-opt llvm/AnalysisWrappers.cpp
++                     llvm/BreakpointPrinter.cpp llvm/NewPMDriver.cpp llvm/opt.cpp)
++
++llvm_map_components_to_libnames(
++  OPT_LLVM_LIBRARIES
++  AllTargetsAsmParsers
++  AllTargetsCodeGens
++  AllTargetsDescs
++  AllTargetsInfos
++  AggressiveInstCombine
++  Analysis
++  AsmParser
++  BitWriter
++  CFGuard
++  CodeGen
++  Core
++  Coroutines
++  Extensions
++  IPO
++  IRReader
++  IRPrinter
++  InstCombine
++  Instrumentation
++  MC
++  ObjCARCOpts
++  Remarks
++  ScalarOpts
++  Support
++  Target
++  TargetParser
++  TransformUtils
++  Vectorize
++  Passes)
++target_link_libraries(revng-opt ${OPT_LLVM_LIBRARIES})
++# opt.cpp and its warnings are LLVM's
++target_compile_options(revng-opt PRIVATE -Wno-unused-parameter)
+diff --git a/tools/win32-opt/llvm/AnalysisWrappers.cpp b/tools/win32-opt/llvm/AnalysisWrappers.cpp
+new file mode 100644
+index 0000000..2ae1da8
+--- /dev/null
++++ b/tools/win32-opt/llvm/AnalysisWrappers.cpp
+@@ -0,0 +1,71 @@
++//===- AnalysisWrappers.cpp - Wrappers around non-pass analyses -----------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++//
++// This file defines pass wrappers around LLVM analyses that don't make sense to
++// be passes.  It provides a nice standard pass interface to these classes so
++// that they can be printed out by analyze.
++//
++// These classes are separated out of analyze.cpp so that it is more clear which
++// code is the integral part of the analyze tool, and which part of the code is
++// just making it so more passes are available.
++//
++//===----------------------------------------------------------------------===//
++
++#include "llvm/Analysis/CallGraph.h"
++#include "llvm/IR/Module.h"
++#include "llvm/Pass.h"
++#include "llvm/Support/raw_ostream.h"
++using namespace llvm;
++
++namespace {
++  /// ExternalFunctionsPassedConstants - This pass prints out call sites to
++  /// external functions that are called with constant arguments.  This can be
++  /// useful when looking for standard library functions we should constant fold
++  /// or handle in alias analyses.
++  struct ExternalFunctionsPassedConstants : public ModulePass {
++    static char ID; // Pass ID, replacement for typeid
++    ExternalFunctionsPassedConstants() : ModulePass(ID) {}
++    bool runOnModule(Module &M) override {
++      for (Module::iterator I = M.begin(), E = M.end(); I != E; ++I) {
++        if (!I->isDeclaration()) continue;
++
++        bool PrintedFn = false;
++        for (User *U : I->users()) {
++          Instruction *UI = dyn_cast<Instruction>(U);
++          if (!UI) continue;
++
++          CallBase *CB = dyn_cast<CallBase>(UI);
++          if (!CB)
++            continue;
++
++          for (auto AI = CB->arg_begin(), E = CB->arg_end(); AI != E; ++AI) {
++            if (!isa<Constant>(*AI)) continue;
++
++            if (!PrintedFn) {
++              errs() << "Function '" << I->getName() << "':\n";
++              PrintedFn = true;
++            }
++            errs() << *UI;
++            break;
++          }
++        }
++      }
++
++      return false;
++    }
++
++    void getAnalysisUsage(AnalysisUsage &AU) const override {
++      AU.setPreservesAll();
++    }
++  };
++}
++
++char ExternalFunctionsPassedConstants::ID = 0;
++static RegisterPass<ExternalFunctionsPassedConstants>
++  P1("print-externalfnconstants",
++     "Print external fn callsites passed constants");
+diff --git a/tools/win32-opt/llvm/BreakpointPrinter.cpp b/tools/win32-opt/llvm/BreakpointPrinter.cpp
+new file mode 100644
+index 0000000..a57a8c4
+--- /dev/null
++++ b/tools/win32-opt/llvm/BreakpointPrinter.cpp
+@@ -0,0 +1,71 @@
++//===- BreakpointPrinter.cpp - Breakpoint location printer ----------------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++///
++/// \file
++/// Breakpoint location printer.
++///
++//===----------------------------------------------------------------------===//
++#include "BreakpointPrinter.h"
++#include "llvm/ADT/StringSet.h"
++#include "llvm/IR/DebugInfo.h"
++#include "llvm/IR/Module.h"
++#include "llvm/Pass.h"
++#include "llvm/Support/raw_ostream.h"
++
++using namespace llvm;
++
++namespace {
++
++struct BreakpointPrinter : public ModulePass {
++  raw_ostream &Out;
++  static char ID;
++
++  BreakpointPrinter(raw_ostream &out) : ModulePass(ID), Out(out) {}
++
++  void getContextName(const DIScope *Context, std::string &N) {
++    if (auto *NS = dyn_cast<DINamespace>(Context)) {
++      if (!NS->getName().empty()) {
++        getContextName(NS->getScope(), N);
++        N = N + NS->getName().str() + "::";
++      }
++    } else if (auto *TY = dyn_cast<DIType>(Context)) {
++      if (!TY->getName().empty()) {
++        getContextName(TY->getScope(), N);
++        N = N + TY->getName().str() + "::";
++      }
++    }
++  }
++
++  bool runOnModule(Module &M) override {
++    StringSet<> Processed;
++    if (NamedMDNode *NMD = M.getNamedMetadata("llvm.dbg.sp"))
++      for (unsigned i = 0, e = NMD->getNumOperands(); i != e; ++i) {
++        std::string Name;
++        auto *SP = cast_or_null<DISubprogram>(NMD->getOperand(i));
++        if (!SP)
++          continue;
++        getContextName(SP->getScope(), Name);
++        Name = Name + SP->getName().str();
++        if (!Name.empty() && Processed.insert(Name).second) {
++          Out << Name << "\n";
++        }
++      }
++    return false;
++  }
++
++  void getAnalysisUsage(AnalysisUsage &AU) const override {
++    AU.setPreservesAll();
++  }
++};
++
++char BreakpointPrinter::ID = 0;
++}
++
++ModulePass *llvm::createBreakpointPrinter(raw_ostream &out) {
++  return new BreakpointPrinter(out);
++}
+diff --git a/tools/win32-opt/llvm/BreakpointPrinter.h b/tools/win32-opt/llvm/BreakpointPrinter.h
+new file mode 100644
+index 0000000..2877555
+--- /dev/null
++++ b/tools/win32-opt/llvm/BreakpointPrinter.h
+@@ -0,0 +1,24 @@
++//===- BreakpointPrinter.h - Breakpoint location printer ------------------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++///
++/// \file
++/// Breakpoint location printer.
++///
++//===----------------------------------------------------------------------===//
++#ifndef LLVM_TOOLS_OPT_BREAKPOINTPRINTER_H
++#define LLVM_TOOLS_OPT_BREAKPOINTPRINTER_H
++
++namespace llvm {
++
++class ModulePass;
++class raw_ostream;
++
++ModulePass *createBreakpointPrinter(raw_ostream &out);
++}
++
++#endif // LLVM_TOOLS_OPT_BREAKPOINTPRINTER_H
+diff --git a/tools/win32-opt/llvm/NewPMDriver.cpp b/tools/win32-opt/llvm/NewPMDriver.cpp
+new file mode 100644
+index 0000000..a8db0c6
+--- /dev/null
++++ b/tools/win32-opt/llvm/NewPMDriver.cpp
+@@ -0,0 +1,539 @@
++//===- NewPMDriver.cpp - Driver for opt with new PM -----------------------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++/// \file
++///
++/// This file is just a split of the code that logically belongs in opt.cpp but
++/// that includes the new pass manager headers.
++///
++//===----------------------------------------------------------------------===//
++
++#include "NewPMDriver.h"
++#include "llvm/ADT/SmallVector.h"
++#include "llvm/ADT/StringRef.h"
++#include "llvm/Analysis/AliasAnalysis.h"
++#include "llvm/Analysis/CGSCCPassManager.h"
++#include "llvm/Analysis/TargetLibraryInfo.h"
++#include "llvm/Bitcode/BitcodeWriterPass.h"
++#include "llvm/Config/llvm-config.h"
++#include "llvm/IR/Dominators.h"
++#include "llvm/IR/LLVMContext.h"
++#include "llvm/IR/Module.h"
++#include "llvm/IR/PassManager.h"
++#include "llvm/IR/Verifier.h"
++#include "llvm/IRPrinter/IRPrintingPasses.h"
++#include "llvm/Passes/PassBuilder.h"
++#include "llvm/Passes/PassPlugin.h"
++#include "llvm/Passes/StandardInstrumentations.h"
++#include "llvm/Support/ErrorHandling.h"
++#include "llvm/Support/ToolOutputFile.h"
++#include "llvm/Support/raw_ostream.h"
++#include "llvm/Target/TargetMachine.h"
++#include "llvm/Transforms/IPO/ThinLTOBitcodeWriter.h"
++#include "llvm/Transforms/Instrumentation/AddressSanitizer.h"
++#include "llvm/Transforms/Scalar/LoopPassManager.h"
++#include "llvm/Transforms/Utils/Debugify.h"
++
++using namespace llvm;
++using namespace opt_tool;
++
++namespace llvm {
++cl::opt<bool> DebugifyEach(
++    "debugify-each",
++    cl::desc("Start each pass with debugify and end it with check-debugify"));
++
++cl::opt<std::string>
++    DebugifyExport("debugify-export",
++                   cl::desc("Export per-pass debugify statistics to this file"),
++                   cl::value_desc("filename"));
++
++cl::opt<bool> VerifyEachDebugInfoPreserve(
++    "verify-each-debuginfo-preserve",
++    cl::desc("Start each pass with collecting and end it with checking of "
++             "debug info preservation."));
++
++cl::opt<std::string>
++    VerifyDIPreserveExport("verify-di-preserve-export",
++                   cl::desc("Export debug info preservation failures into "
++                            "specified (JSON) file (should be abs path as we use"
++                            " append mode to insert new JSON objects)"),
++                   cl::value_desc("filename"), cl::init(""));
++
++} // namespace llvm
++
++enum class DebugLogging { None, Normal, Verbose, Quiet };
++
++static cl::opt<DebugLogging> DebugPM(
++    "debug-pass-manager", cl::Hidden, cl::ValueOptional,
++    cl::desc("Print pass management debugging information"),
++    cl::init(DebugLogging::None),
++    cl::values(
++        clEnumValN(DebugLogging::Normal, "", ""),
++        clEnumValN(DebugLogging::Quiet, "quiet",
++                   "Skip printing info about analyses"),
++        clEnumValN(
++            DebugLogging::Verbose, "verbose",
++            "Print extra information about adaptors and pass managers")));
++
++// This flag specifies a textual description of the alias analysis pipeline to
++// use when querying for aliasing information. It only works in concert with
++// the "passes" flag above.
++static cl::opt<std::string>
++    AAPipeline("aa-pipeline",
++               cl::desc("A textual description of the alias analysis "
++                        "pipeline for handling managed aliasing queries"),
++               cl::Hidden, cl::init("default"));
++
++/// {{@ These options accept textual pipeline descriptions which will be
++/// inserted into default pipelines at the respective extension points
++static cl::opt<std::string> PeepholeEPPipeline(
++    "passes-ep-peephole",
++    cl::desc("A textual description of the function pass pipeline inserted at "
++             "the Peephole extension points into default pipelines"),
++    cl::Hidden);
++static cl::opt<std::string> LateLoopOptimizationsEPPipeline(
++    "passes-ep-late-loop-optimizations",
++    cl::desc(
++        "A textual description of the loop pass pipeline inserted at "
++        "the LateLoopOptimizations extension point into default pipelines"),
++    cl::Hidden);
++static cl::opt<std::string> LoopOptimizerEndEPPipeline(
++    "passes-ep-loop-optimizer-end",
++    cl::desc("A textual description of the loop pass pipeline inserted at "
++             "the LoopOptimizerEnd extension point into default pipelines"),
++    cl::Hidden);
++static cl::opt<std::string> ScalarOptimizerLateEPPipeline(
++    "passes-ep-scalar-optimizer-late",
++    cl::desc("A textual description of the function pass pipeline inserted at "
++             "the ScalarOptimizerLate extension point into default pipelines"),
++    cl::Hidden);
++static cl::opt<std::string> CGSCCOptimizerLateEPPipeline(
++    "passes-ep-cgscc-optimizer-late",
++    cl::desc("A textual description of the cgscc pass pipeline inserted at "
++             "the CGSCCOptimizerLate extension point into default pipelines"),
++    cl::Hidden);
++static cl::opt<std::string> VectorizerStartEPPipeline(
++    "passes-ep-vectorizer-start",
++    cl::desc("A textual description of the function pass pipeline inserted at "
++             "the VectorizerStart extension point into default pipelines"),
++    cl::Hidden);
++static cl::opt<std::string> PipelineStartEPPipeline(
++    "passes-ep-pipeline-start",
++    cl::desc("A textual description of the module pass pipeline inserted at "
++             "the PipelineStart extension point into default pipelines"),
++    cl::Hidden);
++static cl::opt<std::string> PipelineEarlySimplificationEPPipeline(
++    "passes-ep-pipeline-early-simplification",
++    cl::desc("A textual description of the module pass pipeline inserted at "
++             "the EarlySimplification extension point into default pipelines"),
++    cl::Hidden);
++static cl::opt<std::string> OptimizerEarlyEPPipeline(
++    "passes-ep-optimizer-early",
++    cl::desc("A textual description of the module pass pipeline inserted at "
++             "the OptimizerEarly extension point into default pipelines"),
++    cl::Hidden);
++static cl::opt<std::string> OptimizerLastEPPipeline(
++    "passes-ep-optimizer-last",
++    cl::desc("A textual description of the module pass pipeline inserted at "
++             "the OptimizerLast extension point into default pipelines"),
++    cl::Hidden);
++static cl::opt<std::string> FullLinkTimeOptimizationEarlyEPPipeline(
++    "passes-ep-full-link-time-optimization-early",
++    cl::desc("A textual description of the module pass pipeline inserted at "
++             "the FullLinkTimeOptimizationEarly extension point into default "
++             "pipelines"),
++    cl::Hidden);
++static cl::opt<std::string> FullLinkTimeOptimizationLastEPPipeline(
++    "passes-ep-full-link-time-optimization-last",
++    cl::desc("A textual description of the module pass pipeline inserted at "
++             "the FullLinkTimeOptimizationLast extension point into default "
++             "pipelines"),
++    cl::Hidden);
++/// @}}
++
++static cl::opt<bool> DisablePipelineVerification(
++    "disable-pipeline-verification",
++    cl::desc("Only has an effect when specified with -print-pipeline-passes. "
++             "Disables verifying that the textual pipeline generated by "
++             "-print-pipeline-passes can be used to create a pipeline."),
++    cl::Hidden);
++
++
++static cl::opt<PGOKind>
++    PGOKindFlag("pgo-kind", cl::init(NoPGO), cl::Hidden,
++                cl::desc("The kind of profile guided optimization"),
++                cl::values(clEnumValN(NoPGO, "nopgo", "Do not use PGO."),
++                           clEnumValN(InstrGen, "pgo-instr-gen-pipeline",
++                                      "Instrument the IR to generate profile."),
++                           clEnumValN(InstrUse, "pgo-instr-use-pipeline",
++                                      "Use instrumented profile to guide PGO."),
++                           clEnumValN(SampleUse, "pgo-sample-use-pipeline",
++                                      "Use sampled profile to guide PGO.")));
++static cl::opt<std::string> ProfileFile("profile-file",
++                                 cl::desc("Path to the profile."), cl::Hidden);
++
++static cl::opt<CSPGOKind> CSPGOKindFlag(
++    "cspgo-kind", cl::init(NoCSPGO), cl::Hidden,
++    cl::desc("The kind of context sensitive profile guided optimization"),
++    cl::values(
++        clEnumValN(NoCSPGO, "nocspgo", "Do not use CSPGO."),
++        clEnumValN(
++            CSInstrGen, "cspgo-instr-gen-pipeline",
++            "Instrument (context sensitive) the IR to generate profile."),
++        clEnumValN(
++            CSInstrUse, "cspgo-instr-use-pipeline",
++            "Use instrumented (context sensitive) profile to guide PGO.")));
++
++static cl::opt<std::string> CSProfileGenFile(
++    "cs-profilegen-file",
++    cl::desc("Path to the instrumented context sensitive profile."),
++    cl::Hidden);
++
++static cl::opt<std::string>
++    ProfileRemappingFile("profile-remapping-file",
++                         cl::desc("Path to the profile remapping file."),
++                         cl::Hidden);
++
++static cl::opt<bool> DebugInfoForProfiling(
++    "debug-info-for-profiling", cl::init(false), cl::Hidden,
++    cl::desc("Emit special debug info to enable PGO profile generation."));
++
++static cl::opt<bool> PseudoProbeForProfiling(
++    "pseudo-probe-for-profiling", cl::init(false), cl::Hidden,
++    cl::desc("Emit pseudo probes to enable PGO profile generation."));
++
++static cl::opt<bool> DisableLoopUnrolling(
++    "disable-loop-unrolling",
++    cl::desc("Disable loop unrolling in all relevant passes"), cl::init(false));
++
++namespace llvm {
++extern cl::opt<bool> PrintPipelinePasses;
++} // namespace llvm
++
++template <typename PassManagerT>
++bool tryParsePipelineText(PassBuilder &PB,
++                          const cl::opt<std::string> &PipelineOpt) {
++  if (PipelineOpt.empty())
++    return false;
++
++  // Verify the pipeline is parseable:
++  PassManagerT PM;
++  if (auto Err = PB.parsePassPipeline(PM, PipelineOpt)) {
++    errs() << "Could not parse -" << PipelineOpt.ArgStr
++           << " pipeline: " << toString(std::move(Err))
++           << "... I'm going to ignore it.\n";
++    return false;
++  }
++  return true;
++}
++
++/// If one of the EPPipeline command line options was given, register callbacks
++/// for parsing and inserting the given pipeline
++static void registerEPCallbacks(PassBuilder &PB) {
++  if (tryParsePipelineText<FunctionPassManager>(PB, PeepholeEPPipeline))
++    PB.registerPeepholeEPCallback(
++        [&PB](FunctionPassManager &PM, OptimizationLevel Level) {
++          ExitOnError Err("Unable to parse PeepholeEP pipeline: ");
++          Err(PB.parsePassPipeline(PM, PeepholeEPPipeline));
++        });
++  if (tryParsePipelineText<LoopPassManager>(PB,
++                                            LateLoopOptimizationsEPPipeline))
++    PB.registerLateLoopOptimizationsEPCallback(
++        [&PB](LoopPassManager &PM, OptimizationLevel Level) {
++          ExitOnError Err("Unable to parse LateLoopOptimizationsEP pipeline: ");
++          Err(PB.parsePassPipeline(PM, LateLoopOptimizationsEPPipeline));
++        });
++  if (tryParsePipelineText<LoopPassManager>(PB, LoopOptimizerEndEPPipeline))
++    PB.registerLoopOptimizerEndEPCallback(
++        [&PB](LoopPassManager &PM, OptimizationLevel Level) {
++          ExitOnError Err("Unable to parse LoopOptimizerEndEP pipeline: ");
++          Err(PB.parsePassPipeline(PM, LoopOptimizerEndEPPipeline));
++        });
++  if (tryParsePipelineText<FunctionPassManager>(PB,
++                                                ScalarOptimizerLateEPPipeline))
++    PB.registerScalarOptimizerLateEPCallback(
++        [&PB](FunctionPassManager &PM, OptimizationLevel Level) {
++          ExitOnError Err("Unable to parse ScalarOptimizerLateEP pipeline: ");
++          Err(PB.parsePassPipeline(PM, ScalarOptimizerLateEPPipeline));
++        });
++  if (tryParsePipelineText<CGSCCPassManager>(PB, CGSCCOptimizerLateEPPipeline))
++    PB.registerCGSCCOptimizerLateEPCallback(
++        [&PB](CGSCCPassManager &PM, OptimizationLevel Level) {
++          ExitOnError Err("Unable to parse CGSCCOptimizerLateEP pipeline: ");
++          Err(PB.parsePassPipeline(PM, CGSCCOptimizerLateEPPipeline));
++        });
++  if (tryParsePipelineText<FunctionPassManager>(PB, VectorizerStartEPPipeline))
++    PB.registerVectorizerStartEPCallback(
++        [&PB](FunctionPassManager &PM, OptimizationLevel Level) {
++          ExitOnError Err("Unable to parse VectorizerStartEP pipeline: ");
++          Err(PB.parsePassPipeline(PM, VectorizerStartEPPipeline));
++        });
++  if (tryParsePipelineText<ModulePassManager>(PB, PipelineStartEPPipeline))
++    PB.registerPipelineStartEPCallback(
++        [&PB](ModulePassManager &PM, OptimizationLevel) {
++          ExitOnError Err("Unable to parse PipelineStartEP pipeline: ");
++          Err(PB.parsePassPipeline(PM, PipelineStartEPPipeline));
++        });
++  if (tryParsePipelineText<ModulePassManager>(
++          PB, PipelineEarlySimplificationEPPipeline))
++    PB.registerPipelineEarlySimplificationEPCallback(
++        [&PB](ModulePassManager &PM, OptimizationLevel) {
++          ExitOnError Err("Unable to parse EarlySimplification pipeline: ");
++          Err(PB.parsePassPipeline(PM, PipelineEarlySimplificationEPPipeline));
++        });
++  if (tryParsePipelineText<ModulePassManager>(PB, OptimizerEarlyEPPipeline))
++    PB.registerOptimizerEarlyEPCallback(
++        [&PB](ModulePassManager &PM, OptimizationLevel) {
++          ExitOnError Err("Unable to parse OptimizerEarlyEP pipeline: ");
++          Err(PB.parsePassPipeline(PM, OptimizerEarlyEPPipeline));
++        });
++  if (tryParsePipelineText<ModulePassManager>(PB, OptimizerLastEPPipeline))
++    PB.registerOptimizerLastEPCallback(
++        [&PB](ModulePassManager &PM, OptimizationLevel) {
++          ExitOnError Err("Unable to parse OptimizerLastEP pipeline: ");
++          Err(PB.parsePassPipeline(PM, OptimizerLastEPPipeline));
++        });
++  if (tryParsePipelineText<ModulePassManager>(
++          PB, FullLinkTimeOptimizationEarlyEPPipeline))
++    PB.registerFullLinkTimeOptimizationEarlyEPCallback(
++        [&PB](ModulePassManager &PM, OptimizationLevel) {
++          ExitOnError Err(
++              "Unable to parse FullLinkTimeOptimizationEarlyEP pipeline: ");
++          Err(PB.parsePassPipeline(PM,
++                                   FullLinkTimeOptimizationEarlyEPPipeline));
++        });
++  if (tryParsePipelineText<ModulePassManager>(
++          PB, FullLinkTimeOptimizationLastEPPipeline))
++    PB.registerFullLinkTimeOptimizationLastEPCallback(
++        [&PB](ModulePassManager &PM, OptimizationLevel) {
++          ExitOnError Err(
++              "Unable to parse FullLinkTimeOptimizationLastEP pipeline: ");
++          Err(PB.parsePassPipeline(PM, FullLinkTimeOptimizationLastEPPipeline));
++        });
++}
++
++#define HANDLE_EXTENSION(Ext)                                                  \
++  llvm::PassPluginLibraryInfo get##Ext##PluginInfo();
++#include "llvm/Support/Extension.def"
++
++bool llvm::runPassPipeline(StringRef Arg0, Module &M, TargetMachine *TM,
++                           TargetLibraryInfoImpl *TLII, ToolOutputFile *Out,
++                           ToolOutputFile *ThinLTOLinkOut,
++                           ToolOutputFile *OptRemarkFile,
++                           StringRef PassPipeline,
++                           ArrayRef<PassPlugin> PassPlugins,
++                           OutputKind OK, VerifierKind VK,
++                           bool ShouldPreserveAssemblyUseListOrder,
++                           bool ShouldPreserveBitcodeUseListOrder,
++                           bool EmitSummaryIndex, bool EmitModuleHash,
++                           bool EnableDebugify, bool VerifyDIPreserve) {
++  bool VerifyEachPass = VK == VK_VerifyEachPass;
++
++  std::optional<PGOOptions> P;
++  switch (PGOKindFlag) {
++  case InstrGen:
++    P = PGOOptions(ProfileFile, "", "", PGOOptions::IRInstr);
++    break;
++  case InstrUse:
++    P = PGOOptions(ProfileFile, "", ProfileRemappingFile, PGOOptions::IRUse);
++    break;
++  case SampleUse:
++    P = PGOOptions(ProfileFile, "", ProfileRemappingFile,
++                   PGOOptions::SampleUse);
++    break;
++  case NoPGO:
++    if (DebugInfoForProfiling || PseudoProbeForProfiling)
++      P = PGOOptions("", "", "", PGOOptions::NoAction, PGOOptions::NoCSAction,
++                     DebugInfoForProfiling, PseudoProbeForProfiling);
++    else
++      P = std::nullopt;
++  }
++  if (CSPGOKindFlag != NoCSPGO) {
++    if (P && (P->Action == PGOOptions::IRInstr ||
++              P->Action == PGOOptions::SampleUse)) {
++      errs() << "CSPGOKind cannot be used with IRInstr or SampleUse";
++      return false;
++    }
++    if (CSPGOKindFlag == CSInstrGen) {
++      if (CSProfileGenFile.empty()) {
++        errs() << "CSInstrGen needs to specify CSProfileGenFile";
++        return false;
++      }
++      if (P) {
++        P->CSAction = PGOOptions::CSIRInstr;
++        P->CSProfileGenFile = CSProfileGenFile;
++      } else
++        P = PGOOptions("", CSProfileGenFile, ProfileRemappingFile,
++                       PGOOptions::NoAction, PGOOptions::CSIRInstr);
++    } else /* CSPGOKindFlag == CSInstrUse */ {
++      if (!P) {
++        errs() << "CSInstrUse needs to be together with InstrUse";
++        return false;
++      }
++      P->CSAction = PGOOptions::CSIRUse;
++    }
++  }
++  if (TM)
++    TM->setPGOOption(P);
++
++  LoopAnalysisManager LAM;
++  FunctionAnalysisManager FAM;
++  CGSCCAnalysisManager CGAM;
++  ModuleAnalysisManager MAM;
++
++  PassInstrumentationCallbacks PIC;
++  PrintPassOptions PrintPassOpts;
++  PrintPassOpts.Verbose = DebugPM == DebugLogging::Verbose;
++  PrintPassOpts.SkipAnalyses = DebugPM == DebugLogging::Quiet;
++  StandardInstrumentations SI(M.getContext(), DebugPM != DebugLogging::None,
++                              VerifyEachPass, PrintPassOpts);
++  SI.registerCallbacks(PIC, &FAM);
++  DebugifyEachInstrumentation Debugify;
++  DebugifyStatsMap DIStatsMap;
++  DebugInfoPerPass DebugInfoBeforePass;
++  if (DebugifyEach) {
++    Debugify.setDIStatsMap(DIStatsMap);
++    Debugify.setDebugifyMode(DebugifyMode::SyntheticDebugInfo);
++    Debugify.registerCallbacks(PIC);
++  } else if (VerifyEachDebugInfoPreserve) {
++    Debugify.setDebugInfoBeforePass(DebugInfoBeforePass);
++    Debugify.setDebugifyMode(DebugifyMode::OriginalDebugInfo);
++    Debugify.setOrigDIVerifyBugsReportFilePath(
++      VerifyDIPreserveExport);
++    Debugify.registerCallbacks(PIC);
++  }
++
++  PipelineTuningOptions PTO;
++  // LoopUnrolling defaults on to true and DisableLoopUnrolling is initialized
++  // to false above so we shouldn't necessarily need to check whether or not the
++  // option has been enabled.
++  PTO.LoopUnrolling = !DisableLoopUnrolling;
++  PassBuilder PB(TM, PTO, P, &PIC);
++  registerEPCallbacks(PB);
++
++  // For any loaded plugins, let them register pass builder callbacks.
++  for (auto &PassPlugin : PassPlugins)
++    PassPlugin.registerPassBuilderCallbacks(PB);
++
++#define HANDLE_EXTENSION(Ext)                                                  \
++  get##Ext##PluginInfo().RegisterPassBuilderCallbacks(PB);
++#include "llvm/Support/Extension.def"
++
++  // Specially handle the alias analysis manager so that we can register
++  // a custom pipeline of AA passes with it.
++  AAManager AA;
++  if (auto Err = PB.parseAAPipeline(AA, AAPipeline)) {
++    errs() << Arg0 << ": " << toString(std::move(Err)) << "\n";
++    return false;
++  }
++
++  // Register the AA manager first so that our version is the one used.
++  FAM.registerPass([&] { return std::move(AA); });
++  // Register our TargetLibraryInfoImpl.
++  FAM.registerPass([&] { return TargetLibraryAnalysis(*TLII); });
++
++  // Register all the basic analyses with the managers.
++  PB.registerModuleAnalyses(MAM);
++  PB.registerCGSCCAnalyses(CGAM);
++  PB.registerFunctionAnalyses(FAM);
++  PB.registerLoopAnalyses(LAM);
++  PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
++
++  ModulePassManager MPM;
++  if (EnableDebugify)
++    MPM.addPass(NewPMDebugifyPass());
++  if (VerifyDIPreserve)
++    MPM.addPass(NewPMDebugifyPass(DebugifyMode::OriginalDebugInfo, "",
++                                  &DebugInfoBeforePass));
++
++  // Add passes according to the -passes options.
++  if (!PassPipeline.empty()) {
++    if (auto Err = PB.parsePassPipeline(MPM, PassPipeline)) {
++      errs() << Arg0 << ": " << toString(std::move(Err)) << "\n";
++      return false;
++    }
++  }
++
++  if (VK > VK_NoVerifier)
++    MPM.addPass(VerifierPass());
++  if (EnableDebugify)
++    MPM.addPass(NewPMCheckDebugifyPass(false, "", &DIStatsMap));
++  if (VerifyDIPreserve)
++    MPM.addPass(NewPMCheckDebugifyPass(
++        false, "", nullptr, DebugifyMode::OriginalDebugInfo,
++        &DebugInfoBeforePass, VerifyDIPreserveExport));
++
++  // Add any relevant output pass at the end of the pipeline.
++  switch (OK) {
++  case OK_NoOutput:
++    break; // No output pass needed.
++  case OK_OutputAssembly:
++    MPM.addPass(PrintModulePass(
++        Out->os(), "", ShouldPreserveAssemblyUseListOrder, EmitSummaryIndex));
++    break;
++  case OK_OutputBitcode:
++    MPM.addPass(BitcodeWriterPass(Out->os(), ShouldPreserveBitcodeUseListOrder,
++                                  EmitSummaryIndex, EmitModuleHash));
++    break;
++  case OK_OutputThinLTOBitcode:
++    MPM.addPass(ThinLTOBitcodeWriterPass(
++        Out->os(), ThinLTOLinkOut ? &ThinLTOLinkOut->os() : nullptr));
++    break;
++  }
++
++  // Before executing passes, print the final values of the LLVM options.
++  cl::PrintOptionValues();
++
++  // Print a textual, '-passes=' compatible, representation of pipeline if
++  // requested.
++  if (PrintPipelinePasses) {
++    std::string Pipeline;
++    raw_string_ostream SOS(Pipeline);
++    MPM.printPipeline(SOS, [&PIC](StringRef ClassName) {
++      auto PassName = PIC.getPassNameForClassName(ClassName);
++      return PassName.empty() ? ClassName : PassName;
++    });
++    outs() << Pipeline;
++    outs() << "\n";
++
++    if (!DisablePipelineVerification) {
++      // Check that we can parse the returned pipeline string as an actual
++      // pipeline.
++      ModulePassManager TempPM;
++      if (auto Err = PB.parsePassPipeline(TempPM, Pipeline)) {
++        errs() << "Could not parse dumped pass pipeline: "
++               << toString(std::move(Err)) << "\n";
++        return false;
++      }
++    }
++
++    return true;
++  }
++
++  // Now that we have all of the passes ready, run them.
++  MPM.run(M, MAM);
++
++  // Declare success.
++  if (OK != OK_NoOutput) {
++    Out->keep();
++    if (OK == OK_OutputThinLTOBitcode && ThinLTOLinkOut)
++      ThinLTOLinkOut->keep();
++  }
++
++  if (OptRemarkFile)
++    OptRemarkFile->keep();
++
++  if (DebugifyEach && !DebugifyExport.empty())
++    exportDebugifyStats(DebugifyExport, Debugify.getDebugifyStatsMap());
++
++  return true;
++}
++
++void llvm::printPasses(raw_ostream &OS) {
++  PassBuilder PB;
++  PB.printPassNames(OS);
++}
+diff --git a/tools/win32-opt/llvm/NewPMDriver.h b/tools/win32-opt/llvm/NewPMDriver.h
+new file mode 100644
+index 0000000..a3cdd15
+--- /dev/null
++++ b/tools/win32-opt/llvm/NewPMDriver.h
+@@ -0,0 +1,79 @@
++//===- NewPMDriver.h - Function to drive opt with the new PM ----*- C++ -*-===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++/// \file
++///
++/// A single function which is called to drive the opt behavior for the new
++/// PassManager.
++///
++/// This is only in a separate TU with a header to avoid including all of the
++/// old pass manager headers and the new pass manager headers into the same
++/// file. Eventually all of the routines here will get folded back into
++/// opt.cpp.
++///
++//===----------------------------------------------------------------------===//
++
++#ifndef LLVM_TOOLS_OPT_NEWPMDRIVER_H
++#define LLVM_TOOLS_OPT_NEWPMDRIVER_H
++
++#include "llvm/Support/CommandLine.h"
++
++namespace llvm {
++class StringRef;
++class Module;
++class PassPlugin;
++class TargetMachine;
++class ToolOutputFile;
++class TargetLibraryInfoImpl;
++
++extern cl::opt<bool> DebugifyEach;
++extern cl::opt<std::string> DebugifyExport;
++
++extern cl::opt<bool> VerifyEachDebugInfoPreserve;
++extern cl::opt<std::string> VerifyDIPreserveExport;
++
++namespace opt_tool {
++enum OutputKind {
++  OK_NoOutput,
++  OK_OutputAssembly,
++  OK_OutputBitcode,
++  OK_OutputThinLTOBitcode,
++};
++enum VerifierKind { VK_NoVerifier, VK_VerifyOut, VK_VerifyEachPass };
++enum PGOKind {
++  NoPGO,
++  InstrGen,
++  InstrUse,
++  SampleUse
++};
++enum CSPGOKind { NoCSPGO, CSInstrGen, CSInstrUse };
++}
++
++void printPasses(raw_ostream &OS);
++
++/// Driver function to run the new pass manager over a module.
++///
++/// This function only exists factored away from opt.cpp in order to prevent
++/// inclusion of the new pass manager headers and the old headers into the same
++/// file. It's interface is consequentially somewhat ad-hoc, but will go away
++/// when the transition finishes.
++///
++/// ThinLTOLinkOut is only used when OK is OK_OutputThinLTOBitcode, and can be
++/// nullptr.
++bool runPassPipeline(StringRef Arg0, Module &M, TargetMachine *TM,
++                     TargetLibraryInfoImpl *TLII, ToolOutputFile *Out,
++                     ToolOutputFile *ThinLinkOut, ToolOutputFile *OptRemarkFile,
++                     StringRef PassPipeline,
++                     ArrayRef<PassPlugin> PassPlugins, opt_tool::OutputKind OK,
++                     opt_tool::VerifierKind VK,
++                     bool ShouldPreserveAssemblyUseListOrder,
++                     bool ShouldPreserveBitcodeUseListOrder,
++                     bool EmitSummaryIndex, bool EmitModuleHash,
++                     bool EnableDebugify, bool VerifyDIPreserve);
++} // namespace llvm
++
++#endif
+diff --git a/tools/win32-opt/llvm/opt.cpp b/tools/win32-opt/llvm/opt.cpp
+new file mode 100644
+index 0000000..40632b4
+--- /dev/null
++++ b/tools/win32-opt/llvm/opt.cpp
+@@ -0,0 +1,925 @@
++//===- opt.cpp - The LLVM Modular Optimizer -------------------------------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++//
++// Optimizations may be specified an arbitrary number of times on the command
++// line, They are run in the order specified.
++//
++//===----------------------------------------------------------------------===//
++
++#include "BreakpointPrinter.h"
++#include "NewPMDriver.h"
++#include "llvm/ADT/Triple.h"
++#include "llvm/Analysis/CallGraph.h"
++#include "llvm/Analysis/CallGraphSCCPass.h"
++#include "llvm/Analysis/LoopPass.h"
++#include "llvm/Analysis/RegionPass.h"
++#include "llvm/Analysis/TargetLibraryInfo.h"
++#include "llvm/Analysis/TargetTransformInfo.h"
++#include "llvm/AsmParser/Parser.h"
++#include "llvm/CodeGen/CommandFlags.h"
++#include "llvm/CodeGen/TargetPassConfig.h"
++#include "llvm/Config/llvm-config.h"
++#include "llvm/IR/DataLayout.h"
++#include "llvm/IR/DebugInfo.h"
++#include "llvm/IR/LLVMContext.h"
++#include "llvm/IR/LLVMRemarkStreamer.h"
++#include "llvm/IR/LegacyPassManager.h"
++#include "llvm/IR/LegacyPassNameParser.h"
++#include "llvm/IR/Module.h"
++#include "llvm/IR/ModuleSummaryIndex.h"
++#include "llvm/IR/Verifier.h"
++#include "llvm/IRReader/IRReader.h"
++#include "llvm/InitializePasses.h"
++#include "llvm/LinkAllIR.h"
++#include "llvm/LinkAllPasses.h"
++#include "llvm/MC/SubtargetFeature.h"
++#include "llvm/MC/TargetRegistry.h"
++#include "llvm/Passes/PassPlugin.h"
++#include "llvm/Remarks/HotnessThresholdParser.h"
++#include "llvm/Support/Debug.h"
++#include "llvm/Support/FileSystem.h"
++#include "llvm/Support/Host.h"
++#include "llvm/Support/InitLLVM.h"
++#include "llvm/Support/PluginLoader.h"
++#include "llvm/Support/SourceMgr.h"
++#include "llvm/Support/SystemUtils.h"
++#include "llvm/Support/TargetSelect.h"
++#include "llvm/Support/ToolOutputFile.h"
++#include "llvm/Support/YAMLTraits.h"
++#include "llvm/Target/TargetMachine.h"
++#include "llvm/Transforms/IPO/WholeProgramDevirt.h"
++#include "llvm/Transforms/Utils/Cloning.h"
++#include "llvm/Transforms/Utils/Debugify.h"
++#include <algorithm>
++#include <memory>
++#include <optional>
++using namespace llvm;
++using namespace opt_tool;
++
++static codegen::RegisterCodeGenFlags CFG;
++
++// The OptimizationList is automatically populated with registered Passes by the
++// PassNameParser.
++static cl::list<const PassInfo *, bool, PassNameParser> PassList(cl::desc(
++    "Optimizations available (use '-passes=' for the new pass manager)"));
++
++static cl::opt<bool> EnableNewPassManager(
++    "enable-new-pm",
++    cl::desc("Enable the new pass manager, translating "
++             "'opt -foo' to 'opt -passes=foo'. This is strictly for the new PM "
++             "migration, use '-passes=' when possible."),
++    cl::init(true));
++
++// This flag specifies a textual description of the optimization pass pipeline
++// to run over the module. This flag switches opt to use the new pass manager
++// infrastructure, completely disabling all of the flags specific to the old
++// pass management.
++static cl::opt<std::string> PassPipeline(
++    "passes",
++    cl::desc(
++        "A textual description of the pass pipeline. To have analysis passes "
++        "available before a certain pass, add 'require<foo-analysis>'."));
++static cl::alias PassPipeline2("p", cl::aliasopt(PassPipeline),
++                                   cl::desc("Alias for -passes"));
++
++static cl::opt<bool> PrintPasses("print-passes",
++                                 cl::desc("Print available passes that can be "
++                                          "specified in -passes=foo and exit"));
++
++static cl::opt<std::string>
++InputFilename(cl::Positional, cl::desc("<input bitcode file>"),
++    cl::init("-"), cl::value_desc("filename"));
++
++static cl::opt<std::string>
++OutputFilename("o", cl::desc("Override output filename"),
++               cl::value_desc("filename"));
++
++static cl::opt<bool>
++Force("f", cl::desc("Enable binary output on terminals"));
++
++static cl::opt<bool>
++NoOutput("disable-output",
++         cl::desc("Do not write result bitcode file"), cl::Hidden);
++
++static cl::opt<bool>
++OutputAssembly("S", cl::desc("Write output as LLVM assembly"));
++
++static cl::opt<bool>
++    OutputThinLTOBC("thinlto-bc",
++                    cl::desc("Write output as ThinLTO-ready bitcode"));
++
++static cl::opt<bool>
++    SplitLTOUnit("thinlto-split-lto-unit",
++                 cl::desc("Enable splitting of a ThinLTO LTOUnit"));
++
++static cl::opt<std::string> ThinLinkBitcodeFile(
++    "thin-link-bitcode-file", cl::value_desc("filename"),
++    cl::desc(
++        "A file in which to write minimized bitcode for the thin link only"));
++
++static cl::opt<bool>
++NoVerify("disable-verify", cl::desc("Do not run the verifier"), cl::Hidden);
++
++static cl::opt<bool> NoUpgradeDebugInfo("disable-upgrade-debug-info",
++                                        cl::desc("Generate invalid output"),
++                                        cl::ReallyHidden);
++
++static cl::opt<bool> VerifyEach("verify-each",
++                                cl::desc("Verify after each transform"));
++
++static cl::opt<bool>
++    DisableDITypeMap("disable-debug-info-type-map",
++                     cl::desc("Don't use a uniquing type map for debug info"));
++
++static cl::opt<bool>
++StripDebug("strip-debug",
++           cl::desc("Strip debugger symbol info from translation unit"));
++
++static cl::opt<bool>
++    StripNamedMetadata("strip-named-metadata",
++                       cl::desc("Strip module-level named metadata"));
++
++
++
++static cl::opt<bool>
++    OptLevelO0("O0", cl::desc("Optimization level 0. Similar to clang -O0. "
++                              "Use -passes='default<O0>' for the new PM"));
++
++static cl::opt<bool>
++    OptLevelO1("O1", cl::desc("Optimization level 1. Similar to clang -O1. "
++                              "Use -passes='default<O1>' for the new PM"));
++
++static cl::opt<bool>
++    OptLevelO2("O2", cl::desc("Optimization level 2. Similar to clang -O2. "
++                              "Use -passes='default<O2>' for the new PM"));
++
++static cl::opt<bool>
++    OptLevelOs("Os", cl::desc("Like -O2 but size-conscious. Similar to clang "
++                              "-Os. Use -passes='default<Os>' for the new PM"));
++
++static cl::opt<bool> OptLevelOz(
++    "Oz",
++    cl::desc("Like -O2 but optimize for code size above all else. Similar to "
++             "clang -Oz. Use -passes='default<Oz>' for the new PM"));
++
++static cl::opt<bool>
++    OptLevelO3("O3", cl::desc("Optimization level 3. Similar to clang -O3. "
++                              "Use -passes='default<O3>' for the new PM"));
++
++static cl::opt<unsigned> CodeGenOptLevel(
++    "codegen-opt-level",
++    cl::desc("Override optimization level for codegen hooks, legacy PM only"));
++
++static cl::opt<std::string>
++TargetTriple("mtriple", cl::desc("Override target triple for module"));
++
++static cl::opt<bool> EmitSummaryIndex("module-summary",
++                                      cl::desc("Emit module summary index"),
++                                      cl::init(false));
++
++static cl::opt<bool> EmitModuleHash("module-hash", cl::desc("Emit module hash"),
++                                    cl::init(false));
++
++static cl::opt<bool>
++DisableSimplifyLibCalls("disable-simplify-libcalls",
++                        cl::desc("Disable simplify-libcalls"));
++
++static cl::list<std::string> DisableBuiltins(
++    "disable-builtin",
++    cl::desc("Disable specific target library builtin function"));
++
++static cl::opt<bool> EnableDebugify(
++    "enable-debugify",
++    cl::desc(
++        "Start the pipeline with debugify and end it with check-debugify"));
++
++static cl::opt<bool> VerifyDebugInfoPreserve(
++    "verify-debuginfo-preserve",
++    cl::desc("Start the pipeline with collecting and end it with checking of "
++             "debug info preservation."));
++
++static cl::opt<bool>
++PrintBreakpoints("print-breakpoints-for-testing",
++                 cl::desc("Print select breakpoints location for testing"));
++
++static cl::opt<std::string> ClDataLayout("data-layout",
++                                         cl::desc("data layout string to use"),
++                                         cl::value_desc("layout-string"),
++                                         cl::init(""));
++
++static cl::opt<bool> PreserveBitcodeUseListOrder(
++    "preserve-bc-uselistorder",
++    cl::desc("Preserve use-list order when writing LLVM bitcode."),
++    cl::init(true), cl::Hidden);
++
++static cl::opt<bool> PreserveAssemblyUseListOrder(
++    "preserve-ll-uselistorder",
++    cl::desc("Preserve use-list order when writing LLVM assembly."),
++    cl::init(false), cl::Hidden);
++
++static cl::opt<bool> RunTwice("run-twice",
++                              cl::desc("Run all passes twice, re-using the "
++                                       "same pass manager (legacy PM only)."),
++                              cl::init(false), cl::Hidden);
++
++static cl::opt<bool> DiscardValueNames(
++    "discard-value-names",
++    cl::desc("Discard names from Value (other than GlobalValue)."),
++    cl::init(false), cl::Hidden);
++
++static cl::opt<bool> TimeTrace(
++    "time-trace",
++    cl::desc("Record time trace"));
++
++static cl::opt<unsigned> TimeTraceGranularity(
++    "time-trace-granularity",
++    cl::desc("Minimum time granularity (in microseconds) traced by time profiler"),
++    cl::init(500), cl::Hidden);
++
++static cl::opt<std::string>
++    TimeTraceFile("time-trace-file",
++                    cl::desc("Specify time trace file destination"),
++                    cl::value_desc("filename"));
++
++static cl::opt<bool> RemarksWithHotness(
++    "pass-remarks-with-hotness",
++    cl::desc("With PGO, include profile count in optimization remarks"),
++    cl::Hidden);
++
++static cl::opt<std::optional<uint64_t>, false, remarks::HotnessThresholdParser>
++    RemarksHotnessThreshold(
++        "pass-remarks-hotness-threshold",
++        cl::desc("Minimum profile count required for "
++                 "an optimization remark to be output. "
++                 "Use 'auto' to apply the threshold from profile summary"),
++        cl::value_desc("N or 'auto'"), cl::init(0), cl::Hidden);
++
++static cl::opt<std::string>
++    RemarksFilename("pass-remarks-output",
++                    cl::desc("Output filename for pass remarks"),
++                    cl::value_desc("filename"));
++
++static cl::opt<std::string>
++    RemarksPasses("pass-remarks-filter",
++                  cl::desc("Only record optimization remarks from passes whose "
++                           "names match the given regular expression"),
++                  cl::value_desc("regex"));
++
++static cl::opt<std::string> RemarksFormat(
++    "pass-remarks-format",
++    cl::desc("The format used for serializing remarks (default: YAML)"),
++    cl::value_desc("format"), cl::init("yaml"));
++
++static cl::list<std::string>
++    PassPlugins("load-pass-plugin",
++                cl::desc("Load passes from plugin library"));
++
++static inline void addPass(legacy::PassManagerBase &PM, Pass *P) {
++  // Add the pass to the pass manager...
++  PM.add(P);
++
++  // If we are verifying all of the intermediate steps, add the verifier...
++  if (VerifyEach)
++    PM.add(createVerifierPass());
++}
++
++//===----------------------------------------------------------------------===//
++// CodeGen-related helper functions.
++//
++
++static CodeGenOpt::Level GetCodeGenOptLevel() {
++  return static_cast<CodeGenOpt::Level>(unsigned(CodeGenOptLevel));
++}
++
++// Returns the TargetMachine instance or zero if no triple is provided.
++static TargetMachine* GetTargetMachine(Triple TheTriple, StringRef CPUStr,
++                                       StringRef FeaturesStr,
++                                       const TargetOptions &Options) {
++  std::string Error;
++  const Target *TheTarget =
++      TargetRegistry::lookupTarget(codegen::getMArch(), TheTriple, Error);
++  // Some modules don't specify a triple, and this is okay.
++  if (!TheTarget) {
++    return nullptr;
++  }
++
++  return TheTarget->createTargetMachine(
++      TheTriple.getTriple(), codegen::getCPUStr(), codegen::getFeaturesStr(),
++      Options, codegen::getExplicitRelocModel(),
++      codegen::getExplicitCodeModel(), GetCodeGenOptLevel());
++}
++
++struct TimeTracerRAII {
++  TimeTracerRAII(StringRef ProgramName) {
++    if (TimeTrace)
++      timeTraceProfilerInitialize(TimeTraceGranularity, ProgramName);
++  }
++  ~TimeTracerRAII() {
++    if (TimeTrace) {
++      if (auto E = timeTraceProfilerWrite(TimeTraceFile, OutputFilename)) {
++        handleAllErrors(std::move(E), [&](const StringError &SE) {
++          errs() << SE.getMessage() << "\n";
++        });
++        return;
++      }
++      timeTraceProfilerCleanup();
++    }
++  }
++};
++
++// For use in NPM transition. Currently this contains most codegen-specific
++// passes. Remove passes from here when porting to the NPM.
++// TODO: use a codegen version of PassRegistry.def/PassBuilder::is*Pass() once
++// it exists.
++static bool shouldPinPassToLegacyPM(StringRef Pass) {
++  std::vector<StringRef> PassNameExactToIgnore = {
++      "nvvm-reflect",
++      "nvvm-intr-range",
++      "amdgpu-simplifylib",
++      "amdgpu-usenative",
++      "amdgpu-promote-alloca",
++      "amdgpu-promote-alloca-to-vector",
++      "amdgpu-lower-kernel-attributes",
++      "amdgpu-propagate-attributes-early",
++      "amdgpu-propagate-attributes-late",
++      "amdgpu-unify-metadata",
++      "amdgpu-printf-runtime-binding",
++      "amdgpu-always-inline"};
++  if (llvm::is_contained(PassNameExactToIgnore, Pass))
++    return false;
++
++  std::vector<StringRef> PassNamePrefix = {
++      "x86-",    "xcore-", "wasm-",  "systemz-", "ppc-",    "nvvm-",
++      "nvptx-",  "mips-",  "lanai-", "hexagon-", "bpf-",    "avr-",
++      "thumb2-", "arm-",   "si-",    "gcn-",     "amdgpu-", "aarch64-",
++      "amdgcn-", "polly-", "riscv-", "dxil-"};
++  std::vector<StringRef> PassNameContain = {"ehprepare"};
++  std::vector<StringRef> PassNameExact = {
++      "safe-stack",
++      "cost-model",
++      "codegenprepare",
++      "interleaved-load-combine",
++      "unreachableblockelim",
++      "verify-safepoint-ir",
++      "atomic-expand",
++      "expandvp",
++      "hardware-loops",
++      "mve-tail-predication",
++      "interleaved-access",
++      "global-merge",
++      "pre-isel-intrinsic-lowering",
++      "expand-reductions",
++      "indirectbr-expand",
++      "generic-to-nvvm",
++      "expandmemcmp",
++      "loop-reduce",
++      "lower-amx-type",
++      "pre-amx-config",
++      "lower-amx-intrinsics",
++      "polyhedral-info",
++      "print-polyhedral-info",
++      "replace-with-veclib",
++      "jmc-instrument",
++      "dot-regions",
++      "dot-regions-only",
++      "view-regions",
++      "view-regions-only",
++      "select-optimize",
++      "expand-large-div-rem",
++      "structurizecfg",
++      "fix-irreducible",
++      "expand-large-fp-convert"
++  };
++  for (const auto &P : PassNamePrefix)
++    if (Pass.startswith(P))
++      return true;
++  for (const auto &P : PassNameContain)
++    if (Pass.contains(P))
++      return true;
++  return llvm::is_contained(PassNameExact, Pass);
++}
++
++// For use in NPM transition.
++static bool shouldForceLegacyPM() {
++  for (const auto &P : PassList) {
++    StringRef Arg = P->getPassArgument();
++    if (shouldPinPassToLegacyPM(Arg))
++      return true;
++  }
++  return false;
++}
++
++//===----------------------------------------------------------------------===//
++// main for opt
++//
++int main(int argc, char **argv) {
++  InitLLVM X(argc, argv);
++
++  // Enable debug stream buffering.
++  EnableDebugBuffering = true;
++
++  InitializeAllTargets();
++  InitializeAllTargetMCs();
++  InitializeAllAsmPrinters();
++  InitializeAllAsmParsers();
++
++  // Initialize passes
++  PassRegistry &Registry = *PassRegistry::getPassRegistry();
++  initializeCore(Registry);
++  initializeScalarOpts(Registry);
++  initializeVectorization(Registry);
++  initializeIPO(Registry);
++  initializeAnalysis(Registry);
++  initializeTransformUtils(Registry);
++  initializeInstCombine(Registry);
++  initializeTarget(Registry);
++  // For codegen passes, only passes that do IR to IR transformation are
++  // supported.
++  initializeExpandLargeDivRemLegacyPassPass(Registry);
++  initializeExpandLargeFpConvertLegacyPassPass(Registry);
++  initializeExpandMemCmpPassPass(Registry);
++  initializeScalarizeMaskedMemIntrinLegacyPassPass(Registry);
++  initializeSelectOptimizePass(Registry);
++  initializeCodeGenPreparePass(Registry);
++  initializeAtomicExpandPass(Registry);
++  initializeRewriteSymbolsLegacyPassPass(Registry);
++  initializeWinEHPreparePass(Registry);
++  initializeDwarfEHPrepareLegacyPassPass(Registry);
++  initializeSafeStackLegacyPassPass(Registry);
++  initializeSjLjEHPreparePass(Registry);
++  initializePreISelIntrinsicLoweringLegacyPassPass(Registry);
++  initializeGlobalMergePass(Registry);
++  initializeIndirectBrExpandPassPass(Registry);
++  initializeInterleavedLoadCombinePass(Registry);
++  initializeInterleavedAccessPass(Registry);
++  initializeUnreachableBlockElimLegacyPassPass(Registry);
++  initializeExpandReductionsPass(Registry);
++  initializeExpandVectorPredicationPass(Registry);
++  initializeWasmEHPreparePass(Registry);
++  initializeWriteBitcodePassPass(Registry);
++  initializeHardwareLoopsPass(Registry);
++  initializeReplaceWithVeclibLegacyPass(Registry);
++  initializeJMCInstrumenterPass(Registry);
++
++  SmallVector<PassPlugin, 1> PluginList;
++  PassPlugins.setCallback([&](const std::string &PluginPath) {
++    auto Plugin = PassPlugin::Load(PluginPath);
++    if (!Plugin) {
++      errs() << "Failed to load passes from '" << PluginPath
++             << "'. Request ignored.\n";
++      return;
++    }
++    PluginList.emplace_back(Plugin.get());
++  });
++
++  // Register the Target and CPU printer for --version.
++  cl::AddExtraVersionPrinter(sys::printDefaultTargetAndDetectedCPU);
++
++  cl::ParseCommandLineOptions(argc, argv,
++    "llvm .bc -> .bc modular optimizer and analysis printer\n");
++
++  LLVMContext Context;
++
++  // If `-passes=` is specified, use NPM.
++  // If `-enable-new-pm` is specified and there are no codegen passes, use NPM.
++  // e.g. `-enable-new-pm -sroa` will use NPM.
++  // but `-enable-new-pm -codegenprepare` will still revert to legacy PM.
++  const bool UseNPM = (EnableNewPassManager && !shouldForceLegacyPM()) ||
++                      PassPipeline.getNumOccurrences() > 0;
++
++  if (UseNPM && !PassList.empty()) {
++    errs() << "The `opt -passname` syntax for the new pass manager is "
++              "not supported, please use `opt -passes=<pipeline>` (or the `-p` "
++              "alias for a more concise version).\n";
++    errs() << "See https://llvm.org/docs/NewPassManager.html#invoking-opt "
++              "for more details on the pass pipeline syntax.\n\n";
++    return 1;
++  }
++
++  if (!UseNPM && PluginList.size()) {
++    errs() << argv[0] << ": " << PassPlugins.ArgStr
++           << " specified with legacy PM.\n";
++    return 1;
++  }
++
++  // FIXME: once the legacy PM code is deleted, move runPassPipeline() here and
++  // construct the PassBuilder before parsing IR so we can reuse the same
++  // PassBuilder for print passes.
++  if (PrintPasses) {
++    printPasses(outs());
++    return 0;
++  }
++
++  TimeTracerRAII TimeTracer(argv[0]);
++
++  SMDiagnostic Err;
++
++  Context.setDiscardValueNames(DiscardValueNames);
++  if (!DisableDITypeMap)
++    Context.enableDebugTypeODRUniquing();
++
++  Expected<std::unique_ptr<ToolOutputFile>> RemarksFileOrErr =
++      setupLLVMOptimizationRemarks(Context, RemarksFilename, RemarksPasses,
++                                   RemarksFormat, RemarksWithHotness,
++                                   RemarksHotnessThreshold);
++  if (Error E = RemarksFileOrErr.takeError()) {
++    errs() << toString(std::move(E)) << '\n';
++    return 1;
++  }
++  std::unique_ptr<ToolOutputFile> RemarksFile = std::move(*RemarksFileOrErr);
++
++  // Load the input module...
++  auto SetDataLayout = [](StringRef, StringRef) -> std::optional<std::string> {
++    if (ClDataLayout.empty())
++      return std::nullopt;
++    return ClDataLayout;
++  };
++  std::unique_ptr<Module> M;
++  if (NoUpgradeDebugInfo)
++    M = parseAssemblyFileWithIndexNoUpgradeDebugInfo(
++            InputFilename, Err, Context, nullptr, SetDataLayout)
++            .Mod;
++  else
++    M = parseIRFile(InputFilename, Err, Context,
++                    ParserCallbacks(SetDataLayout));
++
++  if (!M) {
++    Err.print(argv[0], errs());
++    return 1;
++  }
++
++  // Strip debug info before running the verifier.
++  if (StripDebug)
++    StripDebugInfo(*M);
++
++  // Erase module-level named metadata, if requested.
++  if (StripNamedMetadata) {
++    while (!M->named_metadata_empty()) {
++      NamedMDNode *NMD = &*M->named_metadata_begin();
++      M->eraseNamedMetadata(NMD);
++    }
++  }
++
++  // If we are supposed to override the target triple or data layout, do so now.
++  if (!TargetTriple.empty())
++    M->setTargetTriple(Triple::normalize(TargetTriple));
++
++  // Immediately run the verifier to catch any problems before starting up the
++  // pass pipelines.  Otherwise we can crash on broken code during
++  // doInitialization().
++  if (!NoVerify && verifyModule(*M, &errs())) {
++    errs() << argv[0] << ": " << InputFilename
++           << ": error: input module is broken!\n";
++    return 1;
++  }
++
++  // Enable testing of whole program devirtualization on this module by invoking
++  // the facility for updating public visibility to linkage unit visibility when
++  // specified by an internal option. This is normally done during LTO which is
++  // not performed via opt.
++  updateVCallVisibilityInModule(*M,
++                                /* WholeProgramVisibilityEnabledInLTO */ false,
++                                /* DynamicExportSymbols */ {});
++
++  // Figure out what stream we are supposed to write to...
++  std::unique_ptr<ToolOutputFile> Out;
++  std::unique_ptr<ToolOutputFile> ThinLinkOut;
++  if (NoOutput) {
++    if (!OutputFilename.empty())
++      errs() << "WARNING: The -o (output filename) option is ignored when\n"
++                "the --disable-output option is used.\n";
++  } else {
++    // Default to standard output.
++    if (OutputFilename.empty())
++      OutputFilename = "-";
++
++    std::error_code EC;
++    sys::fs::OpenFlags Flags =
++        OutputAssembly ? sys::fs::OF_TextWithCRLF : sys::fs::OF_None;
++    Out.reset(new ToolOutputFile(OutputFilename, EC, Flags));
++    if (EC) {
++      errs() << EC.message() << '\n';
++      return 1;
++    }
++
++    if (!ThinLinkBitcodeFile.empty()) {
++      ThinLinkOut.reset(
++          new ToolOutputFile(ThinLinkBitcodeFile, EC, sys::fs::OF_None));
++      if (EC) {
++        errs() << EC.message() << '\n';
++        return 1;
++      }
++    }
++  }
++
++  Triple ModuleTriple(M->getTargetTriple());
++  std::string CPUStr, FeaturesStr;
++  TargetMachine *Machine = nullptr;
++  const TargetOptions Options =
++      codegen::InitTargetOptionsFromCodeGenFlags(ModuleTriple);
++
++  if (ModuleTriple.getArch()) {
++    CPUStr = codegen::getCPUStr();
++    FeaturesStr = codegen::getFeaturesStr();
++    Machine = GetTargetMachine(ModuleTriple, CPUStr, FeaturesStr, Options);
++  } else if (ModuleTriple.getArchName() != "unknown" &&
++             ModuleTriple.getArchName() != "") {
++    errs() << argv[0] << ": unrecognized architecture '"
++           << ModuleTriple.getArchName() << "' provided.\n";
++    return 1;
++  }
++
++  std::unique_ptr<TargetMachine> TM(Machine);
++
++  // Override function attributes based on CPUStr, FeaturesStr, and command line
++  // flags.
++  codegen::setFunctionAttributes(CPUStr, FeaturesStr, *M);
++
++  // If the output is set to be emitted to standard out, and standard out is a
++  // console, print out a warning message and refuse to do it.  We don't
++  // impress anyone by spewing tons of binary goo to a terminal.
++  if (!Force && !NoOutput && !OutputAssembly)
++    if (CheckBitcodeOutputToConsole(Out->os()))
++      NoOutput = true;
++
++  if (OutputThinLTOBC)
++    M->addModuleFlag(Module::Error, "EnableSplitLTOUnit", SplitLTOUnit);
++
++  // Add an appropriate TargetLibraryInfo pass for the module's triple.
++  TargetLibraryInfoImpl TLII(ModuleTriple);
++
++  // The -disable-simplify-libcalls flag actually disables all builtin optzns.
++  if (DisableSimplifyLibCalls)
++    TLII.disableAllFunctions();
++  else {
++    // Disable individual builtin functions in TargetLibraryInfo.
++    LibFunc F;
++    for (auto &FuncName : DisableBuiltins)
++      if (TLII.getLibFunc(FuncName, F))
++        TLII.setUnavailable(F);
++      else {
++        errs() << argv[0] << ": cannot disable nonexistent builtin function "
++               << FuncName << '\n';
++        return 1;
++      }
++  }
++
++  if (UseNPM) {
++    if (legacy::debugPassSpecified()) {
++      errs()
++          << "-debug-pass does not work with the new PM, either use "
++             "-debug-pass-manager, or use the legacy PM (-enable-new-pm=0)\n";
++      return 1;
++    }
++    auto NumOLevel = OptLevelO0 + OptLevelO1 + OptLevelO2 + OptLevelO3 +
++                     OptLevelOs + OptLevelOz;
++    if (NumOLevel > 1) {
++      errs() << "Cannot specify multiple -O#\n";
++      return 1;
++    }
++    if (NumOLevel > 0 && (PassPipeline.getNumOccurrences() > 0)) {
++      errs() << "Cannot specify -O# and --passes=/--foo-pass, use "
++                "-passes='default<O#>,other-pass'\n";
++      return 1;
++    }
++    std::string Pipeline = PassPipeline;
++
++    if (OptLevelO0)
++      Pipeline = "default<O0>";
++    if (OptLevelO1)
++      Pipeline = "default<O1>";
++    if (OptLevelO2)
++      Pipeline = "default<O2>";
++    if (OptLevelO3)
++      Pipeline = "default<O3>";
++    if (OptLevelOs)
++      Pipeline = "default<Os>";
++    if (OptLevelOz)
++      Pipeline = "default<Oz>";
++    OutputKind OK = OK_NoOutput;
++    if (!NoOutput)
++      OK = OutputAssembly
++               ? OK_OutputAssembly
++               : (OutputThinLTOBC ? OK_OutputThinLTOBitcode : OK_OutputBitcode);
++
++    VerifierKind VK = VK_VerifyOut;
++    if (NoVerify)
++      VK = VK_NoVerifier;
++    else if (VerifyEach)
++      VK = VK_VerifyEachPass;
++
++    // The user has asked to use the new pass manager and provided a pipeline
++    // string. Hand off the rest of the functionality to the new code for that
++    // layer.
++    return runPassPipeline(argv[0], *M, TM.get(), &TLII, Out.get(),
++                           ThinLinkOut.get(), RemarksFile.get(), Pipeline,
++                           PluginList, OK, VK, PreserveAssemblyUseListOrder,
++                           PreserveBitcodeUseListOrder, EmitSummaryIndex,
++                           EmitModuleHash, EnableDebugify,
++                           VerifyDebugInfoPreserve)
++               ? 0
++               : 1;
++  }
++
++  if (OptLevelO0 || OptLevelO1 || OptLevelO2 || OptLevelOs || OptLevelOz ||
++      OptLevelO3) {
++    errs() << "Cannot use -O# with legacy PM.\n";
++    return 1;
++  }
++  if (EmitSummaryIndex) {
++    errs() << "Cannot use -module-summary with legacy PM.\n";
++    return 1;
++  }
++  if (EmitModuleHash) {
++    errs() << "Cannot use -module-hash with legacy PM.\n";
++    return 1;
++  }
++  if (OutputThinLTOBC) {
++    errs() << "Cannot use -thinlto-bc with legacy PM.\n";
++    return 1;
++  }
++  // Create a PassManager to hold and optimize the collection of passes we are
++  // about to build. If the -debugify-each option is set, wrap each pass with
++  // the (-check)-debugify passes.
++  DebugifyCustomPassManager Passes;
++  DebugifyStatsMap DIStatsMap;
++  DebugInfoPerPass DebugInfoBeforePass;
++  if (DebugifyEach) {
++    Passes.setDebugifyMode(DebugifyMode::SyntheticDebugInfo);
++    Passes.setDIStatsMap(DIStatsMap);
++  } else if (VerifyEachDebugInfoPreserve) {
++    Passes.setDebugifyMode(DebugifyMode::OriginalDebugInfo);
++    Passes.setDebugInfoBeforePass(DebugInfoBeforePass);
++    if (!VerifyDIPreserveExport.empty())
++      Passes.setOrigDIVerifyBugsReportFilePath(VerifyDIPreserveExport);
++  }
++
++  bool AddOneTimeDebugifyPasses =
++      (EnableDebugify && !DebugifyEach) ||
++      (VerifyDebugInfoPreserve && !VerifyEachDebugInfoPreserve);
++
++  Passes.add(new TargetLibraryInfoWrapperPass(TLII));
++
++  // Add internal analysis passes from the target machine.
++  Passes.add(createTargetTransformInfoWrapperPass(TM ? TM->getTargetIRAnalysis()
++                                                     : TargetIRAnalysis()));
++
++  if (AddOneTimeDebugifyPasses) {
++    if (EnableDebugify) {
++      Passes.setDIStatsMap(DIStatsMap);
++      Passes.add(createDebugifyModulePass());
++    } else if (VerifyDebugInfoPreserve) {
++      Passes.setDebugInfoBeforePass(DebugInfoBeforePass);
++      Passes.add(createDebugifyModulePass(
++          DebugifyMode::OriginalDebugInfo, "",
++          &(Passes.getDebugInfoPerPass())));
++    }
++  }
++
++  std::unique_ptr<legacy::FunctionPassManager> FPasses;
++
++  if (PrintBreakpoints) {
++    // Default to standard output.
++    if (!Out) {
++      if (OutputFilename.empty())
++        OutputFilename = "-";
++
++      std::error_code EC;
++      Out = std::make_unique<ToolOutputFile>(OutputFilename, EC,
++                                              sys::fs::OF_None);
++      if (EC) {
++        errs() << EC.message() << '\n';
++        return 1;
++      }
++    }
++    Passes.add(createBreakpointPrinter(Out->os()));
++    NoOutput = true;
++  }
++
++  if (TM) {
++    // FIXME: We should dyn_cast this when supported.
++    auto &LTM = static_cast<LLVMTargetMachine &>(*TM);
++    Pass *TPC = LTM.createPassConfig(Passes);
++    Passes.add(TPC);
++  }
++
++  // Create a new optimization pass for each one specified on the command line
++  for (unsigned i = 0; i < PassList.size(); ++i) {
++    const PassInfo *PassInf = PassList[i];
++    Pass *P = nullptr;
++    if (PassInf->getNormalCtor())
++      P = PassInf->getNormalCtor()();
++    else
++      errs() << argv[0] << ": cannot create pass: "
++             << PassInf->getPassName() << "\n";
++    if (P)
++      addPass(Passes, P);
++  }
++
++  if (FPasses) {
++    FPasses->doInitialization();
++    for (Function &F : *M)
++      FPasses->run(F);
++    FPasses->doFinalization();
++  }
++
++  // Check that the module is well formed on completion of optimization
++  if (!NoVerify && !VerifyEach)
++    Passes.add(createVerifierPass());
++
++  if (AddOneTimeDebugifyPasses) {
++    if (EnableDebugify)
++      Passes.add(createCheckDebugifyModulePass(false));
++    else if (VerifyDebugInfoPreserve) {
++      if (!VerifyDIPreserveExport.empty())
++        Passes.setOrigDIVerifyBugsReportFilePath(VerifyDIPreserveExport);
++      Passes.add(createCheckDebugifyModulePass(
++          false, "", nullptr, DebugifyMode::OriginalDebugInfo,
++          &(Passes.getDebugInfoPerPass()), VerifyDIPreserveExport));
++    }
++  }
++
++  // In run twice mode, we want to make sure the output is bit-by-bit
++  // equivalent if we run the pass manager again, so setup two buffers and
++  // a stream to write to them. Note that llc does something similar and it
++  // may be worth to abstract this out in the future.
++  SmallVector<char, 0> Buffer;
++  SmallVector<char, 0> FirstRunBuffer;
++  std::unique_ptr<raw_svector_ostream> BOS;
++  raw_ostream *OS = nullptr;
++
++  const bool ShouldEmitOutput = !NoOutput;
++
++  // Write bitcode or assembly to the output as the last step...
++  if (ShouldEmitOutput || RunTwice) {
++    assert(Out);
++    OS = &Out->os();
++    if (RunTwice) {
++      BOS = std::make_unique<raw_svector_ostream>(Buffer);
++      OS = BOS.get();
++    }
++    if (OutputAssembly)
++      Passes.add(createPrintModulePass(*OS, "", PreserveAssemblyUseListOrder));
++    else
++      Passes.add(createBitcodeWriterPass(*OS, PreserveBitcodeUseListOrder));
++  }
++
++  // Before executing passes, print the final values of the LLVM options.
++  cl::PrintOptionValues();
++
++  if (!RunTwice) {
++    // Now that we have all of the passes ready, run them.
++    Passes.run(*M);
++  } else {
++    // If requested, run all passes twice with the same pass manager to catch
++    // bugs caused by persistent state in the passes.
++    std::unique_ptr<Module> M2(CloneModule(*M));
++    // Run all passes on the original module first, so the second run processes
++    // the clone to catch CloneModule bugs.
++    Passes.run(*M);
++    FirstRunBuffer = Buffer;
++    Buffer.clear();
++
++    Passes.run(*M2);
++
++    // Compare the two outputs and make sure they're the same
++    assert(Out);
++    if (Buffer.size() != FirstRunBuffer.size() ||
++        (memcmp(Buffer.data(), FirstRunBuffer.data(), Buffer.size()) != 0)) {
++      errs()
++          << "Running the pass manager twice changed the output.\n"
++             "Writing the result of the second run to the specified output.\n"
++             "To generate the one-run comparison binary, just run without\n"
++             "the compile-twice option\n";
++      if (ShouldEmitOutput) {
++        Out->os() << BOS->str();
++        Out->keep();
++      }
++      if (RemarksFile)
++        RemarksFile->keep();
++      return 1;
++    }
++    if (ShouldEmitOutput)
++      Out->os() << BOS->str();
++  }
++
++  if (DebugifyEach && !DebugifyExport.empty())
++    exportDebugifyStats(DebugifyExport, Passes.getDebugifyStatsMap());
++
++  // Declare success.
++  if (!NoOutput || PrintBreakpoints)
++    Out->keep();
++
++  if (RemarksFile)
++    RemarksFile->keep();
++
++  if (ThinLinkOut)
++    ThinLinkOut->keep();
++
++  return 0;
++}

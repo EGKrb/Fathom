@@ -1,0 +1,284 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+from __future__ import annotations
+
+from typing import Annotated, Optional, Self, Set
+
+from .object import Kind, ObjectID, ObjectSet
+from .utils import is_mime_type_text
+from .utils.cabc import ABC, abstractmethod
+from .utils.registry import get_singleton
+
+ModelPath = Annotated[str, "A string that represents a path in the model tree."]
+ModelPathSet = Set[ModelPath]
+
+
+class ModelDiff(ABC):
+    """
+    Abstract class representing a diff between two model instances
+    """
+
+    @abstractmethod
+    def paths(self) -> ModelPathSet:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def serialize(self) -> bytes:
+        raise NotImplementedError()
+
+    def __len__(self) -> int:
+        """Number of changes in the diff (zero means no change).
+
+        Implementations for which `paths()` marshals a data structure are
+        encouraged to override this with a cheaper size computation.
+        """
+        return len(self.paths())
+
+
+class Model(ABC):
+    """
+    Model is an (abstract) class representing a document that configures the what a certain pipeline
+    should produce.
+    The document is a tree composed by dictionaries, list and scalars.
+    It can be navigated via ModelPath.
+
+    From the model, it's possible to enumerate all the objects of a certain Kind.
+
+    The model can be changed, a change in the model might need to the invalidation of certain
+    objects that have been previously produced.
+    """
+
+    # String identifying the model class
+    identifier: str
+
+    @abstractmethod
+    def diff(self, other: Self) -> ModelDiff:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def clone(self) -> Self:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def children(self, obj: ObjectID, kind: Kind) -> set[ObjectID]:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def __eq__(self, other: object) -> bool:
+        raise NotImplementedError()
+
+    def all_objects(self, kind: Kind) -> ObjectSet:
+        """
+        Returns all the objects of a certain kind in the model.
+        """
+        obj_id_type: type[ObjectID] = get_singleton(ObjectID)  # type: ignore[type-abstract]
+        root: ObjectID = obj_id_type.root()
+        if kind == root.kind():
+            return ObjectSet(kind, {root})
+        return ObjectSet(kind, self.children(root, kind))
+
+    def has_object(self, kind: Kind, object_id: ObjectID) -> bool:
+        """
+        Returns whether the object `object_id` of the given kind exists in the
+        model. The default implementation materializes `all_objects`;
+        implementations that can answer more cheaply should override it.
+        """
+        return object_id in self.all_objects(kind)
+
+    def aliases(self, object_id: ObjectID) -> list[str]:
+        """
+        Returns a list of human-friendly aliases for the given object.
+        By default no aliases are provided.
+        """
+        return []
+
+    def resolve_alias(self, kind: Kind, alias: str) -> Optional[ObjectID]:
+        """
+        Resolve a string to an ObjectID of the given kind, or None if it does
+        not resolve. The string can be:
+        * a full object location, e.g. `/function/0x40:Code_x86_64` (a location
+          naming a different kind than `kind` does not resolve);
+        * a bare object key, e.g. `0x40:Code_x86_64`, interpreted within `kind`;
+        * a human-friendly alias (see `aliases`), the inverse of `aliases`.
+        Locations and bare keys (the non-aliases) take priority over aliases.
+        By default only locations and bare keys are handled; subclasses add
+        alias resolution.
+        """
+        object_id_type: type[ObjectID] = get_singleton(ObjectID)  # type: ignore[type-abstract]
+
+        if alias.startswith("/"):
+            # A leading slash always denotes a full location, never a name.
+            try:
+                object_id = object_id_type.deserialize(alias)
+            except RuntimeError:
+                return None
+        else:
+            # Otherwise, try to interpret it as a bare key within `kind`.
+            try:
+                object_id = object_id_type.deserialize(f"/{kind.serialize()}/{alias}")
+            except RuntimeError:
+                return None
+
+        # Keep it only if it is of the requested kind and exists in the model.
+        if object_id.kind() != kind:
+            return None
+        return object_id if self.has_object(kind, object_id) else None
+
+    def move_to_kind(self, objects: ObjectSet, destination_kind: Kind) -> ObjectSet:
+        if not objects:
+            # If the objects set is empty, we can return an empty set of the destination kind
+            return ObjectSet(destination_kind)
+
+        source_kind = objects.kind
+
+        match destination_kind.relation(source_kind):
+            case (Kind.Relation.SAME, _):
+                return objects.clone()
+            case (Kind.Relation.UNRELATED, _):
+                return ObjectSet(destination_kind)
+            case (Kind.Relation.ANCESTOR, path):
+                assert isinstance(path, list)
+                result = ObjectSet(destination_kind)
+                for obj in objects.objects:
+                    for _ in range(len(path) - 1):
+                        parent = obj.parent()
+                        assert parent is not None, (
+                            f"Object {obj} of kind {source_kind} has no parent, "
+                            f"but we are trying to move it to {destination_kind} which "
+                            "is an ancestor."
+                        )
+                        obj = parent
+                    result.add(obj)
+                return result
+            case (Kind.Relation.DESCENDANT, path):
+                assert isinstance(path, list)
+
+                result = objects
+
+                # For each child kind
+                for child_kind in path[:-1]:
+                    # Create a new object set and populate it with the children from the previous
+                    # iteration
+                    children = ObjectSet(kind=child_kind)
+
+                    for obj in result:
+                        children.objects.update(self.children(obj, child_kind))
+
+                    # Make children become the source for the next iteration
+                    result = children
+
+                assert result.kind is destination_kind
+                return result
+
+        assert False, f"Unhandled relation between kinds: {source_kind} -> {destination_kind}"
+
+    @abstractmethod
+    def serialize(self) -> bytes:
+        """
+        Serialize the model to bytes for storage
+        """
+        pass
+
+    @classmethod
+    @abstractmethod
+    def deserialize(cls, data: bytes, path: str | None = None) -> tuple[Model, bool]:
+        """
+        Deserialize the model from bytes. The underlying implementation can
+        change the content (e.g. migrate from a previous version), in that case
+        the returned bool will be set to `true`.
+        """
+        pass
+
+    @classmethod
+    @abstractmethod
+    def mime_type(cls) -> str:
+        """
+        The mime type of the serialized format of the model.
+        """
+
+    @classmethod
+    def is_text(cls) -> bool:
+        """
+        Returns True if the serialized model is a text file, False otherwise.
+        """
+        return is_mime_type_text(cls.mime_type())
+
+    @classmethod
+    @abstractmethod
+    def model_name(cls) -> str:
+        """
+        The file name of the model when saved on disk. This can be used by
+        the storage provider to find the model in a project.
+        """
+
+    def enable_caching(self):
+        """
+        Enable caching on the instance
+        """
+        pass
+
+    def disable_caching(self):
+        """
+        Disable caching on the instance, all cached data needs to be dropped
+        """
+        pass
+
+    def path(self) -> str | None:
+        """
+        Path to the current model file on the local filesystem. If the model
+        was loaded from anywhere that was not a local path (e.g. memory, over
+        the network) then this will return None.
+        """
+
+
+class ReadOnlyModel[M: Model]:
+    """
+    A wrapper around the Model ensuring no changes can be made.
+    """
+
+    def __init__(self, inner: M):
+        self._context: M = inner
+
+    def diff(self, other: ReadOnlyModel[M]) -> ModelDiff:
+        return self._context.diff(other._context)  # pylint: disable=protected-access
+
+    def clone(self) -> M:
+        return self._context.clone()
+
+    def children(self, obj: ObjectID, kind: Kind) -> ObjectSet:
+        return ObjectSet(kind, self._context.children(obj, kind))
+
+    def all_objects(self, kind: Kind) -> ObjectSet:
+        return self._context.all_objects(kind)
+
+    def aliases(self, obj: ObjectID) -> list[str]:
+        return self._context.aliases(obj)
+
+    def resolve_alias(self, kind: Kind, alias: str) -> Optional[ObjectID]:
+        return self._context.resolve_alias(kind, alias)
+
+    def move_to_kind(self, objects: ObjectSet, destination_kind: Kind) -> ObjectSet:
+        return self._context.move_to_kind(objects, destination_kind)
+
+    def serialize(self) -> bytes:
+        return self._context.serialize()
+
+    def downcast(self) -> M:
+        """
+        Returns the inner model, allowing to use it as a regular model.
+        The user should be careful not to modify the model.
+        While we could convert this to a context manager, real users will be
+        written in C++ where we can enforce the immutability of the model.
+        """
+        return self._context
+
+    def enable_caching(self):
+        self._context.enable_caching()
+
+    def disable_caching(self):
+        self._context.disable_caching()
+
+    def path(self) -> str | None:
+        return self._context.path()

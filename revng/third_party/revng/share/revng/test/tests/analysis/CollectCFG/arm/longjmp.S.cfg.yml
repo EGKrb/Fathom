@@ -1,0 +1,36 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+---
+- Name: _start
+  Blocks:
+    - ID: "1"
+      End: "2"
+      Successors:
+        - Destination: "3"
+          Type: FunctionCall
+    - ID: "2"
+      End: "3"
+      Successors:
+        - Destination: ":Invalid"
+          Type: Return
+- Name: longjmp
+  Blocks:
+    - ID: "3"
+      End: "4"
+      Successors:
+        - Destination: "4"
+          Type: DirectBranch
+        - Destination: "5"
+          Type: DirectBranch
+    - ID: "4"
+      End: "5"
+      Successors:
+        - Destination: ":Invalid"
+          Type: LongJmp
+    - ID: "5"
+      End: "6"
+      Successors:
+        - Destination: ":Invalid"
+          Type: Return

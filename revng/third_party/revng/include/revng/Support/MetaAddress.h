@@ -1,0 +1,1128 @@
+#pragma once
+
+//
+// This file is distributed under the MIT License. See LICENSE.md for details.
+//
+
+#include <compare>
+
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
+
+#include "revng/ADT/KeyedObjectContainer.h"
+#include "revng/Model/Architecture.h"
+#include "revng/Runtime/PlainMetaAddress.h"
+#include "revng/Support/Debug.h"
+#include "revng/Support/IntegerSerialization.h"
+#include "revng/Support/OverflowSafeInt.h"
+
+namespace llvm {
+class TypeDefinition;
+class Constant;
+class ConstantInt;
+class Value;
+class LLVMContext;
+class Module;
+class StructType;
+class GlobalVariable;
+class Instruction;
+template<typename T, typename Enable>
+struct DenseMapInfo;
+} // namespace llvm
+
+namespace revng {
+class IRBuilder;
+} // namespace revng
+
+namespace MetaAddressType {
+
+enum Values : uint16_t {
+  /// An invalid address
+  Invalid,
+
+  /// A 32-bit generic address
+  Generic32,
+
+  /// A 64-bit generic address
+  Generic64,
+
+  /// The address of a x86 basic block
+  Code_x86,
+
+  /// The address of a x86-64 basic block
+  Code_x86_64,
+
+  /// The address of a MIPS basic block
+  Code_mips,
+
+  /// The address of a MIPS little-endian basic block
+  Code_mipsel,
+
+  /// The address of a regular ARM basic block
+  Code_arm,
+
+  /// The address of a ARM Thumb basic block
+  Code_arm_thumb,
+
+  /// The address of a AArch64 basic block
+  Code_aarch64,
+
+  /// The address of a z/Architecture (s390x) basic block
+  Code_systemz,
+
+  Count
+};
+
+inline constexpr bool isValid(Values V) {
+  switch (V) {
+  case Invalid:
+  case Generic32:
+  case Generic64:
+  case Code_x86:
+  case Code_x86_64:
+  case Code_mips:
+  case Code_mipsel:
+  case Code_arm:
+  case Code_arm_thumb:
+  case Code_aarch64:
+  case Code_systemz:
+    return true;
+  case Count:
+  default:
+    return false;
+  }
+}
+
+inline constexpr const char *toString(Values V) {
+  switch (V) {
+  case Invalid:
+    return "Invalid";
+  case Generic32:
+    return "Generic32";
+  case Generic64:
+    return "Generic64";
+  case Code_x86:
+    return "Code_x86";
+  case Code_x86_64:
+    return "Code_x86_64";
+  case Code_mips:
+    return "Code_mips";
+  case Code_mipsel:
+    return "Code_mipsel";
+  case Code_arm:
+    return "Code_arm";
+  case Code_arm_thumb:
+    return "Code_arm_thumb";
+  case Code_aarch64:
+    return "Code_aarch64";
+  case Code_systemz:
+    return "Code_systemz";
+  case Count:
+  default:
+    revng_abort();
+  }
+}
+
+inline constexpr Values fromString(llvm::StringRef String) {
+  if (String == "Generic32") {
+    return Generic32;
+  } else if (String == "Generic64") {
+    return Generic64;
+  } else if (String == "Code_x86") {
+    return Code_x86;
+  } else if (String == "Code_x86_64") {
+    return Code_x86_64;
+  } else if (String == "Code_mips") {
+    return Code_mips;
+  } else if (String == "Code_mipsel") {
+    return Code_mipsel;
+  } else if (String == "Code_arm") {
+    return Code_arm;
+  } else if (String == "Code_arm_thumb") {
+    return Code_arm_thumb;
+  } else if (String == "Code_aarch64") {
+    return Code_aarch64;
+  } else if (String == "Code_systemz") {
+    return Code_systemz;
+  } else {
+    return Invalid;
+  }
+}
+
+inline llvm::StringRef consumeFromString(llvm::StringRef String) {
+  for (Values Index = Invalid; Index < Count;) {
+
+    llvm::StringRef Serialized = MetaAddressType::toString(Index);
+    if (String.starts_with(Serialized))
+      return String.substr(Serialized.size());
+
+    Index = static_cast<Values>(static_cast<uint16_t>(Index) + 1);
+  }
+
+  return String;
+}
+
+inline constexpr model::Architecture::Values arch(Values V) {
+  switch (V) {
+  case Code_x86:
+    return model::Architecture::x86;
+  case Code_x86_64:
+    return model::Architecture::x86_64;
+  case Code_mips:
+    return model::Architecture::mips;
+  case Code_mipsel:
+    return model::Architecture::mipsel;
+  case Code_arm:
+  case Code_arm_thumb:
+    return model::Architecture::arm;
+  case Code_aarch64:
+    return model::Architecture::aarch64;
+  case Code_systemz:
+    return model::Architecture::systemz;
+  case Invalid:
+  case Generic32:
+  case Generic64:
+    return model::Architecture::Invalid;
+  case Count:
+  default:
+    revng_abort();
+  }
+}
+
+/// Returns Generic32 or Generic64 depending on the size of addresses in \p Arch
+inline constexpr Values
+genericFromArch(model::Architecture::Values Architecture) {
+  switch (Architecture) {
+  case model::Architecture::x86:
+  case model::Architecture::arm:
+  case model::Architecture::mips:
+  case model::Architecture::mipsel:
+    return Generic32;
+  case model::Architecture::x86_64:
+  case model::Architecture::aarch64:
+  case model::Architecture::systemz:
+    return Generic64;
+  default:
+    revng_abort("Unsupported architecture");
+  }
+}
+
+/// Convert \p Type to the corresponding generic type
+inline constexpr Values toGeneric(Values Type) {
+  switch (Type) {
+  case Invalid:
+    revng_abort("Can't convert to generic an invalid type");
+
+  case Generic32:
+  case Generic64:
+    return Type;
+
+  case Code_x86:
+  case Code_arm_thumb:
+  case Code_mips:
+  case Code_mipsel:
+  case Code_arm:
+    return Generic32;
+
+  case Code_x86_64:
+  case Code_systemz:
+  case Code_aarch64:
+    return Generic64;
+
+  case Count:
+  default:
+    revng_abort("Unknown MetaAddressType value");
+  }
+}
+
+/// Get the default type for code of the given architecture
+inline constexpr Values defaultCodeFromArch(model::Architecture::Values Arch) {
+  switch (Arch) {
+  case model::Architecture::x86:
+    return Code_x86;
+  case model::Architecture::arm:
+    return Code_arm;
+  case model::Architecture::mips:
+    return Code_mips;
+  case model::Architecture::mipsel:
+    return Code_mipsel;
+  case model::Architecture::x86_64:
+    return Code_x86_64;
+  case model::Architecture::aarch64:
+    return Code_aarch64;
+  case model::Architecture::systemz:
+    return Code_systemz;
+  default:
+    revng_abort("Unsupported architecture");
+  }
+}
+
+/// Get the types for code of the given architecture
+inline std::span<Values> archCodeTypes(model::Architecture::Values Arch) {
+  switch (Arch) {
+  case model::Architecture::x86: {
+    static std::array<Values, 1> Result{ Code_x86 };
+    return Result;
+  }
+  case model::Architecture::arm: {
+    static std::array<Values, 2> Result{ Code_arm, Code_arm_thumb };
+    return Result;
+  }
+  case model::Architecture::mips: {
+    static std::array<Values, 1> Result{ Code_mips };
+    return Result;
+  }
+  case model::Architecture::mipsel: {
+    static std::array<Values, 1> Result{ Code_mipsel };
+    return Result;
+  }
+  case model::Architecture::x86_64: {
+    static std::array<Values, 1> Result{ Code_x86_64 };
+    return Result;
+  }
+  case model::Architecture::aarch64: {
+    static std::array<Values, 1> Result{ Code_aarch64 };
+    return Result;
+  }
+  case model::Architecture::systemz: {
+    static std::array<Values, 1> Result{ Code_systemz };
+    return Result;
+  }
+  default:
+    revng_abort("Unsupported architecture");
+  }
+}
+
+/// Get the alignment of the corresponding type
+///
+/// \note Generic types have alignment of 1
+inline constexpr unsigned alignment(Values Type) {
+  switch (Type) {
+  case Invalid:
+    revng_abort("Invalid addresses have no alignment");
+  case Generic32:
+  case Generic64:
+  case Code_x86:
+  case Code_x86_64:
+    return 1;
+  case Code_arm_thumb:
+  case Code_systemz:
+    return 2;
+  case Code_mips:
+  case Code_mipsel:
+  case Code_arm:
+  case Code_aarch64:
+    return 4;
+
+  case Count:
+  default:
+    revng_abort("Unknown MetaAddressType value");
+  }
+}
+
+/// Get the size in bit of an address of the given type
+inline constexpr unsigned bitSize(Values Type) {
+  switch (Type) {
+  case Invalid:
+    revng_abort("Invalid addresses have no bit size");
+  case Generic32:
+  case Code_x86:
+  case Code_arm_thumb:
+  case Code_mips:
+  case Code_mipsel:
+  case Code_arm:
+    return 32;
+  case Generic64:
+  case Code_x86_64:
+  case Code_systemz:
+  case Code_aarch64:
+    return 64;
+
+  case Count:
+  default:
+    revng_abort("Unknown MetaAddressType value");
+  }
+}
+
+/// Get a 64-bits mask representing the relevant bits for the given type
+///
+/// \note The alignment is not considered in this mask.
+inline constexpr uint64_t addressMask(Values Type) {
+  revng_assert(bitSize(Type) != 0);
+  return std::numeric_limits<uint64_t>::max() >> (64 - bitSize(Type));
+}
+
+/// Does \p Type represent a code address?
+inline constexpr bool isCode(Values Type) {
+  switch (Type) {
+  case Invalid:
+  case Generic32:
+  case Generic64:
+    return false;
+
+  case Code_x86:
+  case Code_arm_thumb:
+  case Code_mips:
+  case Code_mipsel:
+  case Code_arm:
+  case Code_x86_64:
+  case Code_systemz:
+  case Code_aarch64:
+    return true;
+
+  case Count:
+  default:
+    revng_abort("Unknown MetaAddressType value");
+  }
+}
+
+/// Does \p Type represent an address pointing to \p Arch code?
+inline constexpr bool isCode(Values Type, model::Architecture::Values Arch) {
+  switch (Arch) {
+  case model::Architecture::x86:
+    return Type == Code_x86;
+  case model::Architecture::arm:
+    return Type == Code_arm or Type == Code_arm_thumb;
+  case model::Architecture::mips:
+    return Type == Code_mips;
+  case model::Architecture::mipsel:
+    return Type == Code_mipsel;
+  case model::Architecture::x86_64:
+    return Type == Code_x86_64;
+  case model::Architecture::aarch64:
+    return Type == Code_aarch64;
+  case model::Architecture::systemz:
+    return Type == Code_systemz;
+  default:
+    revng_abort("Unsupported architecture");
+  }
+}
+
+/// Is \p Type a generic address?
+inline constexpr bool isGeneric(Values Type) {
+  switch (Type) {
+  case Invalid:
+  case Code_x86:
+  case Code_arm_thumb:
+  case Code_mips:
+  case Code_mipsel:
+  case Code_arm:
+  case Code_x86_64:
+  case Code_systemz:
+  case Code_aarch64:
+    return false;
+
+  case Generic32:
+  case Generic64:
+    return true;
+
+  case Count:
+  default:
+    revng_abort("Unknown MetaAddressType value");
+  }
+}
+
+inline constexpr bool isDefaultCode(Values Type) {
+  switch (Type) {
+  case Code_x86:
+  case Code_mips:
+  case Code_mipsel:
+  case Code_arm:
+  case Code_x86_64:
+  case Code_systemz:
+  case Code_aarch64:
+    return true;
+
+  case Invalid:
+  case Generic32:
+  case Generic64:
+  case Code_arm_thumb:
+    return false;
+  case Count:
+  default:
+    revng_abort("Unknown MetaAddressType value");
+  }
+}
+
+inline constexpr llvm::StringRef getLLVMCPUFeatures(Values Type) {
+  switch (Type) {
+  case Code_arm_thumb:
+    return "+thumb-mode";
+  case Invalid:
+  case Generic32:
+  case Generic64:
+  case Code_x86:
+  case Code_mips:
+  case Code_mipsel:
+  case Code_arm:
+  case Code_x86_64:
+  case Code_systemz:
+  case Code_aarch64:
+    return "";
+
+  case Count:
+  default:
+    revng_abort("Unknown MetaAddressType value");
+  }
+}
+
+} // namespace MetaAddressType
+
+/// Represents an address with a type, an address space and epoch
+///
+/// MetaAddress is a uint64_t on steroids.
+///
+/// Its key goal is to allow to distinguish different things at the same address
+/// (e.g., regular and Thumb code at the same address).  It also provides
+/// appropriate arithmetic depending on the address type.
+///
+/// MetaAddress represents four things:
+///
+/// 1. The absolute value of the address
+/// 2. The "epoch": a progressive identifier that represents a timestamp. It
+///    enables users to represent the fact that at the same address there might
+///    be different things at different points in time. Its main purpose is to
+///    represent self-modifying code.
+/// 3. The address space: a generic identifier for architectures that have
+///    access to multiple address spaces.
+/// 4. The type: a MetaAddress can be used to represent a generic address or to
+///    code. See MetaAddressType for further details.
+///
+/// \note Generic addresses have no alignment constraints.
+class MetaAddress : private PlainMetaAddress {
+private:
+  friend class ProgramCounterHandler;
+  friend llvm::DenseMapInfo<MetaAddress>;
+
+  struct Tombstone {
+    explicit Tombstone() = default;
+  };
+
+public:
+  constexpr static llvm::StringRef Separator = ":";
+
+public:
+  class Features {
+  public:
+    model::Architecture::Values Architecture = model::Architecture::Invalid;
+    uint32_t Epoch = 0;
+    uint16_t AddressSpace = 0;
+
+  public:
+    bool operator==(const Features &Other) const = default;
+  };
+
+public:
+  /// \name Constructors
+  ///
+  /// @{
+
+  /// Public constructor creating an invalid MetaAddress
+  ///
+  /// \note Prefer MetaAddress::invalid()
+  constexpr explicit MetaAddress() : PlainMetaAddress{} {}
+
+  /// Public constructor allowing to create a custom instance to validate
+  ///
+  /// \note Prefer MetaAddress:fromPC or MetaAddress::fromGeneric
+  constexpr explicit MetaAddress(uint64_t Address,
+                                 MetaAddressType::Values Type,
+                                 uint32_t Epoch = 0,
+                                 uint16_t AddressSpace = 0) :
+    PlainMetaAddress{ Epoch, AddressSpace, Type, Address } {
+
+    // Verify the given data
+    validate();
+  }
+
+private:
+  constexpr explicit MetaAddress(Tombstone) :
+    PlainMetaAddress{ .Epoch = 0, .AddressSpace = 0, .Type = 0, .Address = 1 } {
+  }
+
+  /// @}
+
+public:
+  /// \name Factory methods
+  ///
+  /// @{
+
+  /// Create an invalid MetaAddress
+  static constexpr MetaAddress invalid() { return MetaAddress(); }
+
+  /// Create a MetaAddress from a pointer to \p Arch code
+  static constexpr MetaAddress fromPC(model::Architecture::Values Arch,
+                                      uint64_t PC,
+                                      uint32_t Epoch = 0,
+                                      uint16_t AddressSpace = 0) {
+
+    // Create the base MetaAddress, it points to code at zero
+    MetaAddress Result(0,
+                       MetaAddressType::defaultCodeFromArch(Arch),
+                       Epoch,
+                       AddressSpace);
+
+    // A code MetaAddress pointing at 0 should always be valid
+    revng_assert(Result.isValid());
+
+    if (Arch == model::Architecture::arm and (PC & 1) == 1) {
+      // A pointer to ARM code with the LSB turned on is Thumb code
+
+      // Override the type
+      Result.Type = MetaAddressType::Code_arm_thumb;
+    }
+
+    Result.setPC(PC);
+
+    // Check alignment
+    Result.validate();
+
+    return Result;
+  }
+
+  static MetaAddress fromPC(MetaAddress Base, uint64_t Address) {
+    return fromPC(Base.arch(), Address, Base.epoch(), Base.addressSpace());
+  }
+
+  static MetaAddress fromPC(uint64_t Address, const Features &Features) {
+    return MetaAddress::fromPC(Features.Architecture,
+                               Address,
+                               Features.Epoch,
+                               Features.AddressSpace);
+  }
+
+  /// Create a generic MetaAddress for architecture \p Arch
+  static constexpr MetaAddress fromGeneric(model::Architecture::Values Arch,
+                                           uint64_t Address,
+                                           uint32_t Epoch = 0,
+                                           uint16_t AddressSpace = 0) {
+    return MetaAddress(Address,
+                       MetaAddressType::genericFromArch(Arch),
+                       Epoch,
+                       AddressSpace);
+  }
+
+  static constexpr MetaAddress fromGeneric(uint64_t Address,
+                                           Features Features) {
+    return MetaAddress(Address,
+                       MetaAddressType::genericFromArch(Features.Architecture),
+                       Features.Epoch,
+                       Features.AddressSpace);
+  }
+
+  /// @}
+
+public:
+  /// Deserialize a MetaAddress from an llvm::Constant
+  static MetaAddress fromValue(llvm::Value *V);
+
+  /// Serialize a MetaAddress to an llvm::Constant
+  llvm::Constant *toValue(llvm::Module *M) const;
+
+public:
+  static llvm::Instruction *composeIntegerPC(revng::IRBuilder &B,
+                                             llvm::Value *AddressValue,
+                                             llvm::Value *EpochValue,
+                                             llvm::Value *AddressSpaceValue,
+                                             llvm::Value *TypeValue);
+
+  static MetaAddress decomposeIntegerPC(llvm::ConstantInt *Value);
+  static MetaAddress decomposeIntegerPC(const llvm::APInt &Value);
+
+public:
+  /// If isCode(), let this decay to the corresponding generic address
+  constexpr MetaAddress toGeneric() const {
+    revng_check(isValid());
+
+    MetaAddress Result = *this;
+    Result.Type = MetaAddressType::toGeneric(type());
+    return Result;
+  }
+
+  constexpr MetaAddress toGeneric64() const {
+    revng_check(isValid());
+
+    MetaAddress Result = *this;
+    Result.Type = MetaAddressType::Generic64;
+    return Result;
+  }
+
+  constexpr MetaAddress toPC(model::Architecture::Values Arch) const {
+    return fromPC(Arch, Address, Epoch, AddressSpace);
+  }
+
+  Features features() const {
+    return Features(MetaAddressType::arch(type()), Epoch, AddressSpace);
+  }
+
+public:
+  constexpr std::strong_ordering operator<=>(const MetaAddress &Other) const {
+    return tie() <=> Other.tie();
+  }
+  constexpr bool operator==(const MetaAddress &Other) const {
+    return tie() == Other.tie();
+  }
+
+  /// \name Address comparisons
+  ///
+  /// Comparison operators ignoring the MetaAddress type
+  ///
+  /// @{
+
+  constexpr bool addressEquals(const MetaAddress &Other) const {
+    revng_assert(isValid());
+    revng_assert(Other.isValid());
+    return toGeneric64() == Other.toGeneric64();
+  }
+
+  constexpr bool addressDiffers(const MetaAddress &Other) const {
+    revng_assert(isValid());
+    revng_assert(Other.isValid());
+    return !addressEquals(Other);
+  }
+
+  constexpr bool addressLowerThan(const MetaAddress &Other) const {
+    revng_assert(isValid());
+    revng_assert(Other.isValid());
+    return toGeneric64() < Other.toGeneric64();
+  }
+
+  constexpr bool addressLowerThanOrEqual(const MetaAddress &Other) const {
+    revng_assert(isValid());
+    revng_assert(Other.isValid());
+    return toGeneric64() <= Other.toGeneric64();
+  }
+
+  constexpr bool addressGreaterThanOrEqual(const MetaAddress &Other) const {
+    revng_assert(isValid());
+    revng_assert(Other.isValid());
+    return not(addressLowerThan(Other));
+  }
+
+  constexpr bool addressGreaterThan(const MetaAddress &Other) const {
+    revng_assert(isValid());
+    revng_assert(Other.isValid());
+    return not(addressLowerThanOrEqual(Other));
+  }
+
+  std::optional<uint64_t> operator-(const MetaAddress &Other) const {
+    revng_assert(isValid());
+    revng_assert(Other.isValid());
+    revng_assert(Epoch == Other.Epoch);
+    revng_assert(AddressSpace == Other.AddressSpace);
+    return (OverflowSafeInt(Address) - Other.Address).value();
+  }
+  /// @}
+
+  /// \name Arithmetic additions/subtractions
+  ///
+  /// @{
+
+  template<std::integral T>
+  MetaAddress &operator+=(T Offset) {
+    if (isInvalid())
+      return *this;
+
+    auto Update = [this, Offset](auto NewAddress) {
+      if constexpr (std::is_signed_v<T>) {
+        if (Offset >= 0)
+          NewAddress += Offset;
+        else
+          NewAddress -= -Offset;
+      } else {
+        NewAddress += Offset;
+      }
+
+      if (NewAddress)
+        setAddress(*NewAddress);
+      else
+        *this = MetaAddress::invalid();
+    };
+
+    if (bitSize() == 32)
+      Update(OverflowSafeInt<uint32_t>(Address));
+    else
+      Update(OverflowSafeInt<uint64_t>(Address));
+
+    return *this;
+  }
+
+  template<std::integral T>
+  MetaAddress &operator-=(T Offset) {
+    if (isInvalid())
+      return *this;
+
+    auto Update = [this, Offset](auto NewAddress) {
+      if constexpr (std::is_signed_v<T>) {
+        if (Offset >= 0)
+          NewAddress -= Offset;
+        else
+          NewAddress += -Offset;
+      } else {
+        NewAddress -= Offset;
+      }
+
+      if (NewAddress)
+        setAddress(*NewAddress);
+      else
+        *this = MetaAddress::invalid();
+    };
+
+    if (bitSize() == 32)
+      Update(OverflowSafeInt<uint32_t>(Address));
+    else
+      Update(OverflowSafeInt<uint64_t>(Address));
+
+    return *this;
+  }
+
+  template<std::integral T>
+  MetaAddress operator+(T Offset) const {
+    MetaAddress Result = *this;
+    Result += Offset;
+    return Result;
+  }
+
+  template<std::integral T>
+  MetaAddress operator-(T Offset) const {
+    MetaAddress Result = *this;
+    Result -= Offset;
+    return Result;
+  }
+  /// @}
+
+public:
+  /// Build a new MetaAddress replacing the address with a new (valid) address
+  ///
+  /// The given address must be valid for the current type. The resulting type
+  /// has the same epoch, type and address space as this.
+  constexpr MetaAddress replaceAddress(uint64_t Address) const {
+    revng_check(isValid());
+
+    MetaAddress Result = *this;
+    Result.setAddress(Address);
+    Result.validate();
+    return Result;
+  }
+
+  /// Build a new MetaAddress replacing the type with a new (valid) address
+  constexpr MetaAddress replaceType(MetaAddressType::Values NewType) const {
+    revng_check(isValid());
+
+    MetaAddress Result = *this;
+    Result.Type = NewType;
+    Result.validate();
+    return Result;
+  }
+
+public:
+  /// \name Accessors
+  ///
+  /// @{
+  constexpr uint64_t address() const {
+    revng_assert(isValid());
+    return Address;
+  }
+
+  /// Return the wrapped address in its PC representation
+  ///
+  /// \note Don't call this method if `!(isValid() && isCode())`
+  constexpr uint64_t asPC() const {
+    revng_check(isValid());
+    return asPCOrZero();
+  }
+
+  /// Return the wrapped address in its PC representation, or 0 if invalid
+  constexpr uint64_t asPCOrZero() const {
+    revng_check(isCode() or isInvalid());
+
+    switch (type()) {
+    case MetaAddressType::Invalid:
+      revng_assert(Address == 0);
+      return 0;
+
+    case MetaAddressType::Code_arm_thumb:
+      revng_assert((Address & 1) == 0);
+      return Address | 1;
+
+    case MetaAddressType::Code_x86:
+    case MetaAddressType::Code_x86_64:
+    case MetaAddressType::Code_systemz:
+    case MetaAddressType::Code_mips:
+    case MetaAddressType::Code_mipsel:
+    case MetaAddressType::Code_arm:
+    case MetaAddressType::Code_aarch64:
+      return Address;
+
+    case MetaAddressType::Generic32:
+    case MetaAddressType::Generic64:
+      revng_abort();
+
+    case MetaAddressType::Count:
+    default:
+      revng_abort("Unknown MetaAddressType value");
+    }
+  }
+
+  constexpr uint16_t addressSpace() const {
+    revng_check(isValid());
+    return AddressSpace;
+  }
+  constexpr bool isDefaultAddressSpace() const { return addressSpace() == 0; }
+
+  constexpr uint32_t epoch() const {
+    revng_check(isValid());
+    return Epoch;
+  }
+  constexpr bool isDefaultEpoch() const { return epoch() == 0; }
+
+  constexpr MetaAddressType::Values type() const {
+    return MetaAddressType::Values(Type);
+  }
+  constexpr bool isInvalid() const {
+    return type() == MetaAddressType::Invalid;
+  }
+  constexpr bool isValid() const { return not isInvalid(); }
+  constexpr bool isCode() const { return MetaAddressType::isCode(type()); }
+  constexpr bool isCode(model::Architecture::Values Arch) const {
+    return MetaAddressType::isCode(type(), Arch);
+  }
+  constexpr bool isGeneric() const {
+    return MetaAddressType::isGeneric(type());
+  }
+  constexpr unsigned bitSize() const {
+    return MetaAddressType::bitSize(type());
+  }
+  constexpr unsigned alignment() const {
+    return MetaAddressType::alignment(type());
+  }
+
+  model::Architecture::Values arch() const {
+    return MetaAddressType::arch(type());
+  }
+
+  constexpr bool isDefaultCode() const {
+    return MetaAddressType::isDefaultCode(type());
+  }
+
+  /// @}
+
+public:
+  static constexpr size_t BytesSize = sizeof(PlainMetaAddress);
+
+  std::array<uint8_t, BytesSize> toBytes() const {
+    return ::toBytes(Epoch, AddressSpace, Type, Address);
+  }
+
+  static MetaAddress fromBytes(llvm::ArrayRef<uint8_t> Data) {
+    MetaAddress Result;
+    ::fromBytes(Data,
+                Result.Epoch,
+                Result.AddressSpace,
+                Result.Type,
+                Result.Address);
+    Result.validate();
+    return Result;
+  }
+
+public:
+  constexpr bool isIn(const MetaAddress &Start, const MetaAddress &End) const {
+    return Start <= *this and *this < End;
+  }
+
+public:
+  void dump() const debug_function { dump(dbg); }
+
+  template<typename T>
+  void dump(T &Output) const {
+    Output << toString();
+  }
+
+  template<typename T>
+  void dumpRelativeTo(T &Output,
+                      const MetaAddress &Base,
+                      llvm::StringRef BaseName) const {
+    Output << BaseName.data();
+
+    if (Base == *this)
+      return;
+
+    Output << ".";
+
+    auto MaybeDifference = *this - Base;
+    if (not MaybeDifference)
+      Output << MetaAddress::invalid().toString();
+    else
+      Output << "0x" << llvm::Twine::utohexstr(*MaybeDifference).str();
+  }
+
+public:
+  constexpr MetaAddress pageStart() const {
+    revng_check(isValid());
+    return toGeneric() - (Address % 4096);
+  }
+
+  MetaAddress nextPageStart() const {
+    revng_check(isValid());
+
+    auto Addend = ((OverflowSafeInt(Address) + (4096 - 1)) / 4096) * 4096
+                  - Address;
+
+    if (not Addend)
+      return MetaAddress::invalid();
+
+    return toGeneric() + *Addend;
+  }
+
+private:
+  constexpr bool verify() const debug_function {
+    // Invalid addresses are all the same
+    if (type() == MetaAddressType::Invalid
+        or type() >= MetaAddressType::Count) {
+      return false;
+    }
+
+    // Check alignment
+    if (Address % alignment() != 0)
+      return false;
+
+    // Check address mask
+    if (Address != (Address & addressMask()))
+      return false;
+
+    return true;
+  }
+
+  constexpr void validate() {
+    if (not verify())
+      setInvalid();
+  }
+
+  constexpr void setInvalid() { *this = MetaAddress(); }
+
+  constexpr uint64_t addressMask() const {
+    return MetaAddressType::addressMask(type());
+  }
+
+  constexpr void setPC(uint64_t PC) {
+    if (type() == MetaAddressType::Code_arm_thumb) {
+
+      if ((PC & 1) == 0) {
+        setInvalid();
+        return;
+      }
+
+      PC = PC & ~1;
+    }
+
+    setAddress(PC);
+  }
+
+  constexpr void setAddress(uint64_t NewAddress) {
+    Address = NewAddress & addressMask();
+    validate();
+  }
+
+public:
+  /// \param Arch specifying the "expected" architecture omits it from
+  ///        the serialized string. But it also leads to inability
+  ///        to deserialize it! So only use if you know what you're doing.
+  std::string toString(model::Architecture::Values Arch =
+                         model::Architecture::Invalid) const;
+  std::string toIdentifier(model::Architecture::Values Arch =
+                             model::Architecture::Invalid) const;
+  static MetaAddress fromString(llvm::StringRef Text);
+
+private:
+  using Tied = std::tuple<const uint32_t &,
+                          const uint16_t &,
+                          const uint16_t &,
+                          const uint64_t &>;
+  constexpr Tied tie() const {
+    return std::tie(Epoch, AddressSpace, Type, Address);
+  }
+};
+
+static_assert(sizeof(MetaAddress) <= 128 / 8,
+              "MetaAddress is larger than 128 bits");
+
+template<typename T>
+struct CompareAddress {};
+
+template<>
+struct CompareAddress<MetaAddress> {
+  bool operator()(const MetaAddress &LHS, const MetaAddress &RHS) const {
+    return LHS.addressLowerThan(RHS);
+  }
+};
+
+template<>
+struct KeyedObjectTraits<MetaAddress>
+  : public IdentityKeyedObjectTraits<MetaAddress> {};
+
+inline llvm::hash_code hash_value(const MetaAddress &Address) {
+  return llvm::hash_combine(Address.arch(),
+                            Address.address(),
+                            Address.epoch(),
+                            Address.addressSpace());
+}
+
+namespace std {
+
+template<>
+struct hash<const MetaAddress> {
+public:
+  uint64_t operator()(const MetaAddress &Address) const {
+    return hash_value(Address);
+  }
+};
+template<>
+struct hash<MetaAddress> : hash<const MetaAddress> {};
+
+template<>
+struct hash<const std::set<MetaAddress>> {
+public:
+  uint64_t operator()(const std::set<MetaAddress> &Addresses) const {
+    return llvm::hash_combine_range(Addresses.begin(), Addresses.end());
+  }
+};
+template<>
+struct hash<std::set<MetaAddress>> : hash<const std::set<MetaAddress>> {};
+
+} // namespace std
+
+template<>
+struct llvm::DenseMapInfo<MetaAddress> {
+  static MetaAddress getEmptyKey() { return MetaAddress(); }
+
+  static MetaAddress getTombstoneKey() {
+    return MetaAddress(MetaAddress::Tombstone());
+  }
+
+  static llvm::hash_code getHashValue(const MetaAddress &MA) {
+    return ::hash_value(MA);
+  }
+
+  static bool isEqual(const MetaAddress &LHS, const MetaAddress &RHS) {
+    return LHS == RHS;
+  }
+};
+
+/// This returns a human-readable string containing the addresses in
+/// the provided container.
+///
+/// It should only be used for reporting these in error messages, logs and other
+/// debugging-related contexts.
+inline std::string
+addressesToString(RangeOf<MetaAddress> auto const &Addresses) {
+  std::string Result;
+
+  if (not Addresses.empty()) {
+    constexpr llvm::StringRef Separator = " + ";
+    for (const MetaAddress &Address : Addresses)
+      Result += Address.toString() + Separator.str();
+    Result.resize(Result.size() - Separator.size());
+  }
+
+  return Result;
+}

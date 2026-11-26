@@ -1,0 +1,43 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+---
+Segments:
+  - Type:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/1815-StructDefinition"
+TypeDefinitions:
+  - Kind: StructDefinition
+    ID: 1815
+    Size: 92
+    Fields:
+      - Offset: 0
+        Name: custom_data
+        Type:
+          Kind: DefinedType
+          Definition: "/TypeDefinitions/1816-StructDefinition"
+  - Kind: StructDefinition
+    ID: 1816
+    Size: 92
+    Fields:
+      - Offset: 0
+        Name: char_80_global
+        Type:
+          Kind: DefinedType
+          Definition: "/TypeDefinitions/1817-StructDefinition"
+      - Offset: 80
+        Name: uint64_global
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Generic
+          Size: 8
+      - Offset: 88
+        Name: uint32_global
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Generic
+          Size: 4
+  - Kind: StructDefinition
+    ID: 1817
+    Size: 80

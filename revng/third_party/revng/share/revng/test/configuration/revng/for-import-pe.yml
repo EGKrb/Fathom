@@ -1,0 +1,15 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+commands:
+  - type: revng.test-import-pe
+    from:
+      - type: revng-qa.compiled
+        filter: for-import-pe
+      - type: revng-qa.generated-pdb
+        filter: for-import-pe
+    command: |-
+      revng quick analyze --analyses=parse-binary "$INPUT1" -- --use-pdb="$INPUT2"
+        | revng model hard-purge "${SOURCE}.model.yml"
+        | revng model compare "${SOURCE}.model.yml"

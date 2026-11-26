@@ -1,0 +1,1031 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+artifact-categories:
+  # User-facing artifacts that the end-user is expected to see
+  - name: user
+    show-by-default: true
+  # Artifacts that the user might request, but are machine-parsable and only
+  # usable in conjunction with other software
+  - name: automation
+    show-by-default: false
+  # Artifacts that the user is not expected to see but machine users
+  # (e.g. scripting) are expected to use
+  - name: metadata
+    show-by-default: false
+  # Debugging artifacts, these are for debugging purposes and/or testing
+  - name: debug
+    show-by-default: false
+
+containers:
+  - name: binaries-container
+    type: BinariesContainer
+  - name: llvm-root
+    type: LLVMRootContainer
+  - name: cfg-map
+    type: CFGMap
+  - name: llvm-functions
+    type: LLVMFunctionContainer
+  - name: hexdump
+    type: HexDumpContainer
+  - name: assembly-internal
+    type: AssemblyInternalContainer
+  - name: assembly
+    type: AssemblyContainer
+  - name: object-file
+    type: ObjectFileContainer
+  - name: translated
+    type: TranslatedContainer
+  - name: llvm-root-with-functions
+    type: LLVMRootContainer
+  - name: clift-functions
+    type: CliftFunctionContainer
+  - name: decompile-c
+    type: PTMLCFunctionContainer
+  - name: decompiled-single-file
+    type: PTMLCContainer
+  - name: tagless-decompile-c
+    type: PTMLCFunctionContainer
+  - name: tagless-decompiled-single-file
+    type: PTMLCContainer
+  - name: recompilable-archive
+    type: RecompilableArchiveContainer
+  - name: llvm-root-merged
+    type: LLVMRootContainer
+  - name: cross-relations
+    type: CrossRelationsContainer
+  - name: call-graph
+    type: CallGraphContainer
+  - name: call-graph-slice
+    type: CallGraphSliceContainer
+  - name: function-cfg
+    type: FunctionControlFlowContainer
+  - name: clift-types-and-globals
+    type: CliftModuleContainer
+  - name: type-and-global-header
+    type: PTMLCContainer
+  - name: helper-header
+    type: PTMLCContainer
+  - name: single-type
+    type: CTypeContainer
+  - name: tagless-type-and-global-header
+    type: PTMLCContainer
+  - name: tagless-helper-header
+    type: PTMLCContainer
+
+analyses:
+  - analysis: apply-diff
+    description: |-
+      Apply a diff to the model.
+  - analysis: verify-diff
+    description: |-
+      Verifies if a diff for the model would apply correctly.
+  - analysis: set-model
+    description: |-
+      Replace the model with a new one.
+  - analysis: verify-model
+    description: |-
+      Verify if the given model is valid.
+  - analysis: import-prototypes-from-db
+    description: |-
+      Import function prototypes from a database.
+  - analysis: convert-functions-to-cabi
+    description: |-
+      Convert as many `RawFunctionDefinition`s as possible to
+      `CABIFunctionDefinition`s, using the requested ABI.
+  - analysis: edit-c-type
+    description: |-
+      Import type definitions from C source code, typically the user-edited
+      output of the `emit-single-type-definition` artifact.
+
+analysis-lists:
+  - name: initial-auto-analysis
+    analyses:
+      - parse-binary
+      - import-prototypes-from-db
+      - detect-abi
+      - detect-stack-size
+      - detect-c-strings
+      - analyze-data-layout
+      - convert-functions-to-cabi
+    description: |
+      The initial auto analysis that should be run to automatically detect functions and types
+
+branches:
+  lift:
+    tasks:
+      - pipe: import-files
+        arguments: [binaries-container]
+        analyses:
+          - analysis: parse-binary
+            description: |-
+              This analysis inspects the input binary and, if its format is
+              among the supported ones, imports all the available information
+              in the model.
+              If debug info are available, they are imported as well.
+
+              In particular, from the binary image we import `Segment`s, the
+              `EntryPoint` and, if symbols are available, `Function` `Entry` and
+              names.
+              We currently support ELF, PE/COFF and Mach-O.
+
+              From debug information, all the data structures and function
+              prototypes are imported.
+              We currently support DWARF and CodeView (`.pdb`) debug info.
+            containers: [binaries-container]
+      - pipe: lift
+        arguments: [binaries-container, llvm-root]
+      - pipe: emit-segment-references
+        arguments: [llvm-root]
+      - pipe: pure-llvm-passes-root-pipe
+        arguments: [llvm-root]
+        configuration:
+          passes:
+            - globaldce
+      - savepoint: lifted
+        containers: [llvm-root]
+        artifacts:
+          - name: lift
+            description: |-
+              The `root` function produced by the lifting phase.
+              It's a single large function containing all of the executable code
+              identified in the binary.
+            container: llvm-root
+            category: debug
+            filename: lifted.bc
+        analyses:
+          - analysis: detect-abi
+            description: |-
+              This analysis creates new functions from targets of function calls
+              and from code addresses found in the code or in memory that would
+              otherwise be unreachable.
+
+              Additionally, the analysis builds, for each function lacking a
+              prototype, a `RawFunctionDefinition` by automatically identifying the
+              list of arguments passed through registers and the list of return
+              values.
+
+              This analysis doesn't handle stack arguments.
+            containers: [llvm-root]
+
+  collect-cfg:
+    from: lift
+    tasks:
+      - pipe: collect-cfg
+        arguments: [llvm-root, cfg-map]
+      - savepoint: cfg-computed
+        containers: [cfg-map]
+        artifacts:
+          - name: emit-cfg
+            description: |-
+              This artifact is an archive containing one YAML file for each
+              function.
+              Each document contains the control-flow graph of a function, plus
+              the control-flow graph of each of the functions that need to be
+              inlined into it.
+            container: cfg-map
+            category: debug
+
+  isolate:
+    from: collect-cfg
+    tasks:
+      - pipe: isolate
+        arguments: [cfg-map, llvm-root, llvm-functions]
+      - pipe: attach-debug-info
+        arguments: [cfg-map, llvm-functions]
+      - pipe: inline-always-inline-functions
+        arguments: [llvm-functions]
+      - savepoint: isolate
+        containers: [llvm-functions]
+        artifacts:
+          - name: isolate
+            description: |-
+              This artifact contains one single-function module per function in the
+              input program.
+              The functions still employ global variables (CSVs) to pass and
+              return data.
+              Therefore, they lack arguments and return values.
+            container: llvm-functions
+            category: debug
+            filename: isolated.bc
+
+  segregate-stack-accesses:
+    from: isolate
+    tasks:
+      - pipe: enforce-abi
+        arguments: [cfg-map, llvm-functions]
+      - pipe: pure-llvm-passes-pipe
+        arguments: [llvm-functions]
+        configuration:
+          passes:
+            - strip-debug-info-from-helpers
+      # Note: we're running promote-csvs twice: it is important to run
+      #       it before inline-helpers so that mem2reg can constant
+      #       propagate helper arguments that are constant. This enables
+      #       us to inline less code, in particular for helpers such as
+      #       `cc_compute_c` and `cc_compute_all`.
+      - pipe: promote-csvs
+        arguments: [llvm-functions]
+      - pipe: pure-llvm-passes-pipe
+        arguments: [llvm-functions]
+        configuration:
+          passes:
+            - mem2reg
+            - link-helpers-to-inline
+            - inline-helpers
+            - delete-helper-bodies
+      - pipe: attach-debug-info
+        arguments: [cfg-map, llvm-functions]
+      - pipe: promote-csvs
+        arguments: [llvm-functions]
+      - pipe: pure-llvm-passes-pipe
+        arguments: [llvm-functions]
+        configuration:
+          passes:
+            - remove-exceptional-functions
+            - strip-dead-debug-info
+      - savepoint: enforce-abi
+        containers: [llvm-functions]
+        artifacts:
+          - name: enforce-abi
+            description: |-
+              This artifact contains one single-function module per function in the
+              input program.
+              The functions no longer use global variables (CSVs) to communicate:
+              each register is promoted to a local variable, an argument and/or a
+              return value.
+
+              This means that, for instance, a function using the SystemV ABI for
+              x86-64 that has two `uint8_t` arguments, will have two 64-bits
+              registers, not two 8-bits registers.
+              This reflects the fact that in the considered ABI, two `uint8_t`
+              arguments are passed on the `rdi` and `rsi` registers.
+
+              The stack pointer is an exception: it's still used as a CSV.
+              As a consequence, stack arguments are not promoted to actual
+              arguments: they are accessed with pointer arithmetic w.r.t. the
+              stack pointer CSV.
+            container: llvm-functions
+            category: debug
+            filename: abi_enforced.bc
+      - pipe: pure-llvm-passes-pipe
+        arguments: [llvm-functions]
+        configuration:
+          passes: [dce]
+      - pipe: remove-lifting-artifacts
+        arguments: [llvm-functions]
+      - pipe: promote-init-csv-to-undef
+        arguments: [llvm-functions]
+      - pipe: inject-stack-size-probes-at-callsites
+        arguments: [llvm-functions]
+      - pipe: promote-stack-pointer
+        arguments: [llvm-functions]
+      - pipe: pure-llvm-passes-pipe
+        arguments: [llvm-functions]
+        configuration:
+          passes:
+            - dce
+            - remove-extractvalues
+            - instsimplify # folds constant conditions for the next simplify-cfg
+            - simplify-cfg-with-hoist-and-sink
+            - dse
+            - instcombine
+            - remove-extractvalues
+            - sroa
+            - instsimplify
+            # TODO: when porting this chunk of the pipeline to LLVM's new pass
+            # manager, remember that we have to schedule
+            # InvalidateAnalysisPass<LazyValueAnalysis>
+            # right after jump-threading to clear LVI caches and unregister its
+            # deletion callbacks. This will reduce memory usage, and avoid the
+            # cost calling the callbacks. The latter in particular is very
+            # wasteful: since no pass is using LVI after jump-threading here,
+            # all the calls to the LVI callbacks will be wasted time.
+            # This is not necessary here because this pipe is still using the
+            # legacy pass manager, and no other pass after jump-threading uses
+            # LVI results, so the legacy pass manager calls removeDeadPasses
+            # that already clears the LVI caches.
+            - jump-threading
+            - licm
+            - unreachableblockelim
+            - instcombine
+            - remove-extractvalues
+            - early-cse
+            - simplify-cfg-with-hoist-and-sink
+            - early-type-shrinking
+            - type-shrinking
+            - early-cse
+            - instsimplify
+            - gvn
+            - instsimplify
+            - dse
+            - dce
+            # In Outliner we inject some store of opaque values before calls
+            # targeting the link register/top of the stack: the goal is make
+            # sure the stores writing the return address are dead.
+            # After the previous optimization pipeline, dead store elimination
+            # should have removed such stores, therefore, we can now drop
+            # those injected by us too.
+            - drop-opaque-return-address
+            - globaldce
+      - pipe: simplify-switch
+        arguments: [binaries-container, llvm-functions]
+      - savepoint: simplify-switch
+        containers: [llvm-functions]
+        artifacts:
+          - name: simplify-switch
+            description: |-
+              This artifact contains one single-function module per function in the
+              input program.
+              The stack pointer has been promoted to a local variable and
+              initialized with the result of an opaque function call.
+            container: llvm-functions
+            category: debug
+            filename: simplify-switch.bc
+      - pipe: pure-llvm-passes-pipe
+        arguments: [llvm-functions]
+        configuration:
+          passes:
+            - remove-stack-alignment
+            - instrument-stack-accesses
+            - instcombine
+            - remove-extractvalues
+            - loop-rotate
+            - loop-simplify
+            - compute-stack-accesses-bounds
+      - savepoint: detect-stack-size
+        containers: [llvm-functions]
+        analyses:
+          - analysis: detect-stack-size
+            description: |-
+              This analysis, for each function, identifies the size of the stack
+              frame and the amount of stack used to pass arguments.
+            containers: [llvm-functions]
+      - pipe: pure-llvm-passes-pipe
+        arguments: [llvm-functions]
+        configuration:
+          passes:
+            - split-struct-phis
+      - pipe: segregate-stack-accesses
+        arguments: [llvm-functions]
+      - pipe: pure-llvm-passes-pipe
+        arguments: [llvm-functions]
+        configuration:
+          passes:
+            - cleanup-stack-size-markers
+            - dce
+            - sroa-noarrays
+            - instcombine-noarrays
+            - remove-extractvalues
+            - sroa-noarrays
+            - simplify-cfg-with-hoist-and-sink
+            # loop-rotate rearranges loops in a way that should make it
+            # easier to match do-while loops
+            - loop-rotate
+            - loop-rewrite-with-canonical-induction-variable
+            - simplify-cfg-with-hoist-and-sink
+            # don't run simplify-cfg{,-with-hoist-and-sink} after
+            # loop-simplify because it kills the loop-simplify form causing
+            # DLA not to identify arrays properly
+            - loop-simplify
+            - instcombine-noarrays
+            - remove-extractvalues
+            - simplify-comparisons
+            # We need to re-run type shrinking after instcombine.
+            - early-type-shrinking
+            - type-shrinking
+            - early-cse
+            # Merge the exposed narrow predicates, e.g., x != 0 && x >= 0.
+            - instcombine-noarrays
+            - remove-extractvalues
+            # Restore widths that instcombine may have widened again.
+            - early-type-shrinking
+            - type-shrinking
+            - early-cse
+            - split-overflow-intrinsics
+            - remove-llvmassume-calls
+            - peephole-opt-for-decompilation
+            - dce
+            - strip-dead-prototypes
+            - inline-segment-global-getters
+      - pipe: emit-function-pointers
+        arguments: [llvm-functions]
+      - savepoint: segregate-stack-accesses
+        containers: [llvm-functions]
+        artifacts:
+          - name: segregate-stack-accesses
+            container: llvm-functions
+            category: debug
+            filename: stack_accesses_segregated.bc
+        analyses:
+          - analysis: detect-c-strings
+            containers: [binaries-container, llvm-functions]
+          - analysis: analyze-data-layout
+            description: |-
+              This analysis inspects the memory accesses performed by the input
+              program and detects the layout of data structures.
+              The produced data structures are the result of merging the
+              information obtained from each function interprocedurally.
+            containers: [llvm-functions]
+  clift-functions:
+    from: segregate-stack-accesses
+    tasks:
+      - pipe: pure-llvm-passes-pipe
+        arguments: [llvm-functions]
+        configuration:
+          passes:
+            - exit-ssa
+            - arithmetic-to-gep
+            - extractvalue-to-gep
+            - split-exponential-dataflow
+            - dce
+      - pipe: switch-to-statements
+        arguments: [llvm-functions]
+      - pipe: pure-llvm-passes-pipe
+        arguments: [llvm-functions]
+        configuration:
+          passes:
+            - remove-constant-array-returns
+            - dagify
+            - inline-divergent-scopes
+            - enforce-single-exit
+            - materialize-trivial-goto
+            - select-scope
+            - inline-divergent-scopes
+            - enforce-single-exit
+            - materialize-trivial-goto
+            # inline-divergent-scopes splits a switch across one block per
+            # round; put the pieces back together now that it has run for the
+            # last time
+            - remove-ids-artifacts
+            - strip-dead-prototypes
+            - compute-alloca-lifetime-start
+        artifacts:
+          - name: clifter-input
+            container: llvm-functions
+            category: debug
+            filename: clifter_input.bc
+      - pipe: fix-pointer-size
+        arguments: [llvm-functions]
+      - pipe: clifter
+        arguments: [llvm-functions, clift-functions]
+        artifacts:
+          - name: clift-unoptimized
+            container: clift-functions
+            category: debug
+            filename: clifter_unoptimized.mlir.bc
+      - pipe: import-function-data-model
+        arguments: [clift-functions]
+      - pipe: pure-mlir-passes-pipe
+        arguments: [clift-functions]
+        configuration:
+          passes:
+            # == Pre-processing phase ==
+            #
+            # This phase is composed of early one-off rewrites, applied in
+            # order to enable or simplify later transformations.
+            - translate-helpers
+            - promote-floating-point-operations
+            - convert-void-return-to-goto
+            - label-merging
+            - loop-detection
+
+            # == Fixed-point optimization phase ==
+            #
+            # This phase is composed of fixed point passes, used to simplify
+            # statements and expressions.
+            # These include only context-free rewrites, which rely on and
+            # enforce canonical forms.
+            # Such canonical forms may not necessarily match the most readable
+            # form, but simplify the implementation of rewrites in this phase,
+            # and eventually guarantee that the fixed-point rewrites converge.
+            # In later phases, these canonical forms are transformed into more
+            # readable ones.
+            # This is also the reason why Clift doesn't exploit the machinery
+            # MLIR provides for canonical forms: what is more similar to a
+            # canonical form, designed for optimizations, is also something we
+            # want to be able to opt-out of at some point in the pipeline.
+            - optimize-statements
+            - label-merging
+            - refine-types-and-accesses
+            - optimize-expressions
+
+            # == Context-free post-processing phase ==
+            #
+            # This phase is composed of one-off context-free rewrites, with
+            # the goal of rewriting Clift IR into a form that produces more
+            # readable forms when emitted in C.
+            # These rewrites make no attempt to maintain the notion of canonical
+            # form, which is necessary for the transforms in the previous
+            # fixed-point optimization phase, being that those canonical forms
+            # are only designed for the purpose of optimization in that phase.
+            # Instead, these transforms progressively undo some of the
+            # previously establishes canonical forms, to improve readability.
+            # Note that the production of non-canonical forms means that these
+            # rewrites cannot be applied at fixed point with canonicalization.
+            - post-process-expressions
+            - hoist-unique-fallthrough-branches # Enables more loop promotions.
+            - promote-while-conditions
+            - promote-do-while-conditions
+            - canonicalize
+            - hoist-terminal-branches
+            - simplify-boolean-negations
+
+            # == Context-sensitive post-processing phase ==
+            #
+            # This phase is composed of one-off context-sensitive rewrites,
+            # once again with the goal of rewriting Clift IR into a form that
+            # produces more readable forms when emitted in C.
+            # Like the previous context-free post-processing phase, this phase
+            # can break invariants that are assumed by the fixed-point
+            # optimization phase, meaning that rewrites in this phase cannot go
+            # in the fixed-point phase.
+            # In addition, rewrites in this phase can make more aggressive
+            # context-sensitive changes. These context sensitive changes
+            # prevent these rewrites from being applied earlier, before any
+            # context-free rewrites, because doing so would push more
+            # unnecessary complexity into context-free transformations, forcing
+            # them to reason about context in order to preserve semantics.
+            - convert-jump-to-void-return
+            - tighten-variable-scopes
+            - hoist-variable-initializers
+            - promote-break-continue
+
+      - pipe: emit-strings
+        arguments: [binaries-container, clift-functions]
+
+      - pipe: pure-mlir-passes-pipe
+        arguments: [clift-functions]
+        configuration:
+          passes:
+            # == Backend phase ==
+            #
+            # C code emitted directly from Clift in the form enforced by the
+            # previous phases is not guaranteed to preserve semantics.
+            # This phase is conceptually part of the C backend. In preparation
+            # for the emission of C code, it takes care of transforming the
+            # Clift IR, so that the C code emitted from it preserves semantic.
+            # A high level of care must be taken when applying rewrites in this
+            # phase, because the backend requires some invariants that in the
+            # current incarnation of the pipeline aren't explicitly checked yet.
+            # These invariants are established by legalization, and must be
+            # preserved by every rewrite in this phase.
+            - c-legalization
+            - elide-implicit-casts
+            - eliminate-boolean-casts
+            - deduce-immediate-radices
+
+      - pipe: verify-function-against-model
+        arguments: [clift-functions]
+      - savepoint: decompile-clift
+        containers: [clift-functions]
+      - pipe: import-descriptive-function-info
+        arguments: [clift-functions]
+      - savepoint: pre-backend-clift
+        containers: [clift-functions]
+        artifacts:
+          - name: pre-backend-clift
+            container: clift-functions
+            category: debug
+            filename: pre_backend_clift.mlir.bc
+
+  single-file:
+    from: clift-functions
+    tasks:
+      - pipe: emit-c
+        arguments: [clift-functions, decompile-c]
+      - savepoint: emit-c
+        containers: [decompile-c]
+        artifacts:
+          - name: emit-c
+            description: |-
+              This artifact contains a C function for each function in the input
+              program.
+            container: decompile-c
+            category: user
+            filename: decompiled.c
+            defined_locations:
+              - function
+            preferred_artifacts:
+              - emit-type-and-global-header
+        analyses:
+          - analysis: llm-rename
+            containers: [decompile-c]
+      - pipe: emit-c-as-single-file
+        arguments: [decompile-c, decompiled-single-file]
+      - savepoint: emit-c-as-single-file
+        containers: [decompiled-single-file]
+        artifacts:
+          - name: emit-c-as-single-file
+            description: |-
+              This artifact is a single PTML file representing the decompiled C
+              code of the whole program, including the body of all of program's
+              functions. (Clift backend)
+            container: decompiled-single-file
+            category: user
+            filename: binary_decompiled.c
+            defined_locations:
+              - function
+            preferred_artifacts:
+              - emit-type-and-global-header
+
+  helpers:
+    from: clift-functions
+    tasks:
+      - pipe: emit-helper-header
+        arguments: [clift-functions, helper-header]
+      - savepoint: helper-header
+        containers: [helper-header]
+        artifacts:
+          - name: emit-helper-header
+            description: |-
+              This artifact contains all the declarations of llvm and qemu helpers
+              that survived until the decompiled code.
+            container: helper-header
+            category: user
+            filename: helpers.h
+            defined_locations:
+              - helper-function
+              - helper-struct-type
+              - helper-struct-field
+
+  tagless-single-file:
+    from: clift-functions
+    tasks:
+      - pipe: emit-c
+        configuration:
+          disable-markup: true
+          emission-mode: recompilable
+        arguments: [clift-functions, tagless-decompile-c]
+      - savepoint: emit-tagless-c
+        containers: [tagless-decompile-c]
+        artifacts:
+          - name: emit-tagless-c
+            container: tagless-decompile-c
+            category: metadata
+            filename: decompiled.c
+            defined_locations:
+              - function
+            preferred_artifacts:
+              - emit-type-and-global-header
+      - pipe: emit-c-as-single-file
+        arguments: [tagless-decompile-c, tagless-decompiled-single-file]
+        configuration:
+          disable-markup: true
+          emission-mode: recompilable
+      - savepoint: emit-tagless-c-as-single-file
+        containers: [tagless-decompiled-single-file]
+        artifacts:
+          - name: emit-tagless-c-as-single-file
+            container: tagless-decompiled-single-file
+            category: metadata
+            filename: binary_decompiled.c
+            defined_locations:
+              - function
+            preferred_artifacts:
+              - emit-type-and-global-header
+
+      - pipe: emit-helper-header
+        arguments: [clift-functions, tagless-helper-header]
+        configuration:
+          disable-markup: true
+          emission-mode: recompilable
+
+      - pipe: import-types
+        arguments: [clift-types-and-globals]
+      - pipe: import-function-declarations
+        arguments: [clift-types-and-globals]
+      - pipe: import-segment-declarations
+        arguments: [clift-types-and-globals]
+      - pipe: import-descriptive-info
+        arguments: [clift-types-and-globals]
+      - pipe: emit-type-and-global-header
+        arguments: [clift-types-and-globals, tagless-type-and-global-header]
+        configuration:
+          disable-markup: true
+          emission-mode: recompilable
+      - savepoint: tagless-headers
+        containers: [tagless-helper-header, tagless-type-and-global-header]
+        artifacts:
+          - name: emit-tagless-helper-header
+            container: tagless-helper-header
+            category: metadata
+            filename: helpers.h
+          - name: emit-tagless-type-and-global-header
+            container: tagless-type-and-global-header
+            category: metadata
+            filename: types-and-globals.h
+        analyses:
+          - analysis: edit-c-body
+            containers:
+              - clift-functions
+              - tagless-type-and-global-header
+              - tagless-helper-header
+          - analysis: edit-by-name
+            description: |-
+              Rename and retype the local variables and goto labels of a
+              function, naming each one as it appears in the decompiled code.
+              Unlike `edit-c-body`, the body of the function is not submitted
+              back.
+            containers:
+              - clift-functions
+              - tagless-type-and-global-header
+              - tagless-helper-header
+
+      - pipe: emit-c-as-directory
+        arguments:
+          - tagless-decompiled-single-file
+          - tagless-type-and-global-header
+          - tagless-helper-header
+          - recompilable-archive
+      - savepoint: recompilable-archive
+        containers: [recompilable-archive]
+        artifacts:
+          - name: emit-recompilable-archive
+            container: recompilable-archive
+            category: metadata
+            filename: recompilable_archive.tar
+
+  hexdump:
+    from: isolate
+    tasks:
+      - pipe: hex-dump
+        arguments:
+          - binaries-container
+          - llvm-functions
+          - cfg-map
+          - hexdump
+      - savepoint: hexdump
+        containers: [hexdump]
+        artifacts:
+          - name: hexdump
+            description: |-
+              This artifact contains a hex dump of each segment in the input
+              binary.
+            container: hexdump
+            category: user
+            filename: hex_dump.hex
+
+  process-assembly:
+    from: collect-cfg
+    tasks:
+      - pipe: process-assembly
+        arguments: [binaries-container, cfg-map, assembly-internal]
+
+  disassemble:
+    from: process-assembly
+    tasks:
+      - pipe: yield-assembly
+        arguments: [assembly-internal, assembly]
+      - savepoint: disassemble
+        containers: [assembly]
+        artifacts:
+          - name: disassemble
+            description: |-
+              This artifact is an archive of PTML files.
+              Each file represents the disassembly of the given function.
+            container: assembly
+            category: user
+            filename: disassembly.S
+            defined_locations:
+              - function
+              - basic-block
+              - instruction
+
+  recompile:
+    from: lift
+    tasks:
+      - pipe: link-support
+        arguments: [llvm-root]
+      - pipe: pure-llvm-passes-root-pipe
+        arguments: [llvm-root]
+        configuration:
+          passes:
+            - drop-opaque-return-address
+            - inline-segment-global-getters
+      - pipe: compile-root-module
+        arguments: [llvm-root, object-file]
+      - pipe: link-for-translation
+        arguments: [binaries-container, object-file, translated]
+      - savepoint: recompile
+        containers: [translated]
+        artifacts:
+          - name: recompile
+            description: |-
+              This artifact is translated version of the input binary.
+              Specifically, it's an ELF executable for Linux x86-64 containing the
+              `root` function plus the required runtime.
+            container: translated
+            category: automation
+            filename: translated-binary
+
+  recompile-isolated:
+    from: isolate
+    tasks:
+      - pipe: invoke-isolated-functions
+        arguments: [llvm-root, llvm-functions, llvm-root-with-functions]
+      - pipe: link-support
+        arguments: [llvm-root-with-functions]
+      - pipe: pure-llvm-passes-root-pipe
+        arguments: [llvm-root-with-functions]
+        configuration:
+          passes:
+            - drop-opaque-return-address
+            - inline-segment-global-getters
+      - pipe: compile-root-module
+        arguments: [llvm-root-with-functions, object-file]
+      - pipe: link-for-translation
+        arguments: [binaries-container, object-file, translated]
+      - savepoint: recompile-isolated
+        containers: [translated]
+        artifacts:
+          - name: recompile-isolated
+            description: |-
+              This artifact is translated version of the input binary.
+              Specifically, it's an ELF executable for Linux x86-64 containing the
+              `root` function, all the isolated functions plus the required
+              runtime.
+            container: translated
+            category: automation
+            filename: isolated-translated-binary
+
+  cleanup-ir:
+    from: segregate-stack-accesses
+    tasks:
+      - pipe: emit-string-constants
+        arguments: [binaries-container, llvm-functions]
+      - pipe: merge-llvm-modules
+        arguments: [llvm-functions, llvm-root-merged]
+      - pipe: pure-llvm-passes-root-pipe
+        arguments: [llvm-root-merged]
+        configuration:
+          passes:
+            - instcombine
+            # We need to re-run type shrinking after instcombine.
+            - early-type-shrinking
+            - type-shrinking
+            - early-cse
+            - dce
+            - inline-segment-global-getters
+
+      - savepoint: cleanup-ir
+        containers: [llvm-root-merged]
+        artifacts:
+          - name: cleanup-ir
+            description: |-
+              This artifact contains one single-function module per function defined
+              in this binary.
+
+              This is an appropriate artifact on top of which write analyses, such
+              as a taint analysis.
+            container: llvm-root-merged
+            category: automation
+            filename: clean-ir.bc
+
+  process-call-graph:
+    from: isolate
+    tasks:
+      - pipe: process-call-graph
+        arguments: [cfg-map, cross-relations]
+      - pipe: collect-globals
+        arguments: [binaries-container, llvm-functions, cross-relations]
+        artifacts:
+          - name: cross-relations
+            description: |-
+              This artifact describes how the entities of the input program
+              relate to each other: which functions call a function, and which
+              global variables the program has, together with the functions
+              using each of them. A global variable holding a string also
+              carries what it says.
+            container: cross-relations
+            category: metadata
+            filename: cross-relations.yml
+
+  yield-call-graph:
+    from: process-call-graph
+    tasks:
+      - pipe: yield-call-graph
+        arguments: [cross-relations, call-graph]
+      - savepoint: yield-call-graph
+        containers: [call-graph]
+        artifacts:
+          - name: render-svg-call-graph
+            description: |-
+              This artifact is an SVG representing the call graph of the input
+              program.
+            container: call-graph
+            category: user
+            filename: call-graph.svg
+
+  yield-call-graph-slice:
+    from: process-call-graph
+    tasks:
+      - pipe: yield-call-graph-slice
+        arguments: [cross-relations, call-graph-slice]
+      - savepoint: yield-call-graph-slice
+        containers: [call-graph-slice]
+        artifacts:
+          - name: render-svg-call-graph-slice
+            description: |-
+              This artifact is an archive of SVG files.
+              Each file represents a subset of the call graph considering only the
+              functions called/calling, directly or indirectly, the given function.
+            container: call-graph-slice
+            category: user
+            filename: call-graph-slice.svg
+
+  yield-cfg:
+    from: process-assembly
+    tasks:
+      - pipe: yield-cfg
+        arguments: [assembly-internal, function-cfg]
+      - savepoint: yield-cfg
+        containers: [function-cfg]
+        artifacts:
+          - name: render-svg-cfg
+            description: |-
+              This artifact is an archive of SVG files.
+              Each file represents the CFG of the given function.
+            container: function-cfg
+            category: user
+            filename: cfg.svg
+
+  import-types:
+    tasks:
+      - pipe: import-types
+        arguments: [clift-types-and-globals]
+        artifacts:
+          - name: import-types
+            description: |-
+              This artifact contains all the declarations of non-primitive types
+              without any name or comment information.
+            container: clift-types-and-globals
+            category: debug
+            filename: types.mlir
+      - pipe: import-function-declarations
+        arguments: [clift-types-and-globals]
+
+  emit-type-and-global-header:
+    from: import-types
+    tasks:
+      - pipe: import-segment-declarations
+        arguments: [clift-types-and-globals]
+      - pipe: import-descriptive-info
+        arguments: [clift-types-and-globals]
+        artifacts:
+          - name: type-and-global-header-clift
+            container: clift-types-and-globals
+            category: debug
+            filename: type-and-global-header.mlir.bc
+      - pipe: emit-type-and-global-header
+        arguments: [clift-types-and-globals, type-and-global-header]
+        configuration:
+          disable-markup: false
+          emission-mode: recompilable
+      - savepoint: type-and-global-header
+        containers: [type-and-global-header]
+        artifacts:
+          - name: emit-type-and-global-header
+            description: |-
+              This artifact is a header containing all the declarations of
+              non-primitive types, functions and segments.
+            container: type-and-global-header
+            category: user
+            filename: types-and-globals.h
+            defined_locations:
+              - type-definition
+              - struct-field
+              - union-field
+              - enum-entry
+              - dynamic-function
+              - segment
+              - artificial-struct
+            preferred_artifacts:
+              - emit-c
+
+  emit-single-type-definition:
+    from: import-types
+    tasks:
+      - pipe: import-descriptive-info
+        arguments: [clift-types-and-globals]
+      - pipe: emit-single-type-definition
+        arguments: [clift-types-and-globals, single-type]
+        configuration:
+          disable-markup: true
+          emission-mode: editable
+      - savepoint: single-type-definition
+        containers: [single-type]
+        artifacts:
+          - name: emit-single-type-definition
+            description: |-
+              This artifact is an archive of plain C headers.
+              Each file contains the declaration of a type defined for this
+              binary.
+              This artifact is designed to be used as the initial input of the
+              `edit-c-type` analysis. In fact, this artifact is designed to be
+              easily editable by the end-user; it's not designed to represent
+              valid C code, unlike the `emit-type-and-global-header` artifact.
+            container: single-type
+            category: user
+            filename: type.h

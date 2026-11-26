@@ -1,0 +1,203 @@
+#pragma once
+
+//
+// This file is distributed under the MIT License. See LICENSE.md for details.
+//
+
+#include <concepts>
+
+#include "llvm/ADT/StringRef.h"
+
+#include "revng/ADT/TypeList.h"
+#include "revng/PipeboxCommon/Common.h"
+#include "revng/PipeboxCommon/Model.h"
+#include "revng/PipeboxCommon/ObjectID.h"
+
+template<typename T>
+concept HasName = requires {
+  { T::Name } -> std::same_as<const llvm::StringRef &>;
+  requires not T::Name.empty();
+};
+
+//
+// IsContainer
+//
+
+template<typename T>
+concept IsContainer = requires(T &A, const T &AConst) {
+  requires HasName<T>;
+  { T() } -> std::same_as<T>;
+  { T::Kind } -> std::same_as<const Kind &>;
+  { T::MimeType } -> std::same_as<const llvm::StringRef &>;
+  { T::Compression } -> std::same_as<const llvm::StringRef &>;
+  { AConst.objects() } -> std::same_as<std::set<ObjectID>>;
+  { AConst.verify() } -> std::same_as<bool>;
+  { A.deserialize(std::declval<const RawObjectMap>()) } -> std::same_as<void>;
+  {
+    AConst.serialize(std::declval<const std::vector<const ObjectID *>>())
+  } -> std::same_as<std::map<ObjectID, revng::pypeline::Buffer>>;
+};
+
+namespace detail {
+
+template<typename T>
+constexpr bool IsContainerArgument = IsContainer<T>;
+
+template<typename T>
+constexpr bool IsContainerArgument<const T> = IsContainer<T>;
+
+template<typename T>
+constexpr bool IsContainerReference = false;
+
+template<typename T>
+constexpr bool IsContainerReference<T &> = IsContainerArgument<T>;
+
+} // namespace detail
+
+//
+// IsAnalysis
+//
+
+namespace detail {
+
+template<typename T>
+struct AnalysisRunTraits {};
+
+template<typename C, typename... Args>
+  requires(IsContainerReference<Args> and ...)
+struct AnalysisRunTraits<llvm::Error (C::*)(Model &,
+                                            const revng::pypeline::Request &,
+                                            llvm::StringRef,
+                                            Args...)> {
+  using ContainerTypes = TypeList<std::remove_reference_t<Args>...>;
+  static constexpr size_t ContainerCount = sizeof...(Args);
+};
+
+} // namespace detail
+
+template<typename T>
+using AnalysisRunTraits = detail::AnalysisRunTraits<decltype(&T::run)>;
+
+template<typename T>
+concept IsAnalysis = requires(T &A) {
+  requires HasName<T>;
+  { T() } -> std::same_as<T>;
+  requires AnalysisRunTraits<T>::ContainerCount >= 0;
+};
+
+/// Optional method that an analysis can implement
+template<typename T>
+concept HasIsAvailable = requires(const T &A) {
+  { A.isAvailable() } -> std::same_as<bool>;
+};
+
+//
+// IsPipe
+//
+
+namespace detail {
+
+template<typename T>
+concept HasContainerTypes = SpecializationOf<typename T::ContainerTypes,
+                                             TypeList>;
+
+template<typename T>
+struct PipeRunTraitsHelper {};
+
+template<typename C, typename... Args>
+  requires(not HasContainerTypes<C>) and (IsContainerReference<Args> and ...)
+struct PipeRunTraitsHelper<
+  revng::pypeline::PipeOutput (C::*)(const Model &,
+                                     const revng::pypeline::Request &,
+                                     const revng::pypeline::Request &,
+                                     llvm::StringRef,
+                                     Args...)> {
+  using ContainerTypes = TypeList<std::remove_reference_t<Args>...>;
+};
+
+template<typename T>
+struct PipeRunTraits {};
+
+template<HasContainerTypes T>
+struct PipeRunTraits<T> {
+  using ContainerTypes = T::ContainerTypes;
+  static constexpr size_t ContainerCount = std::tuple_size_v<ContainerTypes>;
+};
+
+template<typename T>
+  requires(not HasContainerTypes<T>)
+struct PipeRunTraits<T> {
+  using ContainerTypes = PipeRunTraitsHelper<decltype(&T::run)>::ContainerTypes;
+  static constexpr size_t ContainerCount = std::tuple_size_v<ContainerTypes>;
+};
+
+template<typename T>
+concept IsPipeArgument = requires {
+  { T::Access } -> std::same_as<const revng::pypeline::Access &>;
+  { T::Name } -> std::same_as<const llvm::StringRef &>;
+  { T::HelpText } -> std::same_as<const llvm::StringRef &>;
+};
+
+template<SpecializationOf<TypeList> List>
+inline constexpr bool checkArguments() {
+  constexpr bool Size = std::tuple_size_v<List>;
+  return compile_time::repeatAnd<Size>([]<size_t I>() {
+    return IsPipeArgument<std::tuple_element_t<I, List>>;
+  });
+}
+
+template<typename T>
+inline constexpr size_t ArgSize = std::tuple_size_v<typename T::Arguments>;
+
+} // namespace detail
+
+template<typename T>
+concept HasArguments = requires {
+  requires StrictSpecializationOf<typename T::Arguments, TypeList>;
+  requires detail::checkArguments<typename T::Arguments>();
+};
+
+template<typename T>
+using PipeRunTraits = detail::PipeRunTraits<T>;
+
+template<typename T>
+concept IsPipe = requires(T &A, llvm::StringRef StaticConfig) {
+  requires HasName<T>;
+  { T(StaticConfig) } -> std::same_as<T>;
+  { A.StaticConfiguration } -> std::same_as<const std::string &>;
+  requires HasArguments<T>;
+  requires PipeRunTraits<T>::ContainerCount == detail::ArgSize<T>;
+};
+
+/// Optional method that a pipe can implement
+template<typename T>
+concept HasCheckPrecondition = requires(const T &A, const Model &Model) {
+  { A.checkPrecondition(Model) } -> std::same_as<llvm::Error>;
+};
+
+/// Optional method that a pipe can implement
+template<typename T>
+concept HasCustomInvalidation = requires(const T &A,
+                                         const revng::pypeline::InvalidationData
+                                           &ID,
+                                         const ModelDiff &Diff) {
+  { A.requiresCustomInvalidation(Diff) } -> std::same_as<bool>;
+  {
+    A.processCustomInvalidation(ID, Diff)
+  } -> std::same_as<std::vector<std::set<ObjectID>>>;
+};
+
+//
+// Generic helpers
+//
+
+/// Helper struct that dispatches to PipeRunTraits<T> or AnalysisRunTraits<T> as
+/// needed.
+template<typename T>
+struct GenericRunTraits {};
+
+template<IsPipe T>
+struct GenericRunTraits<T> : public PipeRunTraits<T> {};
+
+template<IsAnalysis T>
+struct GenericRunTraits<T> : public AnalysisRunTraits<T> {};

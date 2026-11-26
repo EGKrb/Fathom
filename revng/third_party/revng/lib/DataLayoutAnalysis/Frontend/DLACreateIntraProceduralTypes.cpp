@@ -1,0 +1,1130 @@
+//
+// This file is distributed under the MIT License. See LICENSE.md for details.
+//
+
+#include <optional>
+#include <utility>
+
+#include "llvm/ADT/PostOrderIterator.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/PostDominators.h"
+#include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/Analysis/ScalarEvolutionExpressions.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Dominators.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/Instruction.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Pass.h"
+#include "llvm/Passes/PassBuilder.h"
+
+#include "revng/DataLayoutAnalysis/DLATypeSystem.h"
+#include "revng/LocalVariables/LocalVariableHelpers.h"
+#include "revng/Model/Architecture.h"
+#include "revng/Model/FunctionTags.h"
+#include "revng/Model/IRHelpers.h"
+#include "revng/Support/Assert.h"
+#include "revng/Support/Debug.h"
+#include "revng/Support/IRHelpers.h"
+
+#include "../FuncOrCallInst.h"
+#include "DLATypeSystemBuilder.h"
+#include "SCEVBaseAddressExplorer.h"
+
+using namespace dla;
+using namespace llvm;
+using namespace model::Architecture;
+
+using LayoutTypeSystemNode = dla::LayoutTypeSystemNode;
+using SCEVTypeMap = SCEVBaseAddressExplorer::SCEVTypeMap;
+
+static Logger Log("dla-offset-split");
+
+class DLATypeSystemLLVMBuilder::InstanceLinkAdder {
+public:
+  InstanceLinkAdder(const model::Binary &M, DLATypeSystemLLVMBuilder &B) :
+    Model(M), Builder(B) {}
+
+private:
+  const model::Binary &Model;
+  DLATypeSystemLLVMBuilder &Builder;
+  Function *F = nullptr;
+  ScalarEvolution *SE = nullptr;
+  llvm::DominatorTree DT;
+  llvm::PostDominatorTree PDT;
+
+  SCEVTypeMap SCEVToLayoutType;
+
+protected:
+  std::pair<LayoutTypeSystemNode *, bool>
+  getOrCreateSCEVLayout(const SCEV *BaseAddress) {
+    // Check if the SCEV associated to the base address already has an
+    // associated LayoutTypeSystemNode.
+    // If it has, we want don't need to create a new node in TS for the source
+    // of the instance link, and we can add the instance link directly from
+    // the type of the base address link.
+    auto It = SCEVToLayoutType.lower_bound(BaseAddress);
+    if (It != SCEVToLayoutType.end()
+        and not SCEVToLayoutType.key_comp()(BaseAddress, It->first)) {
+      return { &*It->second, false };
+    }
+    if (auto *U = dyn_cast<SCEVUnknown>(BaseAddress)) {
+      // If the BaseAddress doesn't have an associated type, we want to
+      // create it and add it.
+      Value *BaseAddr = U->getValue();
+      revng_assert(nullptr != BaseAddr);
+      revng_assert(not isa<Function>(BaseAddr));
+      const auto &[Layout, NewType] = Builder.getOrCreateLayoutType(BaseAddr);
+      auto P = std::make_pair(BaseAddress, Layout);
+      return { SCEVToLayoutType.emplace_hint(It, std::move(P))->second, true };
+    }
+    return { nullptr, false };
+  }
+
+  // Gets the trip count. Returns nullopt for unknown trip counts.
+  std::optional<llvm::APInt> getTripCount(const SCEVAddRecExpr *RE) const {
+    const Loop *L = RE->getLoop();
+    revng_assert(L);
+    if (not L->isLoopSimplifyForm())
+      return std::nullopt;
+
+    const auto
+      *TakenCount = dyn_cast<SCEVConstant>(SE->getBackedgeTakenCount(L));
+    if (not TakenCount)
+      return std::nullopt;
+
+    // In general, the trip count is the TakenCount + 1.
+    // However, this can wrap, if TakenCount is all ones. That case is
+    // equivalent to not being able to detect the actual trip count.
+    if (TakenCount->getAPInt().isAllOnes())
+      return std::nullopt;
+
+    const auto *One = SE->getOne(TakenCount->getType());
+    const auto *TripCount = cast<SCEVConstant>(SE->getAddExpr(TakenCount, One));
+    return TripCount->getAPInt();
+  }
+
+  bool addInstanceLink(Value *PointerVal,
+                       const SCEV *BaseAddrSCEV,
+                       const BasicBlock &B) {
+    revng_assert(PointerVal != nullptr);
+    revng_assert(not isa<Function>(PointerVal));
+    revng_assert(isa<IntegerType>(PointerVal->getType())
+                 or isa<PointerType>(PointerVal->getType()));
+
+    revng_assert(B.getParent() == F);
+    bool Created = false; // Created LayoutTypeSystemNode, or Link
+
+    const auto &[Src, New] = getOrCreateSCEVLayout(BaseAddrSCEV);
+    Created |= New;
+    if (not Src)
+      return Created;
+
+    const auto &[Tgt, IsNewType] = Builder.getOrCreateLayoutType(PointerVal);
+    Created |= IsNewType;
+    revng_assert(Tgt != nullptr);
+
+    revng_assert(Src != Tgt or BaseAddrSCEV == SE->getSCEV(PointerVal));
+    if (Src == Tgt)
+      return Created;
+
+    const SCEV *PointerValSCEV = SE->getSCEV(PointerVal);
+    if (PointerValSCEV->getType()->isPointerTy()) {
+      auto PointerByteSize = getPointerSize(Model.Architecture());
+      llvm::Type *IntType = llvm::IntegerType::getIntNTy(PointerVal
+                                                           ->getContext(),
+                                                         PointerByteSize * 8);
+      PointerValSCEV = SE->getPtrToIntExpr(PointerValSCEV, IntType);
+    }
+
+    if (BaseAddrSCEV->getType()->isPointerTy()) {
+      auto PointerByteSize = getPointerSize(Model.Architecture());
+      llvm::Type *IntType = llvm::IntegerType::getIntNTy(PointerVal
+                                                           ->getContext(),
+                                                         PointerByteSize * 8);
+      BaseAddrSCEV = SE->getPtrToIntExpr(BaseAddrSCEV, IntType);
+    }
+
+    revng_assert(isa<IntegerType>(BaseAddrSCEV->getType())
+                 and isa<IntegerType>(PointerValSCEV->getType()));
+
+    auto BaseAddrBitWidth = BaseAddrSCEV->getType()->getIntegerBitWidth();
+    auto PointerValBitWidth = PointerValSCEV->getType()->getIntegerBitWidth();
+    if (BaseAddrBitWidth < PointerValBitWidth) {
+      BaseAddrSCEV = SE->getZeroExtendExpr(BaseAddrSCEV,
+                                           PointerValSCEV->getType());
+    } else if (BaseAddrBitWidth > PointerValBitWidth) {
+      PointerValSCEV = SE->getZeroExtendExpr(PointerValSCEV,
+                                             BaseAddrSCEV->getType());
+    }
+
+    const SCEV *OffsetSCEV = SE->getMinusSCEV(PointerValSCEV, BaseAddrSCEV);
+
+    unsigned BitWidth = OffsetSCEV->getType()->getIntegerBitWidth();
+
+    // One stride and trip count per dimension, innermost first. They are kept
+    // as `APInt` for easier handling.
+    llvm::SmallVector<std::pair<llvm::APInt, std::optional<llvm::APInt>>, 4>
+      Dimensions;
+
+    while (const auto *Rec = dyn_cast<SCEVAddRecExpr>(OffsetSCEV)) {
+      const auto
+        *StrideSCEV = dyn_cast<SCEVConstant>(Rec->getStepRecurrence(*SE));
+
+      // Don't add links for unknown strides.
+      if (not StrideSCEV)
+        return Created;
+
+      llvm::APInt Stride = StrideSCEV->getAPInt();
+      revng_assert(Stride.getBitWidth() == BitWidth);
+
+      // Don't add links for zero strides.
+      if (Stride.isZero())
+        return Created;
+
+      // Don't add links for negative strides.
+      // TODO: negative strides could be handled in principle, turning them
+      // positive and adjusting the base offset.
+      if (Stride.isNegative())
+        return Created;
+
+      std::optional<llvm::APInt> TripCount = getTripCount(Rec);
+      if (TripCount.has_value()) {
+        if (TripCount->getActiveBits() > BitWidth) {
+          TripCount = std::nullopt;
+        } else {
+          TripCount = TripCount->zextOrTrunc(BitWidth);
+        }
+      }
+      revng_assert(not TripCount.has_value()
+                   or TripCount->getBitWidth() == BitWidth);
+
+      Dimensions.push_back({ std::move(Stride), std::move(TripCount) });
+      OffsetSCEV = Rec->getStart();
+    }
+
+    // For now we do not support offsets that are not constant. This is
+    // checked before the sort below, because there is no point ordering the
+    // dimensions of a link that is being dropped.
+    const auto *OffsetConstant = dyn_cast<SCEVConstant>(OffsetSCEV);
+    if (not OffsetConstant) {
+      revng_log(Log,
+                "dropped, offset is not constant: "
+                  << dumpToString(*OffsetSCEV));
+      return Created;
+    }
+
+    // If the constant can't hold a pointer it can't even be a valid offset.
+    // Just bail out.
+    if (not couldHoldAPointer(OffsetSCEV->getType(),
+                              Model,
+                              F->getParent()->getDataLayout()))
+      return Created;
+
+    // Don't add links for instances at negative offsets.
+    llvm::APInt Offset = OffsetConstant->getAPInt();
+    revng_assert(Offset.getBitWidth() == BitWidth);
+    if (Offset.isNegative())
+      return Created;
+
+    // Nested recurrences are not guaranteed to have strides that go from
+    // larger to smaller, and `OffsetExpression` requires that order.
+    llvm::stable_sort(Dimensions, [](const auto &LHS, const auto &RHS) {
+      return LHS.first.ugt(RHS.first);
+    });
+
+    // Refuse any trip count that would warp past what an can be represented in
+    // an `intptr_t` holds, or that doesn't fit inside a single element of the
+    // array around it.
+    //
+    // A backedge taken count can be very close to 2^64 if the induction
+    // variable wraps around before the loop exit test bcomes true.
+    // That count is strictly speaking correct for the trip count, but it
+    // doesn't make any sense as array length, because it represents an array
+    // larger than the memory that is supposed to contain it.
+    //
+    // The code below detects when that happens and sets the trip count to
+    // unknown.
+    //
+    // The arithmetic is done on `2 * BitWidth + 2` bits, where the products
+    // and their running sum are exact, so no step of it can itself wrap.
+    unsigned Wide = 2 * BitWidth + 2;
+    // The largest address an access may reach.
+    llvm::APInt AddressLimit = llvm::APInt::getSignedMaxValue(BitWidth)
+                                 .zext(Wide);
+    // ParentStride is the stride of the parent array of the one being examined.
+    // It start from max because the outermost array has no parent.
+    llvm::APInt ParentStride = llvm::APInt::getMaxValue(BitWidth).zext(Wide);
+
+    // Whatever constant address the base already accounts for, leaves that
+    // less room for the array.
+    llvm::APInt Reach = Offset.zext(Wide);
+
+    for (auto &[Stride, TripCount] : Dimensions) {
+      llvm::APInt WideStride = Stride.zext(Wide);
+
+      // How many bytes are left until we hit the AddressLimit
+      llvm::APInt InnerRoom = AddressLimit.ugt(Reach) ? AddressLimit - Reach :
+                                                        llvm::APInt(Wide, 0);
+      llvm::APInt MaxCount = llvm::APIntOps::umin(InnerRoom.udiv(WideStride),
+                                                  ParentStride
+                                                    .udiv(WideStride));
+
+      // Not even one element fits, so there is no array to record here.
+      if (MaxCount.isZero()) {
+        revng_log(Log,
+                  "dropped, no room for one element of stride "
+                    << Stride.getZExtValue());
+        return Created;
+      }
+
+      llvm::APInt Count = TripCount.has_value() ? TripCount->zext(Wide) :
+                                                  llvm::APInt(Wide, 1);
+      if (Count.ugt(MaxCount)) {
+        revng_log(Log,
+                  "dropped trip count "
+                    << Count.getZExtValue() << " as unusable: it exceeds "
+                    << MaxCount.getZExtValue() << " for stride "
+                    << Stride.getZExtValue());
+        Count = llvm::APInt(Wide, 1);
+        TripCount = std::nullopt;
+      }
+
+      Reach += WideStride * Count;
+      ParentStride = WideStride;
+    }
+
+    OffsetExpression OE{};
+    OE.Offset = Offset.getZExtValue();
+    for (const auto &[Stride, TripCount] : Dimensions) {
+      OE.Strides.push_back(Stride.getZExtValue());
+      std::optional<uint64_t> Count;
+      if (TripCount.has_value())
+        Count = TripCount->getZExtValue();
+      OE.TripCounts.push_back(Count);
+    }
+
+    revng_assert(OE.verify());
+
+    Created |= Builder.TS.addInstanceLink(Src, Tgt, std::move(OE)).second;
+    return Created;
+  }
+
+public:
+  void setupForProcessingFunction(ScalarEvolution &SE, Function *TheF) {
+    this->SE = &SE;
+    F = TheF;
+    DT.recalculate(*F);
+    PDT.recalculate(*F);
+    SCEVToLayoutType.clear();
+  }
+
+  bool getOrCreateSCEVTypes() {
+    bool Changed = false;
+
+    // Add entry in SCEVToLayoutType map for arguments. We always add these
+    // because here F is always an isolated function.
+    for (Argument &A : F->args()) {
+      revng_assert(isa<IntegerType>(A.getType())
+                   or isa<PointerType>(A.getType()));
+      LayoutTypeSystemNode *ArgLayout = Builder.getLayoutType(&A);
+      const SCEV *S = SE->getSCEV(&A);
+      SCEVToLayoutType.insert(std::make_pair(S, ArgLayout));
+    }
+
+    auto &TS = Builder.TS;
+
+    for (BasicBlock &B : *F) {
+      for (auto &I : B) {
+        // Add entry in SCEVToLayoutType map for values returned by F
+        if (auto *RetI = dyn_cast<ReturnInst>(&I)) {
+          if (Value *RetVal = RetI->getReturnValue()) {
+            // TODO: An array-of-bytes return value for a CABI function
+            // returning an aggregate. In order to handle it properly we should
+            // visit it recursively and have first-class support for model types
+            // in DLA, which we currently don't have.
+            // So, for now we just bail out, accepting to degrade the quality of
+            // the results. We don't expect this to affect users much in
+            // practice, because either the input has no debug symbols (and in
+            // that case DLA sees mostly Raw functions, and this case doesn't
+            // trigger) or the model (via debug symbols, or user input) has lots
+            // of good information on CABI function types, in which case the
+            // role of DLA is not that important interprocedurally.
+            if (isArrayOfBytes(RetVal->getType()))
+              continue;
+            revng_assert(isa<StructType>(RetVal->getType())
+                         or isa<IntegerType>(RetVal->getType())
+                         or isa<PointerType>(RetVal->getType()));
+            if (isa<StructType>(RetVal->getType())) {
+              auto RetTys = Builder.getLayoutTypes(*RetVal);
+              auto NRetTypes = RetTys.size();
+              revng_assert(NRetTypes > 1ULL);
+
+              for (Value *Leaf : findPhiTreeLeaves(RetVal)) {
+                // If Leaf is a ConstantAggregate we cannot infer anything
+                // about type layouts right now. We need to handle layout
+                // pointed to by constant addresses first. This might be useful
+                // to infer types in data sections of binaries be we don't
+                // handle it now. When we do, it will become necessary to handle
+                // this case.
+                if (isa<ConstantAggregate>(Leaf)
+                    or isa<ConstantAggregateZero>(Leaf))
+                  continue;
+
+                if (isa<UndefValue>(Leaf))
+                  continue;
+
+                if (auto *Call = dyn_cast<CallInst>(Leaf)) {
+                  const Function *Callee = getCallee(Call);
+                  revng_assert(Callee != nullptr);
+
+                  auto CTags = FunctionTags::TagsSet::from(Callee);
+                  revng_assert(CTags.contains(FunctionTags::StructInitializer));
+
+                  revng_assert(not Callee->isVarArg());
+
+                  auto *RetTy = cast<StructType>(Callee->getReturnType());
+                  revng_assert(RetTy->getNumElements() == Callee->arg_size());
+                  revng_assert(RetTy == F->getReturnType());
+
+                  auto StructTypeNodes = Builder.getOrCreateLayoutTypes(*Call);
+                  revng_assert(StructTypeNodes.size() == Callee->arg_size());
+
+                  for (const auto &[RetNodeNew, Arg] :
+                       llvm::zip_first(StructTypeNodes, Call->args())) {
+
+                    // Avoid creating layouts for pointers to functions.
+                    if (isPointerToFunctionExpression(Arg))
+                      continue;
+
+                    const auto &[ArgNode,
+                                 New] = Builder.getOrCreateLayoutType(Arg);
+                    Changed |= New;
+                    const auto &[RetNode, NewNode] = RetNodeNew;
+                    Changed |= NewNode;
+                    Changed |= TS.addEqualityLink(RetNode, ArgNode).second;
+                  }
+                }
+              }
+
+            } else {
+
+              // Avoid creating layouts for pointers to functions.
+              if (isPointerToFunctionExpression(RetVal))
+                continue;
+
+              LayoutTypeSystemNode *RetTy = Builder.getLayoutType(RetVal);
+              const SCEV *S = SE->getSCEV(RetVal);
+              SCEVToLayoutType.insert(std::make_pair(S, RetTy));
+            }
+          }
+        } else if (auto *PHI = dyn_cast<PHINode>(&I)) {
+
+          // Booleans can not be addresses, so we can skip them.
+          if (PHI->getType()->isIntegerTy(1))
+            continue;
+
+          revng_assert(isa<IntegerType>(PHI->getType())
+                       or isa<PointerType>(PHI->getType())
+                       or isa<StructType>(PHI->getType()));
+          if (not isa<StructType>(PHI->getType())) {
+
+            LayoutTypeSystemNode *PHIType = Builder.getLayoutType(PHI);
+            const SCEV *PHISCEV = SE->getSCEV(PHI);
+            SCEVToLayoutType.insert(std::make_pair(PHISCEV, PHIType));
+
+            // PHI Incoming values
+            for (Value *In : PHI->incoming_values()) {
+              revng_assert(isa<IntegerType>(In->getType())
+                           or isa<PointerType>(In->getType()));
+
+              // Avoid creating layouts for pointers to functions.
+              if (isPointerToFunctionExpression(In))
+                continue;
+
+              LayoutTypeSystemNode *InTy = Builder.getLayoutType(In);
+              const SCEV *InSCEV = SE->getSCEV(In);
+              SCEVToLayoutType.insert(std::make_pair(InSCEV, InTy));
+            }
+          } else {
+            // If it's a struct is not SCEVable, so there's no point in trying
+            // to get SCEVs for this.
+          }
+
+        } else if (auto *Sel = dyn_cast<SelectInst>(&I)) {
+          // Booleans can not be addresses, so we can skip them.
+          if (Sel->getType()->isIntegerTy(1))
+            continue;
+
+          revng_assert(isa<IntegerType>(Sel->getType())
+                       or isa<PointerType>(Sel->getType()));
+
+          // Selects are very much like PHIs.
+          const auto &[SelType, New] = Builder.getOrCreateLayoutType(Sel);
+          Changed |= New;
+          const SCEV *SelSCEV = SE->getSCEV(Sel);
+          SCEVToLayoutType.insert(std::make_pair(SelSCEV, SelType));
+
+          // True incoming value
+          {
+            Value *TrueV = Sel->getTrueValue();
+            revng_assert(isa<IntegerType>(TrueV->getType())
+                         or isa<PointerType>(TrueV->getType()));
+
+            // Avoid creating layouts for pointers to functions.
+            if (isPointerToFunctionExpression(TrueV))
+              continue;
+
+            const auto &[TrueTy, NewT] = Builder.getOrCreateLayoutType(TrueV);
+            Changed |= NewT;
+            const SCEV *TrueSCEV = SE->getSCEV(TrueV);
+            SCEVToLayoutType.insert(std::make_pair(TrueSCEV, TrueTy));
+            Changed |= Builder.TS
+                         .addInstanceLink(TrueTy, SelType, OffsetExpression{})
+                         .second;
+          }
+
+          // False incoming value
+          {
+            Value *FalseV = Sel->getFalseValue();
+            revng_assert(isa<IntegerType>(FalseV->getType())
+                         or isa<PointerType>(FalseV->getType()));
+
+            // Avoid creating layouts for pointers to functions.
+            if (isPointerToFunctionExpression(FalseV))
+              continue;
+
+            const auto &[FalseTy, NewT] = Builder.getOrCreateLayoutType(FalseV);
+            Changed |= NewT;
+            const SCEV *FalseSCEV = SE->getSCEV(FalseV);
+            SCEVToLayoutType.insert(std::make_pair(FalseSCEV, FalseTy));
+            Changed |= Builder.TS
+                         .addInstanceLink(FalseTy, SelType, OffsetExpression{})
+                         .second;
+          }
+
+        } else if (auto *C = dyn_cast<CallInst>(&I)) {
+
+          if (isCallToTagged(C, FunctionTags::StructInitializer)) {
+
+            const Function *Callee = getCallee(C);
+            revng_assert(not Callee->isVarArg());
+
+            auto *RetTy = cast<StructType>(Callee->getReturnType());
+            revng_assert(RetTy->getNumElements() == Callee->arg_size());
+
+            auto StructTypeNodes = Builder.getOrCreateLayoutTypes(*C);
+            revng_assert(StructTypeNodes.size() == Callee->arg_size());
+
+            for (const auto &[RetTypeNodeNew, Arg] :
+                 llvm::zip_first(StructTypeNodes, C->args())) {
+
+              // Avoid creating layouts for pointers to functions.
+              if (isPointerToFunctionExpression(Arg))
+                continue;
+
+              const auto &[ArgTypeNode,
+                           New] = Builder.getOrCreateLayoutType(Arg);
+              Changed |= New;
+              const auto &[RetTypeNode, NewNode] = RetTypeNodeNew;
+              Changed |= NewNode;
+              Changed |= TS.addEqualityLink(RetTypeNode, ArgTypeNode).second;
+            }
+
+            continue;
+          }
+
+          // Consider only isolated functions. We don't want to create types for
+          // QEMU helpers or other nasty functions.
+          // In particular, QEMU helpers are used to implement specific CPU
+          // instructions, and typically take as input argument either @env or
+          // CPU State Variables representing registers. This is bad for two
+          // main reasons:
+          //  1. They tend to collapse different computations, possibly on stuff
+          //     with different types, on the same LayoutTypeSystemNode.
+          //  2. @env is not a construct coming from the original program being
+          //     decompiled, rather a QEMU artifact that represents the CPU
+          //     state. Hence it has no really meaningful type in the program.
+          if (not isCallToIsolatedFunction(C))
+            continue;
+
+          const auto *Prototype = getCallSitePrototype(Model, C);
+          revng_assert(Prototype);
+
+          // Let's see if there is a function with the call site's prototype.
+          // Let's call this callee, even if strictly speaking it may not be the
+          // callee but just another function whose model type matches the call
+          // site's prototype.
+          // If Callee is null here it means that there is no isolated function
+          // with the exact prototype of the call site.
+          // This can happen is the call site is indirect, or if it was indirect
+          // but was at some point devirtualized without updating the call site
+          // metadata. If the latter happens we have no way of mapping the call
+          // site prototype arguments and return types to the callee return type
+          // and in some cases we have to bail out.
+          const Function *Callee = Builder.getFunctionWithPrototype(Prototype);
+          revng_assert(not Callee or not Callee->isVarArg());
+
+          // Add entry in SCEVToLayoutType map for actual arguments of CallInst.
+          for (Use &ArgU : C->args()) {
+            revng_assert(isa<IntegerType>(ArgU->getType())
+                         or isa<PointerType>(ArgU->getType()));
+
+            // Avoid creating layouts for pointers to functions.
+            if (isPointerToFunctionExpression(ArgU))
+              continue;
+
+            const auto &[ArgTy, Created] = Builder.getOrCreateLayoutType(ArgU);
+            Changed |= Created;
+            const SCEV *ArgS = SE->getSCEV(ArgU);
+            SCEVToLayoutType.insert(std::make_pair(ArgS, ArgTy));
+          }
+
+          if (C->getType()->isVoidTy())
+            continue;
+
+          // Add entry in SCEVToLayoutType map for return values of CallInst
+          revng_assert(isa<StructType>(C->getType())
+                       or isa<IntegerType>(C->getType())
+                       or isa<PointerType>(C->getType())
+                       or isArrayOfBytes(C->getType()));
+
+          if (isa<StructType>(C->getType())) {
+            // Types representing the return type
+            auto ExtractedVals = getExtractedValuesFromInstruction(C);
+            auto Size = ExtractedVals.size();
+            auto FormalRetTys = Callee ? Builder.getLayoutTypes(*Callee) :
+                                         TS.createArtificialLayoutTypes(Size);
+            revng_assert(Size == FormalRetTys.size());
+            for (const auto &[Ext, RetTy] :
+                 llvm::zip(ExtractedVals, FormalRetTys)) {
+
+              if (Ext.empty())
+                continue;
+
+              for (llvm::CallInst *E : Ext) {
+                using FunctionTags::OpaqueExtractValue;
+                revng_assert(isCallToTagged(E, OpaqueExtractValue));
+                llvm::Type *ExtTy = E->getType();
+                revng_assert(isa<IntegerType>(ExtTy)
+                             or isa<PointerType>(ExtTy));
+
+                const auto &[ExtLayout, New] = Builder.getOrCreateLayoutType(E);
+                Changed |= New;
+                Changed |= TS.addEqualityLink(RetTy, ExtLayout).second;
+                const SCEV *S = SE->getSCEV(E);
+                SCEVToLayoutType.insert(std::make_pair(S, ExtLayout));
+              }
+            }
+          } else if (isArrayOfBytes(C->getType())) {
+            // TODO: An array-of-bytes call to a CABI function returning an
+            // aggregate. In order to handle it properly we should visit it
+            // recursively and have first-class support for model types in DLA,
+            // which we currently don't have.
+            // So, for now we just bail out, accepting to degrade the quality of
+            // the results. We don't expect this to affect users much in
+            // practice, because either the input has no debug symbols (and in
+            // that case DLA sees mostly Raw functions, and this case doesn't
+            // trigger) or the model (via debug symbols, or user input) has lots
+            // of good information on CABI function types, in which case the
+            // role of DLA is not that important interprocedurally.
+          } else {
+            // Type representing the return type
+            revng_assert(not C->getType()->isIntegerTy(1));
+            LayoutTypeSystemNode *RetTy = Callee ?
+                                            Builder.getLayoutType(Callee) :
+                                            TS.createArtificialLayoutType();
+            const auto &[CType, NewC] = Builder.getOrCreateLayoutType(C);
+            Changed |= NewC;
+            Changed |= Builder.TS.addEqualityLink(RetTy, CType).second;
+            const SCEV *RetS = SE->getSCEV(C);
+            SCEVToLayoutType.insert(std::make_pair(RetS, CType));
+          }
+
+        } else if (isa<LoadInst>(I) or isa<StoreInst>(I)) {
+          Value *PointerOp(nullptr);
+          if (auto *Load = dyn_cast<LoadInst>(&I))
+            PointerOp = Load->getPointerOperand();
+          else if (auto *Store = dyn_cast<StoreInst>(&I))
+            PointerOp = Store->getPointerOperand();
+
+          if (auto *CExpr = dyn_cast<ConstantExpr>(PointerOp)) {
+            if (CExpr->isCast()) {
+              bool IsIntToPtr = false;
+              bool IsPtrToInt = false;
+              bool IsBitCast = false;
+              {
+                auto *Cast = CExpr->getAsInstruction();
+                IsIntToPtr = isa<PtrToIntInst>(Cast);
+                IsPtrToInt = isa<IntToPtrInst>(Cast);
+                IsBitCast = isa<BitCastInst>(Cast);
+                // Cleanup, because getAsInstruction actually creates an
+                // instruction not linked to any basic block.
+                Cast->deleteValue();
+              }
+              if (IsIntToPtr or IsPtrToInt or IsBitCast) {
+                Value *Op = CExpr->getOperand(0);
+                if (isa<ConstantInt>(Op)) {
+
+                  bool New = false;
+                  LayoutTypeSystemNode *SrcLayout = nullptr;
+                  LayoutTypeSystemNode *TgtLayout = nullptr;
+
+                  std::tie(SrcLayout, New) = Builder.getOrCreateLayoutType(Op);
+                  Changed |= New;
+                  std::tie(TgtLayout,
+                           New) = Builder.getOrCreateLayoutType(CExpr);
+                  Changed |= New;
+
+                  Changed |= TS.addEqualityLink(SrcLayout, TgtLayout).second;
+
+                  const SCEV *LoadSCEV = SE->getSCEV(CExpr);
+                  SCEVToLayoutType.insert(std::make_pair(LoadSCEV, TgtLayout));
+                }
+              }
+            }
+          }
+
+          if (auto *L = dyn_cast<LoadInst>(&I)) {
+            // An array-of-bytes load is typically used in a ret, to return a
+            // value from within a CABI function returning an aggregate. We
+            // still create a layout node for it, so the memory-access loop
+            // below finds it as a cache hit and can use it as a pointee. It is
+            // not SCEVable (and could never be a base address), so it is not
+            // registered in SCEVToLayoutType.
+            // TODO: In order to handle it properly we should visit it
+            // recursively and have first-class support for model types in DLA,
+            // which we currently don't have.
+            // So, for now we just bail out, accepting to degrade the quality of
+            // the results. We don't expect this to affect users much in
+            // practice, because either the input has no debug symbols (and in
+            // that case DLA sees mostly Raw functions, and this case doesn't
+            // trigger) or the model (via debug symbols, or user input) has lots
+            // of good information on CABI function types, in which case the
+            // role of DLA is not that important interprocedurally.
+            if (not isArrayOfBytes(L->getType())) {
+              revng_assert(isa<IntegerType>(L->getType())
+                           or isa<PointerType>(L->getType()));
+              revng_assert(not L->getType()->isIntegerTy(1));
+            }
+            const auto &[LoadedTy, Created] = Builder.getOrCreateLayoutType(L);
+            Changed |= Created;
+            if (not isArrayOfBytes(L->getType())) {
+              const SCEV *LoadSCEV = SE->getSCEV(L);
+              SCEVToLayoutType.insert(std::make_pair(LoadSCEV, LoadedTy));
+            }
+          }
+        } else if (auto *A = dyn_cast<AllocaInst>(&I)) {
+          revng_assert(not A->isArrayAllocation());
+
+          Type *AllocatedType = A->getAllocatedType();
+
+          const DataLayout &DL = A->getModule()->getDataLayout();
+          revng_assert(DL.typeSizeEqualsStoreSize(AllocatedType));
+          revng_assert(DL.getTypeAllocSizeInBits(AllocatedType) % 8 == 0);
+
+          const auto &[Allocated, Created] = Builder.getOrCreateLayoutType(A);
+          Changed |= Created;
+          const SCEV *LoadSCEV = SE->getSCEV(A);
+          SCEVToLayoutType.insert(std::make_pair(LoadSCEV, Allocated));
+
+          uint64_t AllocSize = DL.getTypeAllocSize(AllocatedType);
+          if (Created) {
+            Allocated->Size = AllocSize;
+          } else {
+            // The node was already created. For an alloca this can only
+            // legitimately happen in the interprocedural pass, which visits it
+            // as a phi incoming value, a call argument, or a returned value.
+            // Assert that at least one such user exists; anything else creating
+            // an alloca's node would be unexpected and worth investigating.
+            revng_assert(llvm::any_of(A->users(), [](const User *U) {
+              return isa<PHINode>(U) or isa<CallInst>(U) or isa<ReturnInst>(U);
+            }));
+            // The node still has no size; the alloca is the authoritative
+            // source of the size, so set it here.
+            revng_assert(Allocated->Size == 0 or Allocated->Size == AllocSize);
+            Allocated->Size = AllocSize;
+          }
+
+          if (hasStackFrameMetadata(A)) {
+            // The stack frame is a struct, not a scalar of the full frame
+            // size. Treat the alloca like the `revng_stack_frame` call used to
+            // be treated before stack frames became allocas: mark the node
+            // non-scalar and give it an artificial pointer, so the DLA recovers
+            // the frame's fields.
+            Allocated->NonScalar = true;
+            auto *Placeholder = TS.createArtificialLayoutType();
+            Placeholder->Size = getPointerSize(Model.Architecture());
+            TS.addPointerLink(Placeholder, Allocated);
+          }
+        } else if (isa<IntToPtrInst>(&I) or isa<PtrToIntInst>(&I)
+                   or isa<BitCastInst>(&I) or isa<ZExtInst>(&I)) {
+          Value *Op = I.getOperand(0);
+
+          // Avoid creating layouts for pointers to functions.
+          if (isPointerToFunctionExpression(Op))
+            continue;
+
+          bool New = false;
+          LayoutTypeSystemNode *SrcLayout = nullptr;
+          LayoutTypeSystemNode *TgtLayout = nullptr;
+
+          std::tie(SrcLayout, New) = Builder.getOrCreateLayoutType(Op);
+          Changed |= New;
+          std::tie(TgtLayout, New) = Builder.getOrCreateLayoutType(&I);
+          Changed |= New;
+
+          Changed |= Builder.TS.addEqualityLink(SrcLayout, TgtLayout).second;
+          const SCEV *LoadSCEV = SE->getSCEV(&I);
+          SCEVToLayoutType.insert(std::make_pair(LoadSCEV, TgtLayout));
+        }
+      }
+    }
+    return Changed;
+  }
+
+  bool createBaseAddrWithInstanceLink(Value *PointerVal, const BasicBlock &B) {
+    revng_assert(PointerVal);
+
+    bool AddedSomething = false;
+
+    // If PointerVal points to an undef, do nothing
+    if (isa<UndefValue>(PointerVal))
+      return AddedSomething;
+
+    const SCEV *PtrSCEV = SE->getSCEV(PointerVal);
+    using Explorer = SCEVBaseAddressExplorer;
+    auto PossibleBaseAddresses = Explorer().findBases(SE,
+                                                      PtrSCEV,
+                                                      SCEVToLayoutType);
+    for (const SCEV *BaseAddrSCEV : PossibleBaseAddresses)
+      AddedSomething |= addInstanceLink(PointerVal, BaseAddrSCEV, B);
+
+    return AddedSomething;
+  }
+};
+
+using Builder = DLATypeSystemLLVMBuilder;
+
+bool Builder::connectToFuncsWithSamePrototype(const llvm::CallInst *Call) {
+  revng_assert(Call);
+  // This procedure for regular functions (i.e. those that are used in direct
+  // calls) is done separately by `CreateInterProceduralTypes`
+  revng_assert(Call->isIndirectCall());
+  bool Changed = false;
+
+  const auto *Prototype = getCallSitePrototype(Model, Call);
+  if (Prototype == nullptr)
+    return false;
+
+  const auto [It, NewPrototype] = VisitedPrototypes.insert({ Prototype, Call });
+  if (NewPrototype)
+    return Changed;
+
+  FuncOrCallInst OtherCall = It->second;
+  revng_assert(not OtherCall.isNull());
+
+  bool ReturnsVoid = OtherCall.getRetType()->isVoidTy();
+  revng_assert(Call->getType()->isVoidTy() == ReturnsVoid);
+
+  if (not ReturnsVoid) {
+    // Connect return values
+    auto OtherRetVals = getLayoutTypes(*OtherCall.getVal());
+    auto RetVals = getLayoutTypes(*Call);
+    revng_assert(RetVals.size() == OtherRetVals.size());
+    for (auto &&[N1, N2] : llvm::zip(OtherRetVals, RetVals)) {
+      Changed = true;
+      TS.addEqualityLink(N1, N2);
+    }
+  }
+
+  // Connect arguments
+  for (const auto &ArgIt : llvm::enumerate(Call->args())) {
+    // Arguments can only be integers and pointers
+    const Value *Arg1 = ArgIt.value();
+    const Value *Arg2 = OtherCall.getArg(ArgIt.index());
+    revng_assert(Arg1->getType()->isIntOrPtrTy()
+                 and Arg2->getType()->isIntOrPtrTy());
+
+    // Avoid creating layouts for pointers to functions.
+    if (isPointerToFunctionExpression(Arg1))
+      continue;
+    if (isPointerToFunctionExpression(Arg2))
+      continue;
+
+    auto *Arg1Node = getLayoutType(Arg1);
+    auto *Arg2Node = getLayoutType(Arg2);
+
+    Changed = true;
+    TS.addEqualityLink(Arg1Node, Arg2Node);
+  }
+
+  return Changed;
+}
+
+bool Builder::createIntraproceduralTypes(llvm::Module &M) {
+  bool Changed = false;
+  InstanceLinkAdder ILA(Model, *this);
+
+  // Own the new-pass-manager infrastructure for the whole module. A single FAM
+  // serves every function here because it caches per llvm::Function; it lives
+  // until this call returns, so peak memory is bounded by one module.
+  FunctionAnalysisManager FAM;
+  PassBuilder PB;
+  PB.registerFunctionAnalyses(FAM);
+
+  for (Function &F : M.functions()) {
+    auto FTags = FunctionTags::TagsSet::from(&F);
+    if (F.isIntrinsic() or not FTags.contains(FunctionTags::Isolated))
+      continue;
+    // A caller module holds body-less declarations of the isolated functions it
+    // calls. They have no body to explore here (the loop below needs an entry
+    // block); the callee's definition is processed in its own module.
+    if (F.isDeclaration())
+      continue;
+    revng_assert(not F.isVarArg());
+
+    ScalarEvolution &SE = FAM.getResult<ScalarEvolutionAnalysis>(F);
+    ILA.setupForProcessingFunction(SE, &F);
+    Changed |= ILA.getOrCreateSCEVTypes();
+
+    llvm::ReversePostOrderTraversal RPOT(&F.getEntryBlock());
+    for (BasicBlock *B : RPOT) {
+      for (Instruction &I : *B) {
+        // If I has no operands we've nothing to do.
+        if (not I.getNumOperands())
+          continue;
+
+        // ExtractValue is special since its operand has struct type, so we
+        // don't handle them explicitly.  It will be analyzed only as operands
+        // of its uses.
+        revng_assert(not isa<ExtractValueInst>(I));
+        if (isCallToTagged(&I, FunctionTags::OpaqueExtractValue))
+          continue;
+
+        // Load and Store are handled separately, because we look into their
+        // pointer operands, and we have to add accesses to the generated
+        // LayoutTypeSystemNodes.
+        if (isa<LoadInst>(I) or isa<StoreInst>(I)) {
+          // Regular memory accesses. For now these Instructions are the only
+          // one that give us information to identify which Values are pointers
+          // to types, because they are used in Load and Stores as
+          // PointerOperands.
+          Value *PointerVal = nullptr;
+          Value *Val = nullptr;
+          if (auto *Load = dyn_cast<LoadInst>(&I)) {
+            PointerVal = Load->getPointerOperand();
+            Val = &I;
+          } else if (auto *Store = dyn_cast<StoreInst>(&I)) {
+            PointerVal = Store->getPointerOperand();
+            Val = Store->getValueOperand();
+          } else {
+            continue;
+          }
+          revng_assert(PointerVal);
+
+          // Avoid creating layouts for pointers to functions.
+          if (isPointerToFunctionExpression(PointerVal))
+            continue;
+
+          // But if the pointer operand is a global variable we have nothing to
+          // do, because loading from it means reading from a register which has
+          // no good information to propagate about types.
+          if (isa<GlobalVariable>(PointerVal))
+            continue;
+
+          // If the pointer operand is null or undef we have nothing to do.
+          if (isa<ConstantPointerNull>(PointerVal)
+              or isa<UndefValue>(PointerVal)) {
+            continue;
+          }
+
+          // Create Base node
+          Changed |= ILA.createBaseAddrWithInstanceLink(PointerVal, *B);
+
+          // Create Access node.
+          const DataLayout &DL = I.getModule()->getDataLayout();
+          uint64_t AccessSize;
+          if (isArrayOfBytes(Val->getType())) {
+            // For an array of bytes use the type's allocation size to record
+            // the real number of accessed bytes.
+            AccessSize = DL.getTypeAllocSize(Val->getType());
+          } else {
+            AccessSize = Val->getType()->getScalarSizeInBits() / 8;
+          }
+          auto *AccessNode = TS.createArtificialLayoutType();
+          AccessNode->Size = AccessSize;
+          AccessNode->InterferingInfo = AllChildrenAreNonInterfering;
+
+          // Add link between pointer node and access node
+          auto *PointerNode = getLayoutType(PointerVal);
+          revng_assert(PointerNode);
+          TS.addInstanceLink(PointerNode, AccessNode, OffsetExpression{});
+
+          // Create pointer edge between the access node and the pointee node.
+          const auto &[PointeeNode, HasChanged] = getOrCreateLayoutType(Val);
+          revng_assert(PointeeNode);
+          revng_assert(not HasChanged or not isa<LoadInst>(I));
+
+          // Add a pointer link from the AccessNode to the PointeeNode. Note
+          // that at this stage we don't know yet if PointeeNode is going to be
+          // the root of another chunk of the type hierarchy, or just a plain
+          // scalar. But because of graph initialization works, we need to
+          // assume optimistically that it will NOT be a plain scalar. This has
+          // 2 consequences:
+          //  - the pointee node becomes a place where a different part of the
+          //    type hierarchy will attach when it will be materialized later
+          //    during a new iteration of this loop on a new instruction
+          // - it will provide the information that many Load/Store instructions
+          //   have read/written a given value. This is used later to add
+          //   equality links between things that have pointer edges towards the
+          //   same PointeeNode.
+
+          // All this being said, if a pointer does not fit in the accessed
+          // size, we already know for sure that the pointee is not going to be
+          // a pointer, and we can bail out early.
+          if (not couldHoldAPointer(AccessSize, Model, DL))
+            continue;
+
+          PointeeNode->InterferingInfo = Unknown;
+          TS.addPointerLink(AccessNode, PointeeNode);
+
+          // If the pointee already has nodes that point to it, their type must
+          // be the same as the type of PointerNode, so add an equality link.
+          using PointerGraph = EdgeFilteredGraph<LayoutTypeSystemNode *,
+                                                 isPointerEdge>;
+          using InversePointerGraph = llvm::Inverse<PointerGraph>;
+          for (LayoutTypeSystemNode *PointerToPointee :
+               llvm::children<InversePointerGraph>(PointeeNode)) {
+            revng_assert(couldHoldAPointer(AccessSize, Model, DL));
+            // Two values of different widths can both hold a pointer, so the
+            // sizes need not match, they only both have to fit one.
+            revng_assert(couldHoldAPointer(PointerToPointee->Size, Model, DL));
+            if (PointerToPointee != AccessNode)
+              TS.addEqualityLink(PointerToPointee, AccessNode);
+          }
+
+          continue;
+        }
+
+        SmallVector<Value *, 8> Pointers;
+
+        // Handle all the other instructions, looking if we can find the base
+        // address from which is calculated each Instruction, if it can
+        // represent an address.
+        if (auto *Ret = dyn_cast<ReturnInst>(&I)) {
+
+          if (not Ret->getNumOperands())
+            continue;
+
+          revng_assert(Ret->getNumOperands() == 1U);
+          auto *RetVal = Ret->getOperand(0);
+
+          if (isa<UndefValue>(RetVal))
+            continue;
+
+          if (RetVal->getType()->isStructTy()) {
+            for (Value *Leaf : findPhiTreeLeaves(RetVal)) {
+              // If Leaf is a ConstantAggregate we cannot infer anything about
+              // type layouts right now. We need to handle layout pointed to by
+              // constant addresses first. This might be useful to infer types
+              // in data sections of binaries be we don't handle it now. When we
+              // do, it will become necessary to handle this case.
+              if (isa<ConstantAggregate>(Leaf)
+                  or isa<ConstantAggregateZero>(Leaf))
+                continue;
+
+              if (isa<UndefValue>(Leaf))
+                continue;
+
+              auto *Call = cast<CallInst>(Leaf);
+
+              const Function *Callee = getCallee(Call);
+              auto CTags = FunctionTags::TagsSet::from(Callee);
+              revng_assert(CTags.contains(FunctionTags::StructInitializer));
+
+              revng_assert(not Callee->isVarArg());
+              auto *RetTy = cast<StructType>(Callee->getReturnType());
+              revng_assert(RetTy == F.getReturnType());
+              revng_assert(RetTy->getNumElements() == Callee->arg_size());
+
+              Pointers.append(Call->arg_begin(), Call->arg_end());
+            }
+          } else if (not isArrayOfBytes(RetVal->getType())) {
+            // TODO: An array-of-bytes return value for a CABI function
+            // returning an aggregate. In order to handle it properly we should
+            // visit it recursively and have first-class support for model types
+            // in DLA, which we currently don't have.
+            // So, for now we just bail out, accepting to degrade the quality of
+            // the results. We don't expect this to affect users much in
+            // practice, because either the input has no debug symbols (and in
+            // that case DLA sees mostly Raw functions, and this case doesn't
+            // trigger) or the model (via debug symbols, or user input) has lots
+            // of good information on CABI function types, in which case the
+            // role of DLA is not that important interprocedurally.
+            revng_assert(isa<IntegerType>(RetVal->getType())
+                         or isa<PointerType>(RetVal->getType()));
+            Pointers.push_back(RetVal);
+          }
+        } else if (auto *Call = dyn_cast<CallInst>(&I)) {
+          // For calls we actually look at their parameters.
+          for (Value *PointerVal : Call->args())
+            Pointers.push_back(PointerVal);
+
+        } else if (isa<PtrToIntInst>(&I) or isa<IntToPtrInst>(&I)
+                   or isa<BitCastInst>(&I) or isa<ZExtInst>(&I)) {
+          Pointers.push_back(I.getOperand(0));
+        } else {
+
+          // Ignore Instructions that, depending on their type, cannot represent
+          // an address. Among these types that cannot represent pointers are
+          // for now void and bool (which is just a 1-bit wide integer in llvm)
+          llvm::Type *InstrType = I.getType();
+          if (InstrType->isVoidTy() or InstrType->isIntegerTy(1))
+            continue;
+
+          switch (I.getOpcode()) {
+          case Instruction::Mul:
+          case Instruction::SDiv:
+          case Instruction::UDiv:
+          case Instruction::SRem:
+          case Instruction::URem:
+          case Instruction::AShr:
+          case Instruction::LShr:
+          case Instruction::Shl:
+          case Instruction::And:
+          case Instruction::Xor:
+          case Instruction::Or:
+            continue;
+          default: {
+            // do nothing
+          } break;
+          }
+
+          // Consider other Instructions themselves as pointers.
+          Pointers.push_back(&I);
+        }
+
+        for (Value *PointerVal : Pointers) {
+          if (PointerVal and not isa<StructType>(PointerVal->getType()))
+            Changed |= ILA.createBaseAddrWithInstanceLink(PointerVal, *B);
+        }
+
+        // For indirect calls, we want to enforce the following: if this call
+        // shares the prototype with another function in the model, their return
+        // values and arguments must have the same layout. This is done by
+        // adding equality links between these nodes.
+        if (auto *Call = dyn_cast<CallInst>(&I))
+          if (Call->isIndirectCall())
+            Changed |= connectToFuncsWithSamePrototype(Call);
+      }
+    }
+  }
+
+  if (VerifyLog.isEnabled())
+    revng_assert(TS.verifyConsistency());
+
+  return Changed;
+}

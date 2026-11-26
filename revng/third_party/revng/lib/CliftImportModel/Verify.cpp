@@ -1,0 +1,564 @@
+//
+// This file is distributed under the MIT License. See LICENSE.md for details.
+//
+
+#include "mlir/IR/BuiltinAttributes.h"
+
+#include "revng/Clift/CliftAttributes.h"
+#include "revng/Clift/ModuleVisitor.h"
+#include "revng/CliftImportModel/Verify.h"
+#include "revng/Model/FunctionAttribute.h"
+#include "revng/Model/RawFunctionDefinition.h"
+#include "revng/Model/TypeDefinition.h"
+#include "revng/PTML/CAttributes.h"
+#include "revng/Ranks/Location.h"
+#include "revng/Ranks/Ranks.h"
+
+namespace ranks = revng::ranks;
+
+namespace {
+
+using clift::CAttributeAttr;
+using clift::CAttributeListAttr;
+
+static constexpr model::PrimitiveKind::Values
+integerToPrimitiveKind(clift::IntegerKind Kind) {
+  switch (Kind) {
+  case clift::IntegerKind::Generic:
+    return model::PrimitiveKind::Generic;
+  case clift::IntegerKind::PointerOrNumber:
+    return model::PrimitiveKind::PointerOrNumber;
+  case clift::IntegerKind::Number:
+    return model::PrimitiveKind::Number;
+  case clift::IntegerKind::Unsigned:
+    return model::PrimitiveKind::Unsigned;
+  case clift::IntegerKind::Signed:
+    return model::PrimitiveKind::Signed;
+  default:
+    return model::PrimitiveKind::Invalid;
+  }
+}
+
+static auto getModelPrimitiveType(clift::PrimitiveType Type) {
+  if (mlir::isa<clift::VoidType>(Type))
+    return model::PrimitiveType::makeVoid();
+
+  if (auto T = mlir::dyn_cast<clift::FloatType>(Type))
+    return model::PrimitiveType::make(model::PrimitiveKind::Float, T.getSize());
+
+  auto T = mlir::cast<clift::IntegerType>(Type);
+  auto Kind = integerToPrimitiveKind(T.getKind());
+  return model::PrimitiveType::make(Kind, T.getSize());
+}
+
+class Verifier : public clift::ModuleVisitor<Verifier> {
+public:
+  explicit Verifier(const model::Binary &Model) : Model(Model) {}
+
+  mlir::LogicalResult visitType(mlir::Type Type) {
+    if (auto T = mlir::dyn_cast<clift::PrimitiveType>(Type)) {
+      if (not getModelPrimitiveType(T)->verify())
+        return mlir::failure();
+    } else if (auto T = mlir::dyn_cast<clift::DefinedType>(Type)) {
+      if (visitDefinedType(T).failed())
+        return mlir::failure();
+    }
+    return mlir::success();
+  }
+
+  mlir::LogicalResult visitNestedOp(mlir::Operation *Op) {
+    if (auto F = mlir::dyn_cast<clift::FunctionOp>(Op)) {
+      if (visitFunctionOp(F).failed())
+        return mlir::failure();
+    } else if (auto G = mlir::dyn_cast<clift::GlobalVariableOp>(Op)) {
+      if (visitGlobalVariableOp(G).failed())
+        return mlir::failure();
+    }
+    return mlir::success();
+  }
+
+  mlir::LogicalResult visitModuleLevelOp(mlir::Operation *Op) {
+    if (auto F = mlir::dyn_cast<clift::FunctionOp>(Op))
+      return visitFunctionOp(F);
+    if (auto G = mlir::dyn_cast<clift::GlobalVariableOp>(Op))
+      return visitGlobalVariableOp(G);
+    return mlir::success();
+  }
+
+private:
+  auto error() { return getCurrentOp()->emitError(); }
+
+private:
+  /// An attribute standing for a model field that is either set or not, paired
+  /// with the value that field has.
+  struct FlagAttribute {
+    llvm::StringRef Name;
+    bool ModelValue = false;
+  };
+
+  /// Check the attributes of \p Type: each one must be one of \p Flags, must
+  /// appear at most once, must carry no argument, and must be there exactly
+  /// when the model field it stands for is set.
+  mlir::LogicalResult
+  verifyFlagAttributes(clift::StructType Type,
+                       llvm::ArrayRef<FlagAttribute> Flags) {
+    llvm::SmallVector<bool> Found(Flags.size(), false);
+
+    if (CAttributeListAttr AttributeList = Type.getCAttributeList()) {
+      for (CAttributeAttr Attr : AttributeList) {
+        llvm::StringRef Name = Attr.getName().getName();
+
+        if (not ptml::Attributes.isMacro(Name))
+          return error() << "Unknown c-attribute ('" << Name << "') found in '"
+                         << Type.getHandle() << "'";
+
+        const FlagAttribute
+          *Flag = llvm::find_if(Flags, [Name](const FlagAttribute &F) {
+            return F.Name == Name;
+          });
+        if (Flag == Flags.end())
+          return error() << "Forbidden c-attribute ('" << Name
+                         << "') found in '" << Type.getHandle() << "'";
+
+        if (std::exchange(Found[Flag - Flags.begin()], true))
+          return error() << "Duplicate `" << Name << "` attributes found in: '"
+                         << Type.getHandle() << "'";
+
+        if (Attr.getArguments())
+          return error() << "`" << Name
+                         << "` attribute must not have any arguments. See '"
+                         << Type.getHandle() << "'";
+      }
+    }
+
+    for (auto &&[Flag, IsPresent] : llvm::zip_equal(Flags, Found)) {
+      if (IsPresent != Flag.ModelValue)
+        return error() << "`" << Flag.Name << "` status ('" << IsPresent
+                       << "') does not match the model value ('"
+                       << Flag.ModelValue << "') for : '" << Type.getHandle()
+                       << "'";
+    }
+
+    return mlir::success();
+  }
+
+  mlir::LogicalResult visitDefinedType(clift::DefinedType Type) {
+    auto GetLocation = [&](const auto &Rank) {
+      return pipeline::locationFromString(Rank, Type.getHandle());
+    };
+
+    if (auto L = GetLocation(ranks::TypeDefinition)) {
+      auto It = Model.TypeDefinitions().find(L->at(ranks::TypeDefinition));
+      if (It == Model.TypeDefinitions().end())
+        return error() << "Clift ModuleOp contains a DefinedType with "
+                          "an invalid handle: '"
+                       << Type.getHandle() << "'";
+      const model::TypeDefinition &D = **It;
+
+      if (auto FT = mlir::dyn_cast<clift::FunctionType>(Type)) {
+        if (not llvm::isa<model::CABIFunctionDefinition>(D)
+            and not llvm::isa<model::RawFunctionDefinition>(D))
+          return error() << "Clift ModuleOp contains a FunctionType with "
+                            "an invalid handle: '"
+                         << Type.getHandle() << "'";
+
+        ptml::Attributes.assertAnnotationName<"_ABI">();
+
+        bool ABIFound = false;
+        if (CAttributeListAttr AttributeList = FT.getCAttributeList()) {
+          for (CAttributeAttr Attr : AttributeList) {
+            if (not ptml::Attributes.isMacro(Attr.getName().getName()))
+              return error()
+                     << "Unknown c-attribute ('" << Attr.getName().getName()
+                     << "') found in '" << Type.getHandle() << "'";
+
+            if (Attr.getName().getName() == "_ABI") {
+              if (std::exchange(ABIFound, true))
+                return error() << "Duplicate `_ABI` attributes found in: '"
+                               << Type.getHandle() << "'";
+
+              mlir::ArrayAttr Arguments = Attr.getArguments();
+              if (not Arguments)
+                return error() << "`_ABI` attribute must have an argument. See "
+                                  "'"
+                               << Type.getHandle() << "'";
+
+              if (Arguments.size() != 1)
+                return error() << "`_ABI` attribute must have exactly one "
+                                  "argument. See '"
+                               << Type.getHandle() << "'";
+
+              using clift::CIdentifierAttr;
+              auto Identifier = mlir::dyn_cast<CIdentifierAttr>(Arguments[0]);
+              if (not Identifier)
+                return error() << "`_ABI` attribute argument must be "
+                                  "an identifier. See '"
+                               << Type.getHandle() << "'";
+
+              std::string ModelABI = "raw_";
+              if (auto CF = llvm::dyn_cast<model::CABIFunctionDefinition>(&D))
+                ModelABI = model::ABI::getName(CF->ABI());
+              else if (auto
+                         RF = llvm::dyn_cast<model::RawFunctionDefinition>(&D))
+                ModelABI += model::Architecture::getName(RF->Architecture());
+              else
+                revng_abort("Unsupported function type");
+
+              llvm::StringRef AttrABIName = Identifier.getName();
+              if (AttrABIName != ModelABI)
+                return error()
+                       << "`_ABI` attribute value ('" << AttrABIName
+                       << "') differs from the model value ('" << ModelABI
+                       << "'). See '" << Type.getHandle() << "'";
+
+            } else {
+              return error()
+                     << "Forbidden c-attribute ('" << Attr.getName().getName()
+                     << "') found in '" << Type.getHandle() << "'";
+            }
+          }
+        }
+
+        if (not ABIFound)
+          return error() << "`_ABI` attribute is required on every function "
+                            "type. See '"
+                         << Type.getHandle() << "'";
+
+      } else if (mlir::isa<clift::TypedefType>(Type)) {
+        if (not llvm::isa<model::TypedefDefinition>(D))
+          return error() << "Clift ModuleOp contains a TypedefType with "
+                            "an invalid handle: '"
+                         << Type.getHandle() << "'";
+      } else if (mlir::isa<clift::EnumType>(Type)) {
+        if (not llvm::isa<model::EnumDefinition>(D))
+          return error() << "Clift ModuleOp contains an EnumType with "
+                            "an invalid handle: '"
+                         << Type.getHandle() << "'";
+      } else if (auto ST = mlir::dyn_cast<clift::StructType>(Type)) {
+        if (not llvm::isa<model::StructDefinition>(D))
+          return error() << "Clift ModuleOp contains a StructType with "
+                            "an invalid handle: '"
+                         << Type.getHandle() << "'";
+
+        ptml::Attributes.assertAttributeName<"_SINGLETON">();
+        ptml::Attributes.assertAttributeName<"_CAN_CONTAIN_CODE">();
+
+        const auto &Struct = llvm::cast<model::StructDefinition>(D);
+        std::array Flags = {
+          FlagAttribute{ "_SINGLETON", Struct.IsSingleton() },
+          FlagAttribute{ "_CAN_CONTAIN_CODE", Struct.CanContainCode() }
+        };
+
+        if (verifyFlagAttributes(ST, Flags).failed())
+          return mlir::failure();
+
+      } else if (mlir::isa<clift::UnionType>(Type)) {
+        if (not llvm::isa<model::UnionDefinition>(D))
+          return error() << "Clift ModuleOp contains a UnionType with "
+                            "an invalid handle: '"
+                         << Type.getHandle() << "'";
+      }
+    } else if (auto L = GetLocation(ranks::HelperStructType)) {
+      if (not mlir::isa<clift::StructType>(Type))
+        return error() << "Clift ModuleOp contains a non-struct type with "
+                          "a HelperStructType handle: '"
+                       << Type.getHandle() << "'";
+    } else if (auto L = GetLocation(ranks::HelperFunction)) {
+      if (not mlir::isa<clift::FunctionType>(Type))
+        return error() << "Clift ModuleOp contains a non-function type with "
+                          "a HelperFunction handle: '"
+                       << Type.getHandle() << "'";
+    } else if (auto L = GetLocation(ranks::ArtificialStruct)) {
+      if (not mlir::isa<clift::StructType>(Type))
+        return error() << "Clift ModuleOp contains a non-struct type with "
+                          "an ArtificialStruct handle: '"
+                       << Type.getHandle() << "'";
+    } else if (auto L = GetLocation(ranks::OpaqueType)) {
+      if (not mlir::isa<clift::StructType>(Type))
+        return error() << "Clift ModuleOp contains a non-struct type with "
+                          "an OpaqueType handle: '"
+                       << Type.getHandle() << "'";
+    } else {
+      return error() << "Clift ModuleOp contains a DefinedType with "
+                        "an invalid handle: '"
+                     << Type.getHandle() << "'";
+    }
+
+    return mlir::success();
+  }
+
+  mlir::LogicalResult visitFunctionOp(clift::FunctionOp Op) {
+    auto GetLocation = [&](const auto &Rank) {
+      return pipeline::locationFromString(Rank, Op.getHandle());
+    };
+
+    bool IsIsolated = false;
+    const model::TypeDefinition *Prototype = nullptr;
+    const model::Function::TypeOfAttributes *Attributes = nullptr;
+
+    if (auto L = GetLocation(ranks::Function)) {
+      const auto &[Key] = L->at(ranks::Function);
+      auto It = Model.Functions().find(Key);
+      if (It == Model.Functions().end())
+        return error() << "Clift ModuleOp contains an isolated function with "
+                          "an invalid handle: '"
+                       << Op.getHandle() << "'";
+
+      Prototype = It->prototype();
+      Attributes = &It->Attributes();
+      IsIsolated = true;
+
+    } else if (auto L = GetLocation(ranks::DynamicFunction)) {
+      const auto &[Key] = L->at(ranks::DynamicFunction);
+      auto It = Model.ImportedDynamicFunctions().find(Key);
+      if (It == Model.ImportedDynamicFunctions().end())
+        return error() << "Clift ModuleOp contains an imported function with "
+                          "an invalid handle: '"
+                       << Op.getHandle() << "'";
+
+      Prototype = It->prototype();
+      Attributes = &It->Attributes();
+
+    } else if (auto L = GetLocation(ranks::HelperFunction)) {
+    } else {
+      return error() << "Clift ModuleOp contains a function with an invalid "
+                        "handle: "
+                        "'"
+                     << Op.getHandle() << "'";
+    }
+
+    if (not IsIsolated and not Op.isExternal())
+      return error() << "Clift ModuleOp contains a non-isolated function with "
+                        "a definition: '"
+                     << Op.getHandle() << "'";
+
+    for (unsigned Index = 0; Index < Op.getArgCount(); ++Index) {
+      bool IsStack = false;
+      bool IsRegister = false;
+
+      clift::AttrDictView View = Op.getArgAttrs(Index);
+      auto Handle = View.getStringOrEmpty("clift.handle");
+      if (Handle.empty())
+        Handle = "(a no-handle argument)";
+
+      if (auto AttributeList = //
+          View.getOfType<CAttributeListAttr>("clift.c_attribute_list")) {
+
+        for (CAttributeAttr CAttribute : AttributeList) {
+          auto AttributeName = CAttribute.getName().getName();
+          auto Arguments = CAttribute.getArguments();
+
+          if (not ptml::Attributes.isMacro(AttributeName))
+            return error() << "Unknown c-attribute ('" << AttributeName
+                           << "') found in '" << Handle << "' of '"
+                           << Op.getHandle() << "'";
+
+          ptml::Attributes.assertAttributeName<"_STACK">();
+          ptml::Attributes.assertAnnotationName<"_REG">();
+
+          if (AttributeName == "_STACK") {
+            if (std::exchange(IsStack, true))
+              return error() << "More than one `_STACK` attribute is "
+                                "attached to '"
+                             << Handle << "' of '" << Op.getHandle() << "'";
+
+            if (Arguments)
+              return error() << "`_STACK` attribute must not have any "
+                                "arguments. See '"
+                             << Handle << "' of '" << Op.getHandle() << "'";
+
+            if (Index != Op.getArgCount() - 1)
+              return error() << "`_STACK` attribute is only allowed on the "
+                                "very last argument. See '"
+                             << Handle << "' of '" << Op.getHandle() << "'";
+            if (not Prototype)
+              return error() << "`_STACK` attribute is only allowed on "
+                                "functions with a prototype. See '"
+                             << Handle << "' of '" << Op.getHandle() << "'";
+
+            const auto *RFT = Prototype->getRawFunction();
+            if (not RFT)
+              return error() << "`_STACK` attribute is only allowed on "
+                                "functions with a *raw* prototype. See '"
+                             << Handle << "' of '" << Op.getHandle() << "'";
+
+            if (not RFT->StackArgumentsType())
+              return error() << "`_STACK` attribute is only allowed on "
+                                "functions that have stack arguments in the "
+                                "model. See '"
+                             << Handle << "' of '" << Op.getHandle() << "'";
+
+          } else if (AttributeName == "_REG") {
+            if (std::exchange(IsRegister, true))
+              return error() << "More than one `_REG` attribute is "
+                                "attached to '"
+                             << Handle << "' of '" << Op.getHandle() << "'";
+
+            if (not Arguments)
+              return error() << "`_REG` attribute must have an argument. See '"
+                             << Handle << "' of '" << Op.getHandle() << "'";
+
+            auto ArgumentArray = mlir::cast<mlir::ArrayAttr>(Arguments);
+            if (ArgumentArray.size() != 1)
+              return error() << "`_REG` attribute must have exactly one "
+                                "argument. See '"
+                             << Handle << "' of '" << Op.getHandle() << "'";
+
+            using clift::CIdentifierAttr;
+            auto Identifier = mlir::dyn_cast<CIdentifierAttr>(Arguments[0]);
+            if (not Identifier)
+              return error() << "`_REG` attribute argument must be "
+                                "an identifier. See '"
+                             << Handle << "' of '" << Op.getHandle() << "'";
+
+            if (not Prototype)
+              return error() << "`_REG` attribute is only allowed on "
+                                "functions with a prototype. See '"
+                             << Handle << "' of '" << Op.getHandle() << "'";
+
+            const auto *RFT = Prototype->getRawFunction();
+            if (not RFT)
+              return error() << "`_REG` attribute is only allowed on "
+                                "functions with a *raw* prototype. See '"
+                             << Handle << "' of '" << Op.getHandle() << "'";
+
+            if (RFT->Arguments().size() <= Index)
+              return error() << "`_REG` attribute is attached to "
+                                "a non-existent register argument. See '"
+                             << Handle << "' of '" << Op.getHandle() << "'";
+
+            const auto &Argument = *std::next(RFT->Arguments().begin(), Index);
+            auto RegisterName = model::Register::getName(Argument.Location());
+
+            llvm::StringRef AttrArgumentName = Identifier.getName();
+            if (AttrArgumentName != RegisterName)
+              return error() << "`_REG` attribute ('" << AttrArgumentName
+                             << "') differs from the model value ('"
+                             << RegisterName << "'). See '" << Handle
+                             << "' of '" << Op.getHandle() << "'";
+
+          } else {
+            return error() << "Forbidden c-attribute ('" << AttributeName
+                           << "') found in '" << Handle << "' of '"
+                           << Op.getHandle() << "'";
+          }
+
+          if (IsStack and IsRegister)
+            return error() << "*Both* `_STACK` and `_REG` attributes are "
+                              "attached to '"
+                           << Handle << "' of '" << Op.getHandle() << "'";
+        }
+      }
+    }
+
+    std::size_t AttributeCount = 0;
+    if (Op->hasAttr("noreturn")) {
+      if (Attributes == nullptr)
+        return error() << "`_NO_RETURN` is attached to a function that does "
+                          "not support attributes. See '"
+                       << Op.getHandle() << "'";
+
+      if (not Attributes->contains(model::FunctionAttribute::NoReturn))
+        return error() << "`_NO_RETURN` is attached to a function that does "
+                          "not have it in the model. See '"
+                       << Op.getHandle() << "'";
+
+      ++AttributeCount;
+    }
+
+    if (Op->hasAttr("always_inline")) {
+      if (Attributes == nullptr)
+        return error() << "`_ALWAYS_INLINE` is attached to a function that "
+                          "does not support attributes. See '"
+                       << Op.getHandle() << "'";
+
+      if (not Attributes->contains(model::FunctionAttribute::AlwaysInline))
+        return error() << "`_ALWAYS_INLINE` is attached to a function that "
+                          "does not have it in the model. See '"
+                       << Op.getHandle() << "'";
+
+      ++AttributeCount;
+    }
+
+    if (Op->hasAttr("has_one_broken_return")) {
+      if (Attributes == nullptr)
+        return error() << "`_HAS_ONE_BROKEN_RETURN` is attached to a function "
+                          "that does not support attributes. See '"
+                       << Op.getHandle() << "'";
+
+      using model::FunctionAttribute::HasOneBrokenReturn;
+      if (not Attributes->contains(HasOneBrokenReturn))
+        return error() << "`_HAS_ONE_BROKEN_RETURN` is attached to a function "
+                          "that does not have it in the model. See '"
+                       << Op.getHandle() << "'";
+
+      ++AttributeCount;
+    }
+
+    if (Attributes and AttributeCount != Attributes->size()) {
+      return error() << "Attached function attribute count ('" << AttributeCount
+                     << "') does not match the model value ('"
+                     << Attributes->size() << "'). See '" << Op.getHandle()
+                     << "'";
+    }
+
+    if (auto AttributeList = //
+        Op->getAttrOfType<CAttributeListAttr>("clift.c_attribute_list")) {
+
+      for (CAttributeAttr CAttribute : AttributeList) {
+        if (not ptml::Attributes.isMacro(CAttribute.getName().getName())) {
+          return error() << "Unknown c-attribute ('"
+                         << CAttribute.getName().getName() << "') found in '"
+                         << Op.getHandle() << "'";
+
+        } else {
+          return error() << "Forbidden c-attribute ('"
+                         << CAttribute.getName().getName() << "') found in '"
+                         << Op.getHandle() << "'";
+        }
+      }
+    }
+
+    // A function may declare at most one local as the inline stack frame.
+    // The `stack_frame` attribute on `clift.local` is a discardable boolean;
+    // we walk the whole body (including nested regions) so locals hidden
+    // inside compound statements are still counted.
+    std::size_t StackFrameCount = 0;
+    Op.walk([&](clift::LocalVariableOp Local) {
+      if (Local->hasAttr("clift.stack_frame"))
+        ++StackFrameCount;
+    });
+    if (StackFrameCount > 1)
+      return error() << "More than one `stack_frame` local declared in '"
+                     << Op.getHandle() << "' (" << StackFrameCount << ")";
+
+    return mlir::success();
+  }
+
+  mlir::LogicalResult visitGlobalVariableOp(clift::GlobalVariableOp Op) {
+
+    if (auto L = pipeline::locationFromString(ranks::Segment, Op.getHandle())) {
+      const auto &[Key] = L->at(ranks::Segment);
+      auto It = Model.Segments().find(Key);
+      if (It == Model.Segments().end())
+        return error() << "Clift ModuleOp contains a segment with "
+                          "an invalid handle: '"
+                       << Op.getHandle() << "'";
+    } else {
+      return error() << "Clift ModuleOp contains a global variable with "
+                        "an invalid handle: '"
+                     << Op.getHandle() << "'";
+    }
+
+    return mlir::success();
+  }
+
+  const model::Binary &Model;
+};
+
+} // namespace
+
+mlir::LogicalResult clift::verifyAgainstModel(mlir::ModuleOp Module,
+                                              const model::Binary &Model) {
+  return Verifier::visit(Module, Model);
+}

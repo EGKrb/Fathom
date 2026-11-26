@@ -1,0 +1,11 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+add_subdirectory(apply)
+add_subdirectory(diff)
+add_subdirectory(drop-types)
+add_subdirectory(export)
+add_subdirectory(import)
+add_subdirectory(merge)
+add_subdirectory(opt)

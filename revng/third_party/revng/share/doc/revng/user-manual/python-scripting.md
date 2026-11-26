@@ -1,0 +1,111 @@
+# Python scripting
+
+This page describes the rev.ng Python scripting capabilities.
+
+## Creating a project
+
+There are two project classes to use rev.ng from Python: `CLIProject`, which spawns `revng` as a subprocess for each command, and `DaemonProject`, which interacts with [`revng project daemon`](../references/cli/revng-project/daemon.md) over the network using the GraphQL API.
+Apart from this difference, they offer the same programming interface.
+
+First, import the project of choice:
+
+```python
+>>> from revng.project import CLIProject     # for cli
+>>> from revng.project import DaemonProject  # for daemon
+
+>>> project = CLIProject()
+```
+
+You can provide a path to the resume directory (similar to `revng [command] --resume`).
+This is useful if you want to persist changes so you can load the project again in the future:
+
+```python
+>>> resume = "path/to/resume/dir"
+>>> project = CLIProject(resume)
+```
+
+After that, you can import a binary and run the [*initial auto analyses*](../references/pipeline.md#analysis-lists); we have a method that does just that:
+
+```python
+>>> from revng.support import get_example_binary_path
+>>> binary_path = get_example_binary_path()
+>>> project.import_and_analyze(binary_path)
+```
+
+## Producing artifacts
+
+Once you have successfully loaded a binary, you can obtain the available artifacts:
+
+```{python ignoreoutput=3,7,11,14,17}
+# Get artifact through the `project`, this will return a dictionary mapping the
+# Object ID to the data
+>>> project.model.get_artifact("disassemble")
+
+# Pass functions that you want to get artifacts from, the second argument is a
+# `list` so you can pass multiple functions
+>>> project.model.get_artifact("disassemble", [project.model.Functions[0]])
+
+# Get artifact through a `function`, this is the same as above but
+# automatically returns a single element
+>>> project.model.Functions[0].get_artifact("disassemble")
+
+# Short-hand for the above
+>>> project.model.Functions[0].disassemble
+
+# You can also get the artifact for `TypeDefinitions`
+>>> project.model.TypeDefinitions[1].get_artifact("emit-single-type-definition")
+```
+
+You can also `parse` the result with `ptml`:
+
+```{python ignoreoutput=2}
+>>> result = project.model.Functions[0].disassemble
+>>> result.parse()
+```
+
+LLVM modules can be parsed and explored via the `llvmcpy` python module:
+
+```python
+>>> lifted = project.model.get_artifact("lift")["/binary"]
+
+# Use the parsed IR
+>>> for function in lifted.module().iter_functions():
+...     for bb in function.iter_basic_blocks():
+...         for instruction in bb.iter_instructions():
+...             instruction.dump()
+```
+
+## Interacting with the model
+
+In order to access [the model](key-concepts/model.md), use `project.model`:
+
+```{python ignoreoutput=1,2}
+>>> project.model            # Binary
+>>> project.model.Functions  # Functions
+```
+
+Beyond inspecting the model, you can change it.
+For example rename a function:
+
+```python
+>>> project.model.Functions[0].Name = "new_function_name"
+```
+
+After you make a change, you need to invoke the `commit` method in order for the changes to be applied (e.g., to see the new name in an artifact):
+
+```python
+>>> project.model.Functions[0].Name = "new_function_name"
+>>> project.model.commit()
+```
+
+If you want to run a set of predefined analyses, you can run them with:
+
+```{python notest}
+>>> project.model.analyze("initial-auto-analysis")
+```
+
+If you want to run a specific [analysis](../references/analyses.md) instead, you can do that too.
+
+```{python notest}
+>>> project.model.analyze("detect-stack-size")
+```

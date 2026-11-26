@@ -1,0 +1,31 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+Functions:
+  - Name: fn
+    Prototype:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/13950133128659256343-CABIFunctionDefinition"
+
+TypeDefinitions:
+  - Kind: CABIFunctionDefinition
+    ID: 13950133128659256343
+    ABI: SystemV_x86_64
+    ReturnType:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/10614298789832763328-TypedefDefinition"
+    Arguments:
+      - Index: 0
+        Type:
+          Kind: DefinedType
+          Definition: "/TypeDefinitions/10614298789832763328-TypedefDefinition"
+        Name: x
+
+  - Kind: TypedefDefinition
+    ID: 10614298789832763328
+    Name: uint32_t
+    UnderlyingType:
+      Kind: PrimitiveType
+      PrimitiveKind: Number
+      Size: 1 # This is intentional, see the corresponding source file.

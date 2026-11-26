@@ -1,0 +1,266 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+from __future__ import annotations
+
+from collections import defaultdict
+from collections.abc import Buffer
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import AsyncGenerator, Iterable, Mapping
+
+from revng.pypeline import __version__ as version
+from revng.pypeline.container import ContainerID
+from revng.pypeline.model import Model, ModelPathSet
+from revng.pypeline.object import ObjectID
+from revng.pypeline.pipeline import Pipeline
+from revng.pypeline.task.pipe import PipeCustomInvalidation
+from revng.pypeline.utils import Locked
+from revng.pypeline.utils.registry import get_singleton
+
+from .file_provider import FileRequest
+from .storage_provider import ConfigurationId, ContainerLocation, FileStorageEntry
+from .storage_provider import InvalidatedObjects, LockType, ObjectsToInvalidate, PipeDependencies
+from .storage_provider import ProjectID, ProjectMetadata, SavepointID, SetModelResult
+from .storage_provider import StorageProvider, StorageProviderFactory
+from .util import check_kind_structure, compute_hash
+
+
+@dataclass(frozen=True)
+class DependencyEntry:
+    savepoint_start: SavepointID
+    savepoint_end: SavepointID
+    container_id: ContainerID
+    configuration_id: ConfigurationId
+    object_id: ObjectID
+
+
+class InMemoryStorageProviderFactory(StorageProviderFactory):
+    def __init__(self, url: str):
+        assert url == "memory://"
+        self.providers: Locked[dict[ProjectID | None, Locked[InMemoryStorageProvider]]] = Locked({})
+
+    @classmethod
+    def scheme(cls) -> str:
+        return "memory"
+
+    @asynccontextmanager
+    async def get(
+        self,
+        base_directory: Path,
+        pipeline: Pipeline,
+        lock_type: LockType,
+        project_id: ProjectID | None,
+        token: str | None,
+        cache_dir: str | None,
+    ) -> AsyncGenerator[StorageProvider]:
+        async with self.providers() as providers:
+            project_provider: Locked[InMemoryStorageProvider] | None = providers.get(project_id)
+            if project_provider is None:
+                project_provider = Locked(InMemoryStorageProvider())
+                providers[project_id] = project_provider
+
+        # Release the global lock and acquire the project-specific one so other
+        # projects can proceed in parallel
+        async with project_provider() as project_data:
+            yield project_data
+
+    def get_notification_websocket(self) -> str | None:
+        return None
+
+
+class InMemoryStorageProvider(StorageProvider):
+    """A simple in-memory storage provider for testing purposes.
+    This is not thread-safe and should not be used in production.
+    """
+
+    def __init__(self):
+        check_kind_structure()
+        self.model: Model = get_singleton(Model)()  # type: ignore[type-abstract]
+        self.storage: dict[ContainerLocation, dict[ObjectID, bytes]] = {}
+        self.dependencies: dict[str, list[DependencyEntry]] = defaultdict(list)
+        self.last_fetch = datetime.fromtimestamp(0)
+        self.last_object_save = datetime.fromtimestamp(0)
+        self.last_model_save = datetime.fromtimestamp(0)
+        self.files: dict[str, bytes] = {}
+        self.epoch = 0
+        self.custom_dependencies: dict[tuple[int, str], PipeCustomInvalidation] = {}
+
+    def has(
+        self,
+        location: ContainerLocation,
+        keys: Iterable[ObjectID],
+    ) -> Iterable[ObjectID]:
+        if location not in self.storage:
+            return []
+        storage = self.storage[location]
+        return [key for key in keys if key in storage]
+
+    def get(
+        self,
+        location: ContainerLocation,
+        keys: Iterable[ObjectID],
+    ) -> Mapping[ObjectID, bytes]:
+        if location not in self.storage:
+            raise KeyError(f"Savepoint {location} not found in storage.")
+        self.last_fetch = datetime.now()
+        storage = self.storage[location]
+        return {k: storage[k] for k in keys if k in storage}
+
+    def add_objects(
+        self,
+        dependencies: list[PipeDependencies],
+        objects: Mapping[ContainerLocation, Mapping[ObjectID, Buffer]],
+    ) -> None:
+        for dependency in dependencies:
+            for container_name, obj, path in dependency.dependencies:
+                self.dependencies[path].append(
+                    DependencyEntry(
+                        dependency.savepoints_range.start,
+                        dependency.savepoints_range.end,
+                        container_name,
+                        dependency.configuration,
+                        obj,
+                    )
+                )
+            if dependency.has_custom_invalidation():
+                storage = [
+                    [(oid, bytes(d)) for oid, d in entry]
+                    for entry in dependency.custom_invalidation
+                ]
+                self.custom_dependencies[(dependency.pipe_id, dependency.configuration)] = storage
+
+        for location, object_dict in objects.items():
+            self.storage.setdefault(location, {})
+            for key, value in object_dict.items():
+                self.storage[location][key] = bytes(value)
+
+        self.last_object_save = datetime.now()
+
+    def _invalidate(
+        self, invalidation_list: ModelPathSet, additional_objects: list[ObjectsToInvalidate]
+    ) -> InvalidatedObjects:
+        invalidated: InvalidatedObjects = defaultdict(set)
+
+        # Set of entries that will be collected from self.dependencies
+        object_to_delete: set[DependencyEntry] = set()
+        # Keys that exist on self.dependencies that will be deleted
+        paths_to_delete: list[str] = []
+
+        # Append the additional objects to delete
+        for object_set in additional_objects:
+            for object_ in object_set.objects:
+                object_to_delete.add(
+                    DependencyEntry(
+                        object_set.savepoint_range.start,
+                        object_set.savepoint_range.end,
+                        object_set.container_id,
+                        object_set.configuration_id,
+                        object_,
+                    )
+                )
+
+        # Retrieve entries from self.dependencies that match the provided paths
+        for path in invalidation_list:
+            if path in self.dependencies:
+                paths_to_delete.append(path)
+                object_to_delete.update(self.dependencies[path])
+
+        # For each DependencyEntry, find the matching entries in self.storage
+        # TODO: this double loop is very inefficient
+        for entry in object_to_delete:
+            for container_loc, objects in self.storage.items():
+                # For an entry to match, the savepoint must be in the savepoint
+                # range and the configuration_id must match
+                if (
+                    container_loc.savepoint_id < entry.savepoint_start
+                    or container_loc.savepoint_id > entry.savepoint_end
+                    or container_loc.configuration_id != entry.configuration_id
+                ):
+                    continue
+
+                # Check that the object is related (the same object, a parent
+                # or a child) to the invalidated object
+                for object_ in objects:
+                    if entry.object_id.is_related(object_):
+                        invalidated[container_loc].add(object_)
+
+        # Actually delete the data
+        for container_loc, objects_to_delete in invalidated.items():
+            self.storage[container_loc] = {
+                k: v for k, v in self.storage[container_loc].items() if k not in objects_to_delete
+            }
+
+        # Delete the paths that were previously found
+        for path in paths_to_delete:
+            del self.dependencies[path]
+
+        self.last_change = datetime.now()
+        return dict(invalidated)
+
+    def get_epoch(self) -> int:
+        return self.epoch
+
+    def get_model(self) -> tuple[Model, int]:
+        return (self.model.clone(), self.epoch)
+
+    def set_model(
+        self,
+        new_model: Model,
+        changed_paths: ModelPathSet,
+        custom_invalidations: list[ObjectsToInvalidate],
+        model_bytes: bytes | None = None,
+    ) -> SetModelResult:
+        invalidated = self._invalidate(changed_paths, custom_invalidations)
+        if self.model != new_model:
+            self.epoch += 1
+        self.model = new_model.clone()
+        self.last_model_save = datetime.now()
+        self._send_local_invalidation(invalidated, self.epoch)
+        return SetModelResult(self.epoch, invalidated)
+
+    def metadata(self) -> ProjectMetadata:
+        """
+        Fetch metadata about the current project
+        """
+        return ProjectMetadata(
+            version=version,
+            pipeline_description_hash="",
+            last_fetch=self.last_fetch,
+            last_object_save=self.last_object_save,
+            last_model_save=self.last_model_save,
+        )
+
+    def prune_objects(self):
+        """
+        Prunes all the objects (except metadata) from storage
+        """
+        self.storage.clear()
+        self.dependencies.clear()
+
+    def put_files_in_storage(self, files: list[FileStorageEntry]) -> list[str]:
+        result = []
+        for file in files:
+            contents = None
+            if file.contents is not None:
+                contents = file.contents
+            elif file.path is not None:
+                contents = file.path.read_bytes()
+
+            assert contents is not None
+            hash_ = compute_hash(contents)
+            self.files[hash_] = contents
+            result.append(hash_)
+
+        return result
+
+    def get_files_from_storage(self, requests: list[FileRequest]) -> dict[str, bytes]:
+        return {r.hash: self.files[r.hash] for r in requests}
+
+    def get_custom_invalidation_data(
+        self, pipe_id: int, configuration_hash: str
+    ) -> PipeCustomInvalidation:
+        return self.custom_dependencies[(pipe_id, configuration_hash)]

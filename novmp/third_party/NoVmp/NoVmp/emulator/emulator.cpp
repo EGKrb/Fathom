@@ -91,6 +91,7 @@
 	mov     rsp, [rsp+188h]
 	ret
 */
+#if !defined( _M_IX86 )
 static const std::vector<uint8_t, mem::rwx_allocator<uint8_t>> emulator_shellcode = {
 	0x48, 0x89, 0xE0, 0x48, 0x89, 0xCC, 0x48, 0x83, 0xC4, 0x20, 0x48, 0x89, 0x84, 0x24,
 	0x88, 0x01, 0x00, 0x00, 0x48, 0x8D, 0x84, 0x24, 0x78, 0x01, 0x00, 0x00, 0xFF, 0x30,
@@ -129,6 +130,62 @@ void emulator::invoke( const void* routine_pointer )
 	//
 	( ( void( __stdcall* )( emulator* ) )emulator_shellcode.data() )( this );
 }
+#else
+// Fathom, x86 (NoVmp32): the block runs natively in this 32-bit process, on the 32-bit registers of the
+// context and a stack of its own (the user stack of the structure). The context is addressed through ESI
+// only: EBP, the frame pointer of this function, belongs to the block while it runs.
+void emulator::invoke( const void* routine_pointer )
+{
+	__rip = routine_pointer;
+	// volatile: the assembly writes it through ESI, which the optimizer does not see
+	volatile uint32_t ctx[ 11 ] =
+	{
+		( uint32_t ) v_rax, ( uint32_t ) v_rbx, ( uint32_t ) v_rcx, ( uint32_t ) v_rdx,
+		( uint32_t ) v_rsi, ( uint32_t ) v_rdi, ( uint32_t ) v_rbp, ( uint32_t ) v_rflags,
+		( uint32_t ) routine_pointer,
+		( uint32_t ) ( ( uint8_t* ) v_stack + sizeof( v_stack ) - 0x10 ),
+		0
+	};
+	volatile uint32_t* c = ctx;
+	__asm
+	{
+		pushad
+		pushfd
+		mov esi, c
+		mov [ esi + 40 ], esp           // the host's stack
+		mov eax, [ esi + 28 ]
+		mov esp, [ esi + 36 ]           // the block's stack
+		push esi                        // the context
+		push dword ptr [ esi + 32 ]     // the block
+		push eax
+		popfd                           // the block's flags
+		mov eax, [ esi + 0 ]
+		mov ebx, [ esi + 4 ]
+		mov ecx, [ esi + 8 ]
+		mov edx, [ esi + 12 ]
+		mov edi, [ esi + 20 ]
+		mov ebp, [ esi + 24 ]
+		mov esi, [ esi + 16 ]
+		call dword ptr [ esp ]
+		pushfd
+		xchg esi, [ esp + 8 ]           // esi: the context; [esp + 8]: the block's esi
+		mov [ esi + 0 ], eax
+		mov [ esi + 4 ], ebx
+		mov [ esi + 8 ], ecx
+		mov [ esi + 12 ], edx
+		mov [ esi + 20 ], edi
+		mov [ esi + 24 ], ebp
+		pop dword ptr [ esi + 28 ]      // its flags
+		add esp, 4                      // the block's address
+		pop dword ptr [ esi + 16 ]      // its esi
+		mov esp, [ esi + 40 ]
+		popfd
+		popad
+	}
+	v_rax = ctx[ 0 ]; v_rbx = ctx[ 1 ]; v_rcx = ctx[ 2 ]; v_rdx = ctx[ 3 ];
+	v_rsi = ctx[ 4 ]; v_rdi = ctx[ 5 ]; v_rbp = ctx[ 6 ]; v_rflags = ctx[ 7 ];
+}
+#endif
 
 // Resolves the offset<0> where the value is saved at for the given register
 // and the number of bytes<1> it takes.

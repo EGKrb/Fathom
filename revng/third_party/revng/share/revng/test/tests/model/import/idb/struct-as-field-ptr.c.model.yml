@@ -1,0 +1,47 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+TypeDefinitions:
+  - Kind: StructDefinition
+    ID: 12620553074732431538
+    Name: my_struct
+    Fields:
+      - Offset: 0
+        Name: x
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Number
+          Size: 4
+      - Offset: 4
+        Name: "y"
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Number
+          Size: 4
+      - Offset: 8
+        Name: z
+        Type:
+          Kind: PointerType
+          PointerSize: 8
+          PointeeType:
+            Kind: DefinedType
+            Definition: "/TypeDefinitions/2113910595525978593-StructDefinition"
+    Size: 16
+  - Kind: StructDefinition
+    ID: 2113910595525978593
+    Name: second_struct
+    Fields:
+      - Offset: 0
+        Name: a
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Number
+          Size: 4
+      - Offset: 4
+        Name: b
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Number
+          Size: 4
+    Size: 8

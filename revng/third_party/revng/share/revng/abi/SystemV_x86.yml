@@ -1,0 +1,61 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+ABI: SystemV_x86
+
+ArgumentsArePositionBased: false
+OnlyStartDoubleArgumentsFromAnEvenRegister: false
+ArgumentsCanBeSplitBetweenRegistersAndStack: false
+BigArgumentsUsePointersToCopy: false
+NoRegisterArgumentsCanComeAfterStackOnes: false
+AllowPackedTypesInRegisters: false
+CalleeIsResponsibleForStackCleanup: false
+PackStackArguments: false
+TreatAllAggregatesAsPacked: false
+
+FloatingPointArgumentStrategy: Ignored
+FloatingPointReturnValueStrategy: Ignored
+
+StackAlignment: 16
+MinimumStackArgumentSize: 4
+
+MaximumGPRsPerAggregateArgument: 0
+MaximumGPRsPerAggregateReturnValue: 0
+MaximumGPRsPerScalarArgument: 0
+MaximumGPRsPerScalarReturnValue: 2
+
+GeneralPurposeReturnValueRegisters:
+  - eax_x86
+  - edx_x86
+CalleeSavedRegisters:
+  - ebx_x86
+  - ebp_x86
+  - edi_x86
+  - esi_x86
+
+ReturnValueLocationOnStack: true
+ReturnValueLocationIsReturned: true
+
+ScalarTypes:
+  - Kind: Integer
+    Size: 1
+  - Kind: Integer
+    Size: 2
+  - Kind: Integer
+    Size: 4
+  - Kind: Integer
+    Size: 8
+    AlignedAt: 4
+  - Kind: FloatingPoint
+    Size: 4 # IEEE Binary32
+  - Kind: FloatingPoint
+    Size: 8 # IEEE Binary64
+    AlignedAt: 4
+PrimitiveAliases:
+  - Name: size_t
+    Kind: Unsigned
+    Size: 4
+  - Name: ptrdiff_t
+    Kind: Signed
+    Size: 4

@@ -1,0 +1,22 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+TypeDefinitions:
+  - Kind: StructDefinition
+    ID: 10354558065911308391
+    Name: my_struct
+    Fields:
+      - Offset: 0
+        Name: x
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Number
+          Size: 4
+      - Offset: 4
+        Name: "y"
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Number
+          Size: 4
+    Size: 8

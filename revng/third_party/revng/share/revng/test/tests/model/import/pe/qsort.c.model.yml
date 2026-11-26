@@ -1,0 +1,67 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+#
+# NOTE: this file is stripped of any architecture-specific information (things
+#       like ABI, pointer sizes, and so on): it reflects all the _common_
+#       expectations for a specific source file (see revng-qa-side importPE
+#       sources) after being compiled and lifted by a variety of different
+#       msvc compiler versions.
+#
+
+---
+Functions:
+  - Name: cmpfunc
+    Prototype:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/5944255354151483434-CABIFunctionDefinition"
+  - Name: qsort
+    Prototype:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/17913232940792519997-CABIFunctionDefinition"
+TypeDefinitions:
+  - Kind: CABIFunctionDefinition
+    ID: 5944255354151483434
+    ReturnType:
+      Kind: PrimitiveType
+      PrimitiveKind: Signed
+      Size: 4
+    Arguments:
+      - Index: 0
+        Type:
+          Kind: PointerType
+          PointeeType:
+            Kind: PrimitiveType
+            PrimitiveKind: Void
+            IsConst: true
+      - Index: 1
+        Type:
+          Kind: PointerType
+          PointeeType:
+            Kind: PrimitiveType
+            PrimitiveKind: Void
+            IsConst: true
+  - Kind: CABIFunctionDefinition
+    ID: 17913232940792519997
+    Arguments:
+      - Index: 0
+        Type:
+          Kind: PointerType
+          PointeeType:
+            Kind: PrimitiveType
+            PrimitiveKind: Void
+      - Index: 1
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Unsigned
+      - Index: 2
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Unsigned
+      - Index: 3
+        Type:
+          Kind: PointerType
+          PointeeType:
+            Kind: DefinedType
+            Definition: "/TypeDefinitions/5944255354151483434-CABIFunctionDefinition"

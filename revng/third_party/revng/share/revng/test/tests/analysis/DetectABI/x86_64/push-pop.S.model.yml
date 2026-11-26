@@ -1,0 +1,17 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+---
+Functions:
+  - Name: push_pop
+    Prototype:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/1-RawFunctionDefinition"
+TypeDefinitions:
+  - Kind: RawFunctionDefinition
+    ID: 1
+    Arguments:
+      - Location: rax_x86_64
+    ReturnValues:
+      - Location: rdx_x86_64

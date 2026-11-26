@@ -1,0 +1,72 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+commands:
+  #
+  # Perform model serializiation/deserialization roundtrips
+  #
+  - type: revng.python-model-serialization-roundtrip
+    from:
+      - type: revng.analyzed-model
+    command: |-
+      revng model opt -verify "$INPUT/revng.yml"
+        | ./serialize-deserialize.py
+        | revng model opt -verify
+        | revng model diff /dev/stdin "$INPUT/revng.yml" -o /dev/null
+    scripts:
+      serialize-deserialize.py: |-
+        #!/usr/bin/env python3
+
+        import sys
+        from revng.model import Binary
+
+        print(Binary.deserialize(sys.stdin).serialize())
+  - type: revng.typescript-model-serialization-roundtrip
+    from:
+      - type: revng.analyzed-model
+    command: |-
+      revng model opt -verify "$INPUT/revng.yml"
+        | ./serialize-deserialize.js
+        | revng model opt -verify
+        | revng model diff /dev/stdin "$INPUT/revng.yml" -o /dev/null
+    scripts:
+      serialize-deserialize.js: |-
+        #!/usr/bin/env node
+
+        //
+        // This file is distributed under the MIT License. See LICENSE.md for details.
+        //
+
+        "use strict";
+
+        const fs = require("fs");
+        const process = require("process");
+        const model = require("revng-model");
+
+        const file = fs.readFileSync("/dev/stdin", "utf-8");
+        const model_file = model.parseModel(file);
+        fs.writeFileSync("/dev/stdout", model.dumpModel(model_file));
+
+  #
+  # Test revng model diff
+  #
+  - type: revng.test-model-diff
+    from:
+      - type: revng-qa.compiled
+        filter: example-executable-1 and with-debug-info
+      - type: revng-qa.compiled
+        filter: example-executable-2 and with-debug-info
+    command: |-
+      TEMPORARY=$$(temp -d);
+      mkdir "$$TEMPORARY/project1" "$$TEMPORARY/project2";
+
+      revng -C "$$TEMPORARY/project1" project init --overwrite --no-initial-auto-analysis "$INPUT1";
+      revng -C "$$TEMPORARY/project1" project analyze parse-binary -o /dev/null;
+
+      revng -C "$$TEMPORARY/project2" project init --overwrite --no-initial-auto-analysis "$INPUT2";
+      revng -C "$$TEMPORARY/project2" project analyze parse-binary -o /dev/null;
+
+      ( revng model diff "$$TEMPORARY/project1/revng.yml" "$$TEMPORARY/project2/revng.yml" || true )
+        | revng model apply "$$TEMPORARY/project1/revng.yml"
+        | diff -u - "$$TEMPORARY/project2/revng.yml"

@@ -1,0 +1,534 @@
+//
+// This file is distributed under the MIT License. See LICENSE.md for details.
+//
+
+#include <cstdint>
+#include <cstdlib>
+#include <limits>
+#include <optional>
+#include <stdexcept>
+
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/PointerUnion.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallSet.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalValue.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InstIterator.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Verifier.h"
+#include "llvm/Support/NativeFormatting.h"
+
+#include "revng/HelperArgumentsAnalysis/Annotation.h"
+#include "revng/Lift/LibTcg.h"
+#include "revng/Lift/VariableManager.h"
+#include "revng/Support/CommandLine.h"
+#include "revng/Support/Debug.h"
+#include "revng/Support/EmitAbort.h"
+#include "revng/Support/IRBuilder.h"
+#include "revng/Support/IRHelpers.h"
+
+#include "revng/Model/Generated/Early/Architecture.h"
+
+using namespace llvm;
+
+using std::string;
+
+static Logger Log("fix-helpers");
+
+static cl::opt<string> ArchitectureName("fix-helpers-architecture",
+                                        cl::desc("architecture of the helper "
+                                                 "of the input file for "
+                                                 "fix-helpers."),
+                                        cl::cat(MainCategory));
+
+static void setMetadata(VariableManager &Variables,
+                        Function &F,
+                        StringRef MetadataName,
+                        const aua::Annotation::OffsetAndSizeSet &Offsets) {
+  revng_log(Log, "Parsing " << MetadataName << ":");
+  LoggerIndent Indent(Log);
+
+  QuickMetadata QMD(getContext(&F));
+  SmallVector<Metadata *, 2> CSVList;
+
+  // A `DenseSet` iterates in an order that depends on the order it was filled
+  // in, and what fills these is not stable from one run to the next. Sort, so
+  // that the metadata this writes does not depend on either.
+  SmallVector<aua::OffsetAndSize, 8> Sorted(Offsets.begin(), Offsets.end());
+  llvm::sort(Sorted);
+
+  for (auto [Offset, Size] : Sorted) {
+    int32_t RemainingSize = Size;
+    while (RemainingSize != 0) {
+      auto [CSV,
+            OffsetInField] = Variables.getByCPUStateOffsetWithRemainder(Offset);
+
+      if (CSV == nullptr) {
+        revng_log(Log, "Couldn't find CSV for offset " << Offset);
+        break;
+      }
+
+      revng_log(Log, CSV->getName());
+
+      revng_assert(CSV->getParent() == F.getParent());
+
+      auto CSVSize = CSV->getValueType()->getIntegerBitWidth() / 8;
+      CSVList.push_back(QMD.get(CSV->getName()));
+
+      // If necessary, move on to the next field
+      int64_t AvailableSize = CSVSize - OffsetInField;
+      RemainingSize = std::max<int64_t>(0, RemainingSize - AvailableSize);
+      Offset = 0;
+    }
+  }
+
+  if (Offsets.size() > 0) {
+    revng_log(Log,
+              "Identified " << CSVList.size() << " CSVs out of "
+                            << Offsets.size() << " offsets");
+  }
+
+  MDNode *MDAnnotation = QMD.tuple({ QMD.get(0), QMD.tuple(CSVList) });
+  F.setMetadata(MetadataName, MDAnnotation);
+}
+
+static void convertToCSVAnnotation(VariableManager &Variables,
+                                   Function &F,
+                                   const aua::Annotation &Annotation) {
+  revng_log(Log, "Converting CSV to annotations");
+  LoggerIndent Indent(Log);
+  setMetadata(Variables, F, "revng.csvaccess.offsets.load", Annotation.Reads);
+  setMetadata(Variables, F, "revng.csvaccess.offsets.store", Annotation.Writes);
+}
+
+class AccessFixer {
+public:
+  enum AccessType {
+    Read,
+    Write
+  };
+
+private:
+  VariableManager &Variables;
+  Type &IntPtrType;
+  revng::IRBuilder Builder;
+
+public:
+  AccessFixer(Module &M, VariableManager &Variables, Type &IntPtrType) :
+    Variables(Variables),
+    IntPtrType(IntPtrType),
+    Builder(IntPtrType.getContext()) {}
+
+public:
+  void fixMemoryAccess(Instruction &I, const aua::Annotation &Annotation);
+
+  CallInst &emitMessageAtEntry(Function &F, const llvm::Twine &Message) {
+    Builder.SetInsertPointPastAllocas(&F);
+    CallInst &Call = ::emitMessage(Builder, Message);
+    Call.setMetadata("dbg", nullptr);
+    return Call;
+  }
+
+private:
+  template<AccessType Type>
+  void handle(Instruction &I, const aua::Annotation::OffsetAndSizeSet &Targets);
+
+  template<AccessType Type>
+  Value *emit(Instruction &I, uint64_t Offset, uint64_t Size);
+
+  CallInst &emitMessageBefore(Instruction &Before, const llvm::Twine &Message) {
+    Builder.SetInsertPoint(&Before);
+    return ::emitMessage(Builder, Message);
+  }
+
+  std::pair<CallInst &, CallInst &> decomposeMemcpy(llvm::Instruction &I);
+
+  template<AccessType Type>
+  std::pair<Value *, uint64_t> getOffsetAndSize(Instruction &I);
+};
+
+template<>
+Value *AccessFixer::emit<AccessFixer::Write>(Instruction &I,
+                                             uint64_t Offset,
+                                             uint64_t Size) {
+  revng_log(Log, "Handling a write to " << Offset << " of size " << Size);
+
+  if (auto *Store = dyn_cast<StoreInst>(&I)) {
+    Value *ToStore = Store->getValueOperand();
+
+    auto MaybeStore = Variables.storeToCPUStateOffset(Builder,
+                                                      Size,
+                                                      Offset,
+                                                      ToStore);
+    if (MaybeStore) {
+      return *MaybeStore;
+    } else {
+      // storeToCPUStateOffset can fail in case of padding and the like
+      revng_log(Log, "Nothing emitted");
+      return nullptr;
+    }
+  } else if (auto *Call = dyn_cast<CallInst>(&I)) {
+    Variables.memOpAtCPUStateOffset(Builder, Call, Offset, false);
+    return nullptr;
+  } else {
+    revng_abort();
+  }
+}
+
+template<>
+Value *AccessFixer::emit<AccessFixer::Read>(Instruction &I,
+                                            uint64_t Offset,
+                                            uint64_t Size) {
+  revng_log(Log, "Handling a read from " << Offset << " of size " << Size);
+  if (auto *Load = dyn_cast<LoadInst>(&I)) {
+    if (auto *Result = Variables.loadFromCPUStateOffset(Builder,
+                                                        Size,
+                                                        Offset)) {
+      return Result;
+    } else {
+      // loadFromCPUStateOffset can fail in case of padding and the like
+      revng_log(Log, "Nothing emitted");
+      return llvm::UndefValue::get(I.getType());
+    }
+  } else if (auto *Call = dyn_cast<CallInst>(&I)) {
+    Variables.memOpAtCPUStateOffset(Builder, Call, Offset, true);
+    return nullptr;
+
+  } else {
+    revng_abort();
+  }
+}
+
+template<>
+std::pair<Value *, uint64_t>
+AccessFixer::getOffsetAndSize<AccessFixer::Write>(Instruction &I) {
+  uint64_t Size = 0;
+  Value *Address = nullptr;
+  if (auto *Store = dyn_cast<StoreInst>(&I)) {
+    Address = Store->getPointerOperand();
+    Size = Store->getValueOperand()->getType()->getIntegerBitWidth() / 8;
+  } else if (auto *Call = dyn_cast<CallInst>(&I)) {
+    Address = Call->getArgOperand(0);
+    Size = cast<ConstantInt>(Call->getOperand(2))->getLimitedValue();
+  } else {
+    revng_abort();
+  }
+  return { Builder.CreatePtrToInt(Address, &IntPtrType), Size };
+}
+
+template<>
+std::pair<Value *, uint64_t>
+AccessFixer::getOffsetAndSize<AccessFixer::Read>(Instruction &I) {
+  uint64_t Size = 0;
+  Value *Address = nullptr;
+  if (auto *Load = dyn_cast<LoadInst>(&I)) {
+    Address = Load->getPointerOperand();
+    Size = Load->getType()->getIntegerBitWidth() / 8;
+  } else if (auto *Call = dyn_cast<CallInst>(&I)) {
+    Address = Call->getArgOperand(1);
+    Size = cast<ConstantInt>(Call->getOperand(2))->getLimitedValue();
+  } else {
+    revng_abort();
+  }
+  return { Builder.CreatePtrToInt(Address, &IntPtrType), Size };
+}
+
+template<AccessFixer::AccessType Type>
+void AccessFixer::handle(Instruction &I,
+                         const aua::Annotation::OffsetAndSizeSet &Targets) {
+  LLVMContext &Context = getContext(&I);
+  Function *F = I.getFunction();
+
+  Builder.SetInsertPoint(&I);
+  auto [Address, Size] = getOffsetAndSize<Type>(I);
+  auto *AddressType = cast<IntegerType>(Address->getType());
+
+  revng_log(Log,
+            "Handling " << getName(&I) << ", which has " << Targets.size()
+                        << " targets");
+  LoggerIndent Indent(Log);
+
+  // Handle the single-offset situation
+  if (Targets.size() == 1) {
+    Value *Result = emit<Type>(I, Targets.begin()->first, Size);
+    if (Result != nullptr)
+      I.replaceAllUsesWith(Result);
+    return;
+  }
+
+  // There are multiple offsets. We need to emit a switch.
+
+  // Split the block
+  BasicBlock *Before = I.getParent();
+  BasicBlock *After = Before->splitBasicBlock(I.getIterator());
+  Before->getTerminator()->eraseFromParent();
+
+  // Create the default case
+  BasicBlock *DefaultCase = BasicBlock::Create(Context, "", F, After);
+  Builder.SetInsertPoint(DefaultCase);
+  emitAbort(Builder, "Accessing the CPU state at an unexpected offset");
+
+  // Create the switch. We dispatch on the env-relative offset (d - &env)
+  // rather than on the raw runtime address, so the case constants below
+  // read naturally as offsets within the env region.
+  Builder.SetInsertPoint(Before);
+  auto *EnvGlobal = Variables.envGlobal();
+  Value *EnvInt = Builder.CreateLoad(EnvGlobal->getValueType(), EnvGlobal);
+  Value *EnvRelativeAddress = Builder.CreateSub(Address, EnvInt);
+  auto *Switch = Builder.CreateSwitch(EnvRelativeAddress,
+                                      DefaultCase,
+                                      Targets.size());
+  unsigned EnvBaseOffset = Variables.envBaseOffset();
+  PHINode *Phi = nullptr;
+
+  // If the instruction provides a result, we also need to emit a phi
+  bool HasResult = not I.getType()->isVoidTy();
+  if (HasResult)
+    Phi = PHINode::Create(I.getType(), Targets.size(), "", &*After->begin());
+
+  // For each target, create a basic block, add a case to the switch and an
+  // incoming to the phi. Sorted for the same reason the metadata is: a
+  // `DenseSet` iterates in an order that depends on how it was filled, and
+  // the order of the cases this builds would inherit it.
+  SmallVector<aua::OffsetAndSize, 8> SortedTargets(Targets.begin(),
+                                                   Targets.end());
+  llvm::sort(SortedTargets);
+
+  for (auto &&[Offset, Size] : SortedTargets) {
+    BasicBlock *OffsetCase = BasicBlock::Create(Context, "", F, DefaultCase);
+    Builder.SetInsertPoint(OffsetCase);
+    Value *Result = emit<Type>(I, Offset, Size);
+    Builder.CreateBr(After);
+    revng_assert(not OffsetCase->empty());
+
+    Switch->addCase(ConstantInt::get(AddressType, Offset - EnvBaseOffset),
+                    OffsetCase);
+
+    if (HasResult)
+      Phi->addIncoming(Result, OffsetCase);
+  }
+
+  if (HasResult)
+    I.replaceAllUsesWith(Phi);
+}
+
+static void
+setArgumentAlignment(CallBase &Call, unsigned ArgIdx, unsigned Align) {
+  LLVMContext &Context = Call.getContext();
+  AttributeList Attrs = Call.getAttributes();
+
+  auto AlignAttribute = Attribute::get(Context, Attribute::Alignment, Align);
+  AttributeList NewAttrs = Attrs.addParamAttribute(Context,
+                                                   ArgIdx,
+                                                   AlignAttribute);
+
+  Call.setAttributes(NewAttrs);
+}
+
+std::pair<CallInst &, CallInst &>
+AccessFixer::decomposeMemcpy(llvm::Instruction &I) {
+  auto &Call = cast<CallInst>(I);
+  // (Fathom: a memmove too, which ArgumentUsageAnalysis handles as a memcpy,
+  // and which the copy through a temporary storage decomposes as well)
+  revng_assert(Call.getIntrinsicID() == Intrinsic::memcpy
+               or Call.getIntrinsicID() == Intrinsic::memmove);
+  auto *Size = cast<ConstantInt>(Call.getArgOperand(2));
+
+  BasicBlock &Entry = I.getFunction()->getEntryBlock();
+  Builder.SetInsertPoint(&Entry, Entry.begin());
+  auto *UInt8Type = IntegerType::getInt8Ty(IntPtrType.getContext());
+  auto *StorageType = ArrayType::get(UInt8Type, Size->getZExtValue());
+  auto *Storage = Builder.CreateAlloca(StorageType);
+  uint64_t Alignment = Storage->getAlign().value();
+  auto &Read = Call;
+  auto &Write = *cast<CallInst>(Call.clone());
+  Write.insertAfter(&Read);
+
+  Read.setArgOperand(0, Storage);
+  setArgumentAlignment(Read, 0, Alignment);
+
+  Write.setArgOperand(1, Storage);
+  setArgumentAlignment(Write, 1, Alignment);
+
+  return { Read, Write };
+}
+
+void AccessFixer::fixMemoryAccess(Instruction &I,
+                                  const aua::Annotation &Annotation) {
+  revng_log(Log, "Handling memory access " << getName(&I));
+  LoggerIndent Indent(Log);
+
+  revng_assert(not I.isTerminator());
+  auto *Load = dyn_cast<LoadInst>(&I);
+  auto *Store = dyn_cast<StoreInst>(&I);
+  if (Annotation.Escapes) {
+    revng_log(Log, "It escapes, emitting abort.");
+    emitMessageBefore(I, "The CPU state escapes this memory access");
+  } else if (Load != nullptr and Load->getType()->isPointerTy()) {
+    revng_log(Log, "Loading a pointer, emitting abort.");
+    emitMessageBefore(I, "Loading a pointer out of the CPU state");
+  } else if (Store != nullptr
+             and Store->getValueOperand()->getType()->isPointerTy()) {
+    revng_log(Log, "Storing a pointer, emitting abort.");
+    emitMessageBefore(I, "Storing a pointer into the CPU state");
+  } else {
+    revng_log(Log, "It's a memcpy-like.");
+
+    bool IsRead = Annotation.Reads.size() != 0;
+    bool IsWrite = Annotation.Writes.size() != 0;
+
+    if (IsRead and IsWrite) {
+      revng_log(Log, "Decomposing memcpy.");
+      const auto &[Read, Write] = decomposeMemcpy(I);
+      handle<AccessFixer::Read>(Read, Annotation.Reads);
+      handle<AccessFixer::Write>(Write, Annotation.Writes);
+
+      // Read is I and will be erased later
+      Write.eraseFromParent();
+    } else if (IsWrite) {
+      handle<AccessFixer::Write>(I, Annotation.Writes);
+    } else if (IsRead) {
+      handle<AccessFixer::Read>(I, Annotation.Reads);
+    } else {
+      revng_abort();
+    }
+
+    I.eraseFromParent();
+  }
+}
+
+/// Fathom: the helpers built for Windows (x64 ABI) move 128-bit values in the
+/// CPU state as vectors, and long double as x86_fp80, where the rest of this
+/// pass and VariableManager handle integers: such a load or store becomes an
+/// integer one of the same size, with a bitcast (same metadata, so the same
+/// annotation). Other accesses are returned as they are.
+static Instruction *toIntegerAccess(Instruction *I) {
+  auto IntegerTypeFor = [I](Type *T) -> IntegerType * {
+    if (not(T->isVectorTy() or T->isFloatingPointTy())
+        or T->getScalarType()->isPointerTy())
+      return nullptr;
+    const DataLayout &DL = I->getModule()->getDataLayout();
+    return IntegerType::get(I->getContext(), DL.getTypeSizeInBits(T));
+  };
+
+  if (auto *Load = dyn_cast<LoadInst>(I)) {
+    IntegerType *IntType = IntegerTypeFor(Load->getType());
+    if (IntType == nullptr)
+      return I;
+    llvm::IRBuilder<> Builder(Load);
+    LoadInst *NewLoad = Builder.CreateAlignedLoad(IntType,
+                                                  Load->getPointerOperand(),
+                                                  Load->getAlign(),
+                                                  Load->isVolatile());
+    NewLoad->copyMetadata(*Load);
+    Value *Cast = Builder.CreateBitCast(NewLoad, Load->getType());
+    Load->replaceAllUsesWith(Cast);
+    Load->eraseFromParent();
+    return NewLoad;
+  }
+
+  if (auto *Store = dyn_cast<StoreInst>(I)) {
+    Value *Stored = Store->getValueOperand();
+    IntegerType *IntType = IntegerTypeFor(Stored->getType());
+    if (IntType == nullptr)
+      return I;
+    llvm::IRBuilder<> Builder(Store);
+    Value *Cast = Builder.CreateBitCast(Stored, IntType);
+    StoreInst *NewStore = Builder.CreateAlignedStore(Cast,
+                                                     Store->getPointerOperand(),
+                                                     Store->getAlign(),
+                                                     Store->isVolatile());
+    NewStore->copyMetadata(*Store);
+    Store->eraseFromParent();
+    return NewStore;
+  }
+
+  return I;
+}
+
+static void fixHelpers(VariableManager &Variables, Module &Module) {
+  LLVMContext &Context = Module.getContext();
+  auto &DL = Module.getDataLayout();
+  AccessFixer Fixer(Module, Variables, *DL.getIntPtrType(Context));
+
+  for (Function &F : Module) {
+    revng_log(Log, "Handling " << F.getName());
+    LoggerIndent Indent(Log);
+
+    auto Annotation = aua::Annotation::deserialize(F)
+                        .value_or(aua::Annotation());
+
+    // Upgrade { Offset, Size } annotations to reference the CSV for
+    // consumptions of other passes
+    convertToCSVAnnotation(Variables, F, Annotation);
+
+    if (Annotation.Escapes) {
+      revng_log(Log, "CPU state escapes, emitting an abort");
+      Fixer.emitMessageAtEntry(F, "The CPU state escapes this helper");
+    }
+
+    // Go through all instructions and replace memory accesses in env with
+    // accesses to CSVs
+    SmallVector<Instruction *> Annotated;
+    for (Instruction &I : instructions(F))
+      if (aua::Annotation::isAnnotated(I))
+        Annotated.push_back(&I);
+
+    // (Fathom: accesses of a vector or floating point type made integer ones)
+    for (Instruction *&I : Annotated)
+      I = toIntegerAccess(I);
+
+    for (Instruction *I : Annotated) {
+      Fixer.fixMemoryAccess(*I, *aua::Annotation::deserialize(*I));
+    }
+  }
+
+  revng::verify(&Module);
+}
+
+class FixHelpers : public llvm::ModulePass {
+public:
+  static char ID;
+
+public:
+  FixHelpers() : llvm::ModulePass(ID) {}
+
+  void getAnalysisUsage(llvm::AnalysisUsage &AU) const override {}
+
+  bool runOnModule(llvm::Module &M) override {
+    auto Architecture = model::Architecture::fromQEMUName(ArchitectureName);
+    revng_assert(Architecture != model::Architecture::Invalid);
+    auto TheLibTcg = LibTcg::get(Architecture);
+
+    // TODO: fix TargetIsLittleEndian once we support non-x86-64 targets
+    VariableManager Variables(M,
+                              /* TargetIsLittleEndian */ true,
+                              TheLibTcg.archInfo().env_offset,
+                              TheLibTcg.envPointer(),
+                              TheLibTcg.globalNames());
+
+    fixHelpers(Variables, M);
+
+    // Set a named metadata node specifying the qemu architecture. This will be
+    // needed in (partially) stripped modules to get another module of the same
+    // "family" with more data.
+    llvm::LLVMContext &Context = M.getContext();
+    auto *ArchMD = M.getOrInsertNamedMetadata(QemuArchitectureMD);
+    MDNode *Node = MDNode::get(Context,
+                               MDString::get(Context, ArchitectureName));
+    ArchMD->addOperand(Node);
+
+    return true;
+  }
+};
+
+char FixHelpers::ID = 0;
+using Register = RegisterPass<FixHelpers>;
+static Register X("fix-helpers", "Fix helper functions", true, true);

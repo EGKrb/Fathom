@@ -1,0 +1,32 @@
+#
+# This file is distributed under the MIT LIcense. See LICENSE.md for details.
+#
+
+---
+Functions:
+  - Prototype:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/44520348750923847-CABIFunctionDefinition"
+ImportedDynamicFunctions:
+  - Prototype:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/44520348750923847-CABIFunctionDefinition"
+TypeDefinitions:
+  - Kind: CABIFunctionDefinition
+    ID: 44520348750923847
+    ABI: SystemV_x86_64
+    ReturnType:
+      Kind: PrimitiveType
+      PrimitiveKind: Signed
+      Size: 4
+    Arguments:
+      - Index: 0
+        Type:
+          Kind: PointerType
+          PointerSize: 8
+          PointeeType:
+            Kind: PrimitiveType
+            IsConst: true
+            PrimitiveKind: Signed
+            Size: 1
+        Name: str

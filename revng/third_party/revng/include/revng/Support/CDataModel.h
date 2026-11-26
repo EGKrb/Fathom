@@ -1,0 +1,207 @@
+#pragma once
+
+//
+// This file is distributed under the MIT License. See LICENSE.md for details.
+//
+
+#include <bit>
+#include <ranges>
+
+#include "llvm/ADT/Hashing.h"
+#include "llvm/ADT/StringRef.h"
+
+#include "revng/Support/Debug.h"
+
+enum class CStandardType : uint8_t {
+  Char,
+  Short,
+  Int,
+  Long,
+  LongLong,
+
+  Float,
+  Double,
+
+  // Because we do not have support for any floating point types except for 4-
+  // and 8-byte ones, this is equivalent to `Double`.
+  //
+  // Note that this will likely change in the future.
+  LongDouble,
+
+  Count
+};
+
+inline constexpr llvm::StringRef CStandardTypeName[] = {
+  "char", "short", "int", "long", "long long", "float", "double", "long double",
+};
+
+[[nodiscard]] inline constexpr bool isIntegerType(CStandardType T) {
+  return CStandardType::Char <= T and T <= CStandardType::LongLong;
+}
+
+[[nodiscard]] inline constexpr bool isFloatingPointType(CStandardType T) {
+  return CStandardType::Float <= T and T <= CStandardType::LongDouble;
+}
+
+[[nodiscard]] inline std::optional<CStandardType>
+findCStandardType(llvm::StringRef Name) {
+  auto B = std::begin(CStandardTypeName);
+  auto E = std::end(CStandardTypeName);
+
+  auto I = std::find(B, E, Name);
+  if (I != E)
+    return static_cast<CStandardType>(I - B);
+
+  return std::nullopt;
+}
+
+class CDataModel {
+public:
+  uint8_t PointerSize = 0;
+  uint8_t StandardTypeSize[static_cast<uint8_t>(CStandardType::Count)] = {};
+
+  // Mask of supported extended integer sizes.
+  uint16_t ExtendedIntegerSizeMask = 0;
+
+  /// Returns the default data model for a given pointer size.
+  ///
+  /// The default data model is:
+  /// * char .......... 1
+  /// * short ......... 2
+  /// * int ........... 2 if pointer size is less than or equal to 2, or
+  ///                   4 otherwise
+  /// * long .......... 4 if pointer size is less than or equal to 4, or
+  ///                   8 otherwise
+  /// * long long ..... 8
+  /// * float ......... 4
+  /// * double ........ 8
+  /// * long double ... 8
+  [[nodiscard]] static CDataModel getDefaultDataModel(uint8_t PointerSize);
+
+  [[nodiscard]] unsigned getPointerSize() const { return PointerSize; };
+
+  [[nodiscard]] uint8_t &getStandardTypeSize(CStandardType T) {
+    return StandardTypeSize[static_cast<uint8_t>(T)];
+  }
+
+  [[nodiscard]] const uint8_t &getStandardTypeSize(CStandardType T) const {
+    return StandardTypeSize[static_cast<uint8_t>(T)];
+  }
+
+  void setStandardTypeSize(CStandardType T, uint8_t Size) & {
+    getStandardTypeSize(T) = Size;
+  }
+
+  [[nodiscard]] unsigned getCharSize() const {
+    return getStandardTypeSize(CStandardType::Char);
+  }
+
+  [[nodiscard]] unsigned getShortSize() const {
+    return getStandardTypeSize(CStandardType::Short);
+  }
+
+  [[nodiscard]] unsigned getIntSize() const {
+    return getStandardTypeSize(CStandardType::Int);
+  }
+
+  [[nodiscard]] unsigned getLongSize() const {
+    return getStandardTypeSize(CStandardType::Long);
+  }
+
+  [[nodiscard]] unsigned getLongLongSize() const {
+    return getStandardTypeSize(CStandardType::LongLong);
+  }
+
+  [[nodiscard]] unsigned getFloatSize() const {
+    return getStandardTypeSize(CStandardType::Float);
+  }
+
+  [[nodiscard]] unsigned getDoubleSize() const {
+    return getStandardTypeSize(CStandardType::Double);
+  }
+
+  [[nodiscard]] unsigned getLongDoubleSize() const {
+    return getStandardTypeSize(CStandardType::LongDouble);
+  }
+
+  /// Returns the (inclusive) range of standard integer types matching the
+  /// specified size, or nullopt if no such integer types are available.
+  [[nodiscard]] std::optional<std::pair<CStandardType, CStandardType>>
+  getStandardIntegerRange(uint8_t Size) const {
+    CStandardType Min = CStandardType::Char;
+    while (Min <= CStandardType::LongLong and getStandardTypeSize(Min) < Size)
+      Min = next(Min);
+
+    if (Min > CStandardType::LongLong)
+      return std::nullopt;
+
+    CStandardType Max = Min;
+    while (Max < CStandardType::LongLong
+           and getStandardTypeSize(next(Max)) <= Size)
+      Max = next(Max);
+
+    return std::pair<CStandardType, CStandardType>(Min, Max);
+  }
+
+  /// Returns the (inclusive) range of standard floating point types matching
+  /// the specified size, or nullopt if no such floating point types are
+  /// available.
+  [[nodiscard]] std::optional<std::pair<CStandardType, CStandardType>>
+  getStandardFloatingPointRange(uint8_t Size) const {
+    CStandardType Min = CStandardType::Float;
+    while (Min <= CStandardType::LongDouble and getStandardTypeSize(Min) < Size)
+      Min = next(Min);
+
+    if (Min > CStandardType::LongDouble)
+      return std::nullopt;
+
+    CStandardType Max = Min;
+    while (Max < CStandardType::LongDouble
+           and getStandardTypeSize(next(Max)) <= Size)
+      Max = next(Max);
+
+    return std::pair<CStandardType, CStandardType>(Min, Max);
+  }
+
+  [[nodiscard]] unsigned getStandardIntegerSizeMask() const {
+    return getCharSize() | getShortSize() | getIntSize() | getLongSize()
+           | getLongLongSize();
+  }
+
+  [[nodiscard]] unsigned getSupportedIntegerSizeMask() const {
+    return getStandardIntegerSizeMask() | ExtendedIntegerSizeMask;
+  }
+
+  /// \pre \p Size is a power of two.
+  [[nodiscard]] bool isSupportedIntegerSize(unsigned Size) const {
+    revng_assert(std::has_single_bit(Size));
+    return (getSupportedIntegerSizeMask() & Size) != 0;
+  }
+
+  [[nodiscard]] bool isSupportedFloatingPointSize(unsigned Size) const {
+    return Size == getFloatSize() or Size == getDoubleSize()
+           or Size == getLongDoubleSize();
+  }
+
+  [[nodiscard]] bool verify() const;
+  void dump() const debug_function;
+
+  [[nodiscard]] friend size_t hash_value(const CDataModel &DM) {
+    size_t HashCode = llvm::hash_code(DM.PointerSize);
+
+    for (int I = 0; I < static_cast<int>(CStandardType::Count); ++I) {
+      HashCode = llvm::hash_combine(HashCode,
+                                    llvm::hash_code(DM.StandardTypeSize[I]));
+    }
+
+    return HashCode;
+  }
+
+  [[nodiscard]] friend bool operator==(const CDataModel &,
+                                       const CDataModel &) = default;
+
+private:
+  static CStandardType next(CStandardType T) {
+    return static_cast<CStandardType>(static_cast<uint8_t>(T) + 1);
+  }
+};

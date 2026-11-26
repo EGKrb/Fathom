@@ -1,0 +1,87 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+ABI: SystemV_x86_64
+
+ArgumentsArePositionBased: false
+OnlyStartDoubleArgumentsFromAnEvenRegister: false
+ArgumentsCanBeSplitBetweenRegistersAndStack: false
+BigArgumentsUsePointersToCopy: false
+NoRegisterArgumentsCanComeAfterStackOnes: false
+AllowPackedTypesInRegisters: false
+CalleeIsResponsibleForStackCleanup: false
+PackStackArguments: false
+TreatAllAggregatesAsPacked: false
+
+FloatingPointArgumentStrategy: Ignored
+FloatingPointReturnValueStrategy: Ignored
+
+StackAlignment: 16
+MinimumStackArgumentSize: 8
+
+# \note: if an aggregate argument contains SSE-fields, this doesn't apply.
+MaximumGPRsPerAggregateArgument: 2
+MaximumGPRsPerAggregateReturnValue: 2
+MaximumGPRsPerScalarArgument: 8
+MaximumGPRsPerScalarReturnValue: 2
+
+GeneralPurposeArgumentRegisters:
+  - rdi_x86_64
+  - rsi_x86_64
+  - rdx_x86_64
+  - rcx_x86_64
+  - r8_x86_64
+  - r9_x86_64
+GeneralPurposeReturnValueRegisters:
+  - rax_x86_64
+  - rdx_x86_64
+FloatArgumentRegisters:
+  - zmm0_x86_64
+  - zmm1_x86_64
+  - zmm2_x86_64
+  - zmm3_x86_64
+  - zmm4_x86_64
+  - zmm5_x86_64
+  - zmm6_x86_64
+  - zmm7_x86_64
+FloatReturnValueRegisters:
+  - zmm0_x86_64
+  - zmm1_x86_64
+CalleeSavedRegisters:
+  - rbx_x86_64
+  - rbp_x86_64
+  - r12_x86_64
+  - r13_x86_64
+  - r14_x86_64
+  - r15_x86_64
+
+ReturnValueLocationRegister: rdi_x86_64
+ReturnValueLocationIsReturned: true
+
+ScalarTypes:
+  - Kind: Integer
+    Size: 1
+  - Kind: Integer
+    Size: 2
+  - Kind: Integer
+    Size: 4
+  - Kind: Integer
+    Size: 8
+  - Kind: Integer
+    Size: 16
+  - Kind: Integer
+    Size: 32 # `ymm` register-sized generic
+  - Kind: Integer
+    Size: 64 # `zmm` register-sized generic
+  - Kind: FloatingPoint
+    Size: 4 # IEEE Binary32
+  - Kind: FloatingPoint
+    Size: 8 # IEEE Binary64
+PrimitiveAliases:
+  - Name: size_t
+    Kind: Unsigned
+    Size: 8
+  - Name: ptrdiff_t
+    Kind: Signed
+    Size: 8

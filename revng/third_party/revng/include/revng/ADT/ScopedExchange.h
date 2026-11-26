@@ -1,0 +1,36 @@
+#pragma once
+
+//
+// This file is distributed under the MIT License. See LICENSE.md for details.
+//
+
+#include <concepts>
+#include <memory>
+#include <utility>
+
+/// Temporarily assigns a new value over the specified object for the duration
+/// of the lifetime of the ScopedExchange object. The old value is first moved
+/// out and upon destruction is once again move-assigned over the object.
+template<typename T>
+class ScopedExchange {
+public:
+  template<std::convertible_to<T> NewValueT>
+  explicit ScopedExchange(T &Object, NewValueT &&NewValue) :
+    Object(std::addressof(Object)), OldValue(std::move(Object)) {
+    Object = std::forward<NewValueT>(NewValue);
+  }
+
+  ScopedExchange(const ScopedExchange &) = delete;
+  ScopedExchange &operator=(const ScopedExchange &) = delete;
+
+  ~ScopedExchange() {
+    if (Object != nullptr)
+      *Object = std::move(OldValue);
+  }
+
+  void commit() { Object = nullptr; }
+
+private:
+  T *Object;
+  T OldValue;
+};

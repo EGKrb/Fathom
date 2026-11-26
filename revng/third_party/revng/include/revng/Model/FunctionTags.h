@@ -1,0 +1,255 @@
+#pragma once
+
+//
+// This file is distributed under the MIT License. See LICENSE.md for details.
+//
+
+#include "revng/Support/FunctionCallMarker.h"
+#include "revng/Support/IRBuilder.h"
+#include "revng/Support/IRHelperRegistry.h"
+#include "revng/Support/OpaqueFunctionsPool.h"
+
+/// Extract the key of a model::Segment stored as a metadata.
+MetaAddress extractSegmentKeyFromMetadata(const llvm::Function &F);
+
+namespace FunctionTags {
+
+extern Tag QEMU;
+extern Tag ABIEnforced;
+extern Tag CSVsPromoted;
+extern Tag Exceptional;
+extern Tag StructInitializer;
+extern Tag OpaqueCSVValue;
+extern Tag FunctionDispatcher;
+extern Tag Root;
+extern Tag IsolatedRoot;
+extern Tag CSVsAsArgumentsWrapper;
+extern Tag Marker;
+extern Tag DynamicFunction;
+extern Tag ClobbererFunction;
+extern Tag WriterFunction;
+extern Tag ReaderFunction;
+extern Tag OpaqueReturnAddressFunction;
+extern Tag CSV;
+inline const char *UniqueIDMDName = "revng.unique_id";
+extern Tag ScopeCloserMarker;
+extern Tag GotoBlockMarker;
+
+/// This struct can be used as a key of an OpaqueFunctionsPool where both
+/// the return type and one of the arguments are needed to identify a function
+/// in the pool.
+struct TypePair {
+  llvm::Type *RetType;
+  llvm::Type *ArgType;
+
+  bool operator<(const TypePair &Rhs) const {
+    return RetType < Rhs.RetType
+           or (RetType == Rhs.RetType and ArgType < Rhs.ArgType);
+  }
+};
+
+extern FunctionPoolTag<TypePair> OpaqueExtractValue;
+extern FunctionPoolTag<llvm::Type *> Parentheses;
+extern Tag SegmentGlobal;
+/// Functions that must survive function isolation: MinimalModuleCloner
+/// preserves them (and the ones they call) instead of purging them.
+extern Tag KeepPostIsolation;
+
+/// Key of the segment-global-getter pool: a segment's start address plus its
+/// virtual size. The virtual size is *not* part of the segment's model key, but
+/// it is part of the *pool* key so that the factory can size the segment's
+/// global variable (`[VirtualSize x i8]`) when a new getter is instantiated. A
+/// request for an already-instantiated start address but a different virtual
+/// size therefore misses and aborts in `getOrCreateGlobal` on the type
+/// mismatch, rather than silently reusing a differently-sized getter.
+using SegmentRefPoolKey = std::pair<MetaAddress, uint64_t>;
+extern FunctionPoolTag<SegmentRefPoolKey> SegmentGlobalGetter;
+extern Tag LiftingArtifactsRemoved;
+extern Tag StackPointerPromoted;
+extern Tag StackAccessesSegregated;
+extern Tag Decompiled;
+extern Tag StackOffsetMarker;
+extern Tag BinaryOperationOverflows;
+extern Tag Comment;
+
+} // namespace FunctionTags
+
+inline bool isRootOrLifted(const llvm::Function *F) {
+  auto Tags = FunctionTags::TagsSet::from(F);
+  return Tags.contains(FunctionTags::Root)
+         or Tags.contains(FunctionTags::Isolated);
+}
+
+inline const llvm::CallInst *getCallToHelper(const llvm::Instruction *I) {
+  revng_assert(I != nullptr);
+  const llvm::Function *Callee = getCallee(I);
+  if (Callee != nullptr && FunctionTags::Helper.isTagOf(Callee))
+    return llvm::cast<llvm::CallInst>(I);
+  else
+    return nullptr;
+}
+
+inline llvm::CallInst *getCallToHelper(llvm::Instruction *I) {
+  revng_assert(I != nullptr);
+  const llvm::Function *Callee = getCallee(I);
+  if (Callee != nullptr && FunctionTags::Helper.isTagOf(Callee))
+    return llvm::cast<llvm::CallInst>(I);
+  else
+    return nullptr;
+}
+
+/// Is \p I a call to an helper function?
+inline bool isCallToHelper(const llvm::Instruction *I) {
+  return getCallToHelper(I) != nullptr;
+}
+
+std::optional<CSVsUsage>
+tryGetCSVUsedByHelperCall(const llvm::Instruction *Call);
+
+inline CSVsUsage getCSVUsedByHelperCall(llvm::Instruction *Call) {
+  return tryGetCSVUsedByHelperCall(Call).value();
+}
+
+/// Checks if \p I is a marker
+///
+/// A marker a function call to an empty function acting as meta-information,
+/// for example the `function_call` marker.
+inline bool isMarker(const llvm::Instruction *I) {
+  if (auto *Callee = getCallee(I))
+    return FunctionTags::Marker.isTagOf(Callee);
+
+  return false;
+}
+
+inline llvm::Instruction *nextNonMarker(llvm::Instruction *I) {
+  auto It = I->getIterator();
+  auto End = I->getParent()->end();
+  while (++It != End) {
+    if (not isMarker(&*It))
+      return &*It;
+  }
+
+  return nullptr;
+}
+
+inline llvm::CallInst *getMarker(llvm::Instruction *T, llvm::Function *Marker) {
+  revng_assert(T && T->isTerminator());
+  llvm::Instruction *Previous = getPrevious(T);
+  while (Previous != nullptr
+         && (isMarker(Previous) || isCallTo(Previous, "abort"))) {
+    if (auto *Call = getCallTo(Previous, Marker))
+      return Call;
+
+    Previous = getPrevious(Previous);
+  }
+
+  return nullptr;
+}
+
+template<typename Argument>
+inline llvm::CallInst *
+getMarker(llvm::Instruction *I, const IRHelper<Argument> &Marker) {
+  return getMarker(I, functionOrNull(Marker.get(*getModule(I))));
+}
+
+template<typename Argument>
+inline llvm::CallInst *
+getMarker(llvm::BasicBlock *BB, const IRHelper<Argument> &Marker) {
+  return getMarker(BB->getTerminator(), Marker);
+}
+
+inline llvm::CallInst *getMarker(llvm::BasicBlock *BB, llvm::Function *Marker) {
+  return getMarker(BB->getTerminator(), Marker);
+}
+
+template<typename Argument>
+inline bool hasMarker(llvm::Instruction *T, const IRHelper<Argument> &Marker) {
+  return getMarker(T, Marker);
+}
+
+template<typename Argument>
+inline bool hasMarker(llvm::BasicBlock *BB, const IRHelper<Argument> &Marker) {
+  return getMarker(BB->getTerminator(), Marker);
+}
+
+inline bool hasMarker(llvm::Instruction *T, llvm::Function *Marker) {
+  return getMarker(T, Marker);
+}
+
+inline bool hasMarker(llvm::BasicBlock *BB, llvm::Function *Marker) {
+  return getMarker(BB->getTerminator(), Marker);
+}
+
+/// Return the callee basic block given a function_call marker.
+inline llvm::BasicBlock *getFunctionCallCallee(llvm::Instruction *T) {
+  if (auto *Call = getMarker(T, FunctionCallMarker)) {
+    IRHelperCall<FunctionCallArgument> Marker(Call);
+    auto *Argument = Marker.getArgument(FunctionCallArgument::Callee);
+    if (auto *Callee = llvm::dyn_cast<llvm::BlockAddress>(Argument))
+      return Callee->getBasicBlock();
+  }
+
+  return nullptr;
+}
+
+inline llvm::BasicBlock *getFunctionCallCallee(llvm::BasicBlock *BB) {
+  return getFunctionCallCallee(BB->getTerminator());
+}
+
+/// Return the fall-through basic block given a function_call marker.
+inline llvm::BasicBlock *getFallthrough(llvm::Instruction *T) {
+  if (auto *Call = getMarker(T, FunctionCallMarker)) {
+    IRHelperCall<FunctionCallArgument> Marker(Call);
+    auto *Argument = Marker.getArgument(FunctionCallArgument::Fallthrough);
+    return llvm::cast<llvm::BlockAddress>(Argument)->getBasicBlock();
+  }
+
+  return nullptr;
+}
+
+inline llvm::BasicBlock *getFallthrough(llvm::BasicBlock *BB) {
+  return getFallthrough(BB->getTerminator());
+}
+
+/// Return true if \p T is has a fallthrough basic block.
+inline bool isFallthrough(llvm::Instruction *T) {
+  return getFallthrough(T) != nullptr;
+}
+
+inline bool isFallthrough(llvm::BasicBlock *BB) {
+  return isFallthrough(BB->getTerminator());
+}
+
+llvm::SmallVector<llvm::SmallPtrSet<llvm::CallInst *, 2>, 2>
+getExtractedValuesFromInstruction(llvm::Instruction *);
+
+llvm::SmallVector<llvm::SmallPtrSet<const llvm::CallInst *, 2>, 2>
+getExtractedValuesFromInstruction(const llvm::Instruction *);
+
+/// Set the key of a model::Segment stored as a metadata.
+void setSegmentKeyMetadata(llvm::Function &SegmentRefFunction, MetaAddress Key);
+
+/// Returns true if \F has an attached metadata representing a segment key.
+bool hasSegmentKeyMetadata(const llvm::Function &F);
+
+inline MetaAddress getMetaAddressOfIsolatedFunction(const llvm::Function &F) {
+  revng_assert(FunctionTags::Isolated.isTagOf(&F));
+  return getMetaAddressMetadata(&F, FunctionEntryMDName);
+}
+
+/// Derive the function type of the corresponding OpaqueExtractValue() function
+/// from an ExtractValue instruction. OpaqueExtractValues wrap an
+/// ExtractValue to prevent it from being optimized out, so the return type and
+/// arguments are the same as the instruction being wrapped.
+llvm::FunctionType *getOpaqueEVFunctionType(llvm::ExtractValueInst *Extract);
+
+//
+// {is,get}CallToIsolatedFunction
+//
+const llvm::CallInst *getCallToIsolatedFunction(const llvm::Value *V);
+
+llvm::CallInst *getCallToIsolatedFunction(llvm::Value *V);
+
+inline bool isCallToIsolatedFunction(const llvm::Value *V) {
+  return getCallToIsolatedFunction(V) != nullptr;
+}

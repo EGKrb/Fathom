@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+# This script prints some information about an executable's sections to stdout,
+# depending on the command line options passed:
+# * With --text-size: the program outputs the size of the `.text` segment (or
+#   equivalent) as an integer (in bytes)
+# * Without --text-size: a JSON is returned containing information about all
+#   sections
+
+import argparse
+import json
+import sys
+from subprocess import DEVNULL, PIPE, run
+
+import yaml
+
+
+def _set_or_add(num1: int | None, num2: int):
+    return num2 if num1 is None else num1 + num2
+
+
+def _flag_overlap(flag_set: dict, flags: frozenset[str]):
+    new_flags = {f["Name"] for f in flag_set}
+    return bool(new_flags & flags)
+
+
+def _in_ranges(start: int, size: int, ranges: list[tuple[int, int]]):
+    return any(start >= r[0] and (start + size) <= r[1] for r in ranges)
+
+
+def compute_executable_sections_elf(data: dict):
+    executable_ranges: list[tuple[int, int]] = []
+    for segment in data["ProgramHeaders"]:
+        if segment["Type"]["Value"] == "PT_LOAD" and _flag_overlap(
+            segment["Flags"]["Flags"], frozenset(("PF_X",))
+        ):
+            start = segment["VirtualAddress"]
+            size = segment["MemSize"]
+            executable_ranges.append((start, start + size))
+
+    size = None
+    for section in data["Sections"]:
+        if _in_ranges(section["Address"], section["Size"], executable_ranges) and _flag_overlap(
+            section["Flags"]["Flags"], frozenset(("SHF_ALLOC", "SHF_EXECINSTR"))
+        ):
+            size = _set_or_add(size, section["Size"])
+    return size
+
+
+def compute_executable_sections_macho(data: dict):
+    executable_segments: set[str] = {
+        segment["Name"]
+        for segment in data["Segments"]
+        if segment["Cmd"] in ("LC_SEGMENT", "LC_SEGMENT_64") and segment["initprot"][2] == "x"
+    }
+
+    size = None
+    for section in data["Sections"]:
+        if section["Segment"]["Value"] in executable_segments and _flag_overlap(
+            section["Attributes"]["Flags"], frozenset(("SomeInstructions",))
+        ):
+            size = _set_or_add(size, section["Size"])
+    return size
+
+
+def compute_executable_sections_pe(data: dict):
+    size = None
+    executable_flags = frozenset(("IMAGE_SCN_CNT_CODE", "IMAGE_SCN_MEM_EXECUTE"))
+    for section in data["Sections"]:
+        if _flag_overlap(section["Characteristics"]["Flags"], executable_flags):
+            size = _set_or_add(size, section["RawDataSize"])
+    return size
+
+
+def _get_text_size(data: dict) -> int:
+    format_: str = data["Format"]
+    if format_.startswith("elf"):
+        res = compute_executable_sections_elf(data)
+    elif format_.startswith("Mach-O"):
+        res = compute_executable_sections_macho(data)
+    elif format_.startswith("COFF"):
+        res = compute_executable_sections_pe(data)
+    else:
+        raise ValueError(f"Invalid format: {format_}")
+
+    return res if res is not None else -1
+
+
+def get_text_size(data: list | dict) -> int:
+    if isinstance(data, dict):
+        return _get_text_size(data)
+    sizes = [_get_text_size(e) for e in data]
+    if all(e == -1 for e in sizes):
+        return -1
+    return sum(e for e in sizes if e != -1)
+
+
+def _normalize_nonelf_output(data: list):
+    results = []
+    result: dict = {}
+    for elem in data:
+        assert isinstance(elem, dict)
+        assert len(elem) == 1
+        if "File" in elem:
+            # Start of a new "file"
+            result = {}
+            results.append(result)
+        if "Sections" in elem:
+            result["Sections"] = []
+            for section in elem["Sections"]:
+                result["Sections"].append(section["Section"])
+        elif "Segment" in elem:
+            if "Segments" not in result:
+                result["Segments"] = []
+            result["Segments"].append(elem["Segment"])
+        else:
+            result.update(elem)
+
+    if len(results) == 1:
+        return results[0]
+    else:
+        return results
+
+
+def readobj(filepath: str):
+    proc = run(
+        [
+            "llvm-readobj",
+            "--elf-output-style=JSON",
+            "--sections",
+            "--segments",
+            "--macho-segment",
+            filepath,
+        ],
+        stdout=PIPE,
+        stderr=DEVNULL,
+        check=True,
+        text=True,
+    )
+    data = yaml.safe_load(proc.stdout)
+
+    if len(data) == 1:
+        # ELF output
+        result = dict(data[0]["FileSummary"])
+        result["Sections"] = []
+        for section in data[0]["Sections"]:
+            result["Sections"].append(section["Section"])
+        result["ProgramHeaders"] = []
+        for segment in data[0]["ProgramHeaders"]:
+            result["ProgramHeaders"].append(segment["ProgramHeader"])
+    else:
+        return _normalize_nonelf_output(data)
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--text-size", action="store_true", help="Output the size of the .text section"
+    )
+    parser.add_argument("input", help="Input file")
+    args = parser.parse_args()
+
+    readobj_data = readobj(args.input)
+    if args.text_size:
+        print(get_text_size(readobj_data))
+    else:
+        json.dump(readobj_data, sys.stdout)
+
+
+if __name__ == "__main__":
+    main()

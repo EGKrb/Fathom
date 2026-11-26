@@ -1,0 +1,226 @@
+#pragma once
+
+//
+// This file is distributed under the MIT License. See LICENSE.md for details.
+//
+
+#include "limits.h"
+#include "stdbool.h"
+#include "stddef.h"
+#include "stdint.h"
+
+// NOTE: a portable definition of static_assert is provided, but whether the
+//       single argument form is valid is implementation-defined. For this
+//       reason, the two argument form must always be used where the standard
+//       version of the target implementation is not known.
+
+#if __STDC_VERSION__ >= 201112L
+#if __STDC_VERSION__ < 202311L
+#define static_assert _Static_assert
+#endif
+#else
+#define static_assert(condition, ...) \
+  typedef char static_assert_typedef[(condition) ? 1 : 0]
+#endif
+
+static_assert(CHAR_MIN == SCHAR_MIN, "CHAR_MIN != SCHAR_MIN");
+static_assert(CHAR_MAX == SCHAR_MAX, "CHAR_MAX != SCHAR_MAX");
+static_assert(CHAR_MIN == INT8_MIN, "CHAR_MIN != INT8_MIN");
+static_assert(CHAR_MAX == INT8_MAX, "CHAR_MAX != INT8_MAX");
+
+//
+// Signed and unsigned
+//
+
+// Widths from 8 to 64 are defined by stdint.h.
+
+#ifdef __SIZEOF_INT128__
+typedef signed __int128 int128_t;
+typedef unsigned __int128 uint128_t;
+#elif defined(__BITINT_MAXWIDTH__) && __BITINT_MAXWIDTH__ >= 128
+typedef signed _BitInt(128) int128_t;
+typedef unsigned _BitInt(128) uint128_t;
+#else
+typedef struct {
+  char data[16];
+} int128_t, uint128_t;
+#endif
+
+#if defined(__BITINT_MAXWIDTH__) && __BITINT_MAXWIDTH__ >= 256
+typedef signed _BitInt(256) int256_t;
+typedef unsigned _BitInt(256) uint256_t;
+#else
+typedef struct {
+  char data[32];
+} int256_t, uint256_t;
+#endif
+
+#if defined(__BITINT_MAXWIDTH__) && __BITINT_MAXWIDTH__ >= 512
+typedef signed _BitInt(512) int512_t;
+typedef unsigned _BitInt(512) uint512_t;
+#else
+typedef struct {
+  char data[64];
+} int512_t, uint512_t;
+#endif
+
+static_assert(sizeof(int8_t) == 1, "");
+static_assert(sizeof(int16_t) == 2, "");
+static_assert(sizeof(int32_t) == 4, "");
+static_assert(sizeof(int64_t) == 8, "");
+static_assert(sizeof(int128_t) == 16, "");
+static_assert(sizeof(int256_t) == 32, "");
+static_assert(sizeof(int512_t) == 64, "");
+
+static_assert(sizeof(uint8_t) == 1, "");
+static_assert(sizeof(uint16_t) == 2, "");
+static_assert(sizeof(uint32_t) == 4, "");
+static_assert(sizeof(uint64_t) == 8, "");
+static_assert(sizeof(uint128_t) == 16, "");
+static_assert(sizeof(uint256_t) == 32, "");
+static_assert(sizeof(uint512_t) == 64, "");
+
+//
+// Generic
+//
+
+typedef uint8_t generic8_t;
+typedef uint16_t generic16_t;
+typedef uint32_t generic32_t;
+typedef uint64_t generic64_t;
+typedef uint128_t generic128_t;
+typedef uint256_t generic256_t;
+typedef uint512_t generic512_t;
+
+//
+// PointerOrNumber
+//
+
+typedef uint8_t pointer_or_number8_t;
+typedef uint16_t pointer_or_number16_t;
+typedef uint32_t pointer_or_number32_t;
+typedef uint64_t pointer_or_number64_t;
+typedef uint128_t pointer_or_number128_t;
+typedef uint256_t pointer_or_number256_t;
+typedef uint512_t pointer_or_number512_t;
+
+//
+// Number
+//
+
+typedef uint8_t number8_t;
+typedef uint16_t number16_t;
+typedef uint32_t number32_t;
+typedef uint64_t number64_t;
+typedef uint128_t number128_t;
+typedef uint256_t number256_t;
+typedef uint512_t number512_t;
+
+//
+// Float
+//
+
+#if (__ARM_FP16_ARGS == 1 || defined(__FLT16_MIN__)) \
+  && !defined(DISABLE_FLOAT16)
+typedef _Float16 float16_t;
+#else
+typedef struct {
+  char data[2];
+} float16_t;
+#endif
+
+#if __SIZEOF_FLOAT__ == 4
+typedef float float32_t;
+#else
+typedef struct {
+  char data[4];
+} float32_t;
+#endif
+
+#if __SIZEOF_DOUBLE__ == 8
+typedef double float64_t;
+#else
+typedef struct {
+  char data[8];
+} float64_t;
+#endif
+
+#if __SIZEOF_LONG_DOUBLE__ == 16
+typedef long double float128_t;
+#else
+#if defined(__FLT128_MIN__)
+typedef _Float128 float128_t;
+#else
+typedef struct {
+  char data[16];
+} float128_t;
+#endif
+#endif
+
+static_assert(sizeof(float16_t) == 2, "");
+static_assert(sizeof(float32_t) == 4, "");
+static_assert(sizeof(float64_t) == 8, "");
+static_assert(sizeof(float128_t) == 16, "");
+
+//
+// Undefined values
+//
+
+extern void const *undef_value(size_t size);
+
+#define undef(T) (*(__typeof__(T) *) undef_value(sizeof(T)))
+
+//
+// Break and continue
+//
+
+#define break_to goto
+#define continue_to goto
+
+//
+// __typeof__
+//
+
+// __typeof__ is required for properly implementing a generic bitcast primitive
+// that only needs the destination type.
+#if defined(__GNUC__) // For Clang and GCC, they both have __typeof__
+// Don't do anything, __typeof__ is already available
+#elif __STDC_VERSION__ >= 202311L // C23 has typeof
+// The macro is variadic so we can pass in expressions that contain commas.
+#define __typeof__(...) typeof((__VA_ARGS__))
+#else
+#error "Neither (C23) typeof nor the __typeof__ compiler extension is available"
+#endif
+
+//
+// bit_cast
+// The macro is variadic so we can pass in expressions that contain commas.
+//
+#if defined(__GNUC__)
+
+#if defined(__clang__)
+
+#define bit_cast(T, ...) __builtin_bit_cast(T, ((__VA_ARGS__)))
+
+#else // !defined(__clang__), hence, it's GCC
+
+#define bit_cast(T, ...)                                   \
+  (__extension__({                                         \
+    T bit_cast_r;                                          \
+    __typeof__((__VA_ARGS__)) bit_cast_v = (__VA_ARGS__);  \
+    __builtin_memcpy(&bit_cast_r, &bit_cast_v, sizeof(T)); \
+    bit_cast_r;                                            \
+  }))
+
+#endif // defined(__clang__)
+
+#else // !defined(__GNUC__)
+
+#define bit_cast(T, ...)            \
+  (((union {                        \
+     __typeof__((__VA_ARGS__)) src; \
+     T dst;                         \
+   }){ .src = ((__VA_ARGS__)) })    \
+     .dst)
+
+#endif // defined(__GNUC__)

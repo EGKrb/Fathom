@@ -1,0 +1,20 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+---
+- Name: _start
+  Blocks:
+    - ID: "1"
+      End: "2"
+      Successors:
+        - Destination: "3"
+          Type: FunctionCall
+- Name: tailcall
+  Blocks:
+    - ID: "3"
+      End: "4"
+      Successors:
+        - Destination: ":Invalid"
+          Type: FunctionCall
+          IsTailCall: true

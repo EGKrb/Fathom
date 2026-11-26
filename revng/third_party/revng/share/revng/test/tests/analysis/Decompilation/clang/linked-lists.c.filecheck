@@ -1,0 +1,43 @@
+This file is distributed under the MIT License. See LICENSE.md for details.
+
+
+The init_list function should have the proper detected return type, a pointer to
+struct representing the node of the linked list.
+
+CHECK: [[NODE_STRUCT:struct_[0-9]+]] *init_list(void)
+
+The release_list function should have the proper detected type for its first
+argument.
+TODO: unfortunately we can't recover it until we don't properly model `free` and
+memory release in general, so for now we disabled the test on the prototype of
+release_list. We might think to re-enable this in the future when we support
+`free` or tweak the input program, but for now this is just disabled.
+release_list([[NODE_STRUCT]] *{{.*}})
+
+
+The sum function should take a pointer to node, return a 64-bits integer.
+The argument should be accessed at offset 0, which is an array. And the array
+should be indexed by a index that increments by one at each iteration.
+
+CHECK: {{.*}}64_t sum([[NODE_STRUCT]] *[[ARG0:.*]])
+CHECK: do {
+CHECK: [[ACCUMULATOR:var_[0-9]+]] = [[ACCUMULATOR]] + [[ARG0]]->offset_0[[[INDEX:var_[0-9]+]]];
+CHECK: [[INDEX]] = [[INDEX]] + 1UL;
+CHECK: } while ([[INDEX]] != 5UL);
+CHECK: return [[ACCUMULATOR]];
+
+The compute function should take a pointer to node and return a 64-bits integer.
+It should contain a local variable NODEPTR that is a pointer to node, and a
+do-while loop, where NODEPTR is updated with NODEPTR->offset_40 (representing
+the next pointer field), and NODEPTR should also be the exit condition of the
+do-while.
+The RESULT should be computed by accumulating calls to sum(NODEPTR);
+
+CHECK:     {{[a-z]+64_t}} compute([[NODE_STRUCT]] *[[ARGUMENT:a-z0-9_]])
+CHECK-DAG: {{[a-z]+64_t}} [[RESULT:var_[0-9]+]] = 0
+CHECK-DAG: [[NODE_STRUCT]] *[[NODEPTR:var_[0-9]+] = [[ARGUMENT]];
+CHECK:     do {
+CHECK:     [[RESULT:var_[0-9]+]] = [[RESULT]] + sum([[NODEPTR]]);
+CHECK:     [[NODEPTR:var_[0-9]+]] = [[NODEPTR]]->offset_40;
+CHECK:     while ([[NODEPTR]]);
+CHECK:     return [[RESULT]];

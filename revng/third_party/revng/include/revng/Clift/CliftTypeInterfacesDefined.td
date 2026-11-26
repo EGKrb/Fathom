@@ -1,0 +1,63 @@
+//
+// This file is distributed under the MIT License. See LICENSE.md for details.
+//
+
+#ifndef MLIR_CLIFT_TYPE_INTERFACES_DEFINED
+#define MLIR_CLIFT_TYPE_INTERFACES_DEFINED
+
+include "revng/Clift/CliftTypeInterfacesBasic.td"
+
+def Clift_DefinedType
+  : Clift_TypeInterface<"DefinedType",
+                        [Clift_AliasableType, Clift_AddressableType]> {
+
+  let description = [{
+    A value type is a type with a ID and Name
+  }];
+
+  let methods = [
+    InterfaceMethod<
+      "Returns the unique handle of the DefinedType.",
+      "llvm::StringRef", "getHandle", (ins),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        return $_type.getHandle();
+      }]
+    >,
+    InterfaceMethod<
+      "Returns the mutable name attribute of the DefinedType.",
+      "clift::MutableStringAttr", "getMutableName", (ins),
+      /*methodBody=*/[{}],
+      /*defaultImplemetation=*/[{
+        return $_type.getDefinition().getMutableName();
+      }]
+    >,
+    InterfaceMethod<
+      "Returns the name of the DefinedType.",
+      "llvm::StringRef", "getName", (ins),
+      /*methodBody=*/[{}],
+      /*defaultImplemetation=*/[{
+        return $_type.getMutableName().getValue();
+      }]
+    >,
+    InterfaceMethod<
+      "Returns the mutable comment attribute attached to the DefinedType.",
+      "clift::MutableStringAttr", "getMutableComment", (ins),
+      /*methodBody=*/[{}],
+      /*defaultImplemetation=*/[{
+        return $_type.getDefinition().getMutableComment();
+      }]
+    >,
+    InterfaceMethod<
+      "Returns the comment attached to the DefinedType.",
+      "llvm::StringRef", "getComment", (ins),
+      /*methodBody=*/[{}],
+      /*defaultImplemetation=*/[{
+        return $_type.getMutableComment().getValue();
+      }]
+    >,
+  ];
+}
+
+#endif
+

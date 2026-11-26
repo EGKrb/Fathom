@@ -4,7 +4,7 @@
 
 <img width="100" src="src/fathom-logo.png" alt="Fathom"/>
 
-[![Licence : GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE) [![Plateforme : Windows](https://img.shields.io/badge/Plateforme-Windows%20x86%2Fx64-0078D6.svg)](#) [![Release](https://img.shields.io/badge/release-v1.10.0-success.svg)](https://github.com/EGKrb/Fathom/releases/latest) [![Basé sur x64dbg](https://img.shields.io/badge/bas%C3%A9%20sur-x64dbg-444.svg)](https://github.com/x64dbg/x64dbg)
+[![Licence : GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE) [![Plateforme : Windows](https://img.shields.io/badge/Plateforme-Windows%20x86%2Fx64-0078D6.svg)](#) [![Release](https://img.shields.io/badge/release-v1.11.0-success.svg)](https://github.com/EGKrb/Fathom/releases/latest) [![Basé sur x64dbg](https://img.shields.io/badge/bas%C3%A9%20sur-x64dbg-444.svg)](https://github.com/x64dbg/x64dbg)
 
 **Fathom** — une boîte à outils Windows de rétro-ingénierie et de forensic mémoire, de l'instruction isolée à la machine entière. Elle est **construite sur [x64dbg](https://github.com/x64dbg/x64dbg)** (GPL-3.0), le débogueur open source pour Windows (analyse de malwares, rétro-ingénierie d'exécutables sans code source), dont elle reprend la branche `development` officielle, et ajoute :
 
@@ -12,7 +12,7 @@
 - un onglet **Time Travel** et les commandes `tt.*` : naviguer dans une trace **en arrière comme en avant** sans quitter le débogueur — n'importe quel thread à n'importe quel instant, registres, mémoire reconstruite à cet instant, qui a écrit à cette adresse ;
 - un **émulateur** (commandes `emu.*`, [dumpulator](https://github.com/mrexodia/dumpulator)) : **appeler une fonction du processus débogué, ou faire avancer son thread, dans un émulateur** où les appels système et les exceptions de Windows sont implémentés en Python, à partir d'une copie de son état : le processus ne bouge pas, et le code émulé peut être enregistré pour l'onglet Time Travel ;
 - l'**exécution symbolique** avec [Triton](https://github.com/JonathanSalwan/Triton) (`sym.*`, `taint.*`) : sur le débogué ou sur une trace enregistrée, **résoudre l'entrée qui passe une vérification** et l'écrire dans le processus, inverser un branchement, simplifier des expressions obscurcies, suivre des données teintées ;
-- le **décompilateur de Ghidra** dans le débogueur (`decompile`), la **dévirtualisation de VMProtect** (`novmp`, NoVmp + VTIL), le code virtualisé trouvé et simplifié dans les traces (`vm.*`, la méthode de VMHunt), et **angr** / **miasm** sur l'état du débogué (`angr.*`, `miasm.*`) ;
+- le **décompilateur de Ghidra** dans le débogueur (`decompile`), la **dévirtualisation de VMProtect** (`novmp`, NoVmp + VTIL, x64 et x86), le code virtualisé trouvé et simplifié dans les traces (`vm.*`, la méthode de VMHunt), **angr** / **miasm** sur l'état du débogué (`angr.*`, `miasm.*`), **remill** (`remill.lift` : le code machine en IR LLVM, compilé pour Windows), le décompilateur **rev.ng** (`revng.decompile`, porté sous Windows) et **Binary Ninja** à côté du débogueur (`binja`, plugin `fathom_binja`) ;
 - **pybridge** : pilotage complet d'x64dbg **depuis Python** (breakpoints, pas à pas, registres, mémoire, traces) ;
 - des **modèles de scripts** prêts à l'emploi pour **`headless.exe`** (x64dbg sans interface) ;
 - un **visualiseur de dumps mémoire** (`.dmp`) et des commandes pratiques : **`.init`** (exécutable ou dump), **`.save`**, **`scylla_hide.enable` / `.disable` / `.status`** ;
@@ -76,7 +76,10 @@ release\
   themes\                    thème sombre
   pybridge\                  client Python, exemples, modèles headless
   emulator\                  émulateur des commandes emu.* (dumpulator, Python)
-  novmp\                     NoVmp.exe et vtildump.exe (commande novmp : dévirtualisation de VMProtect)
+  novmp\                     NoVmp.exe / NoVmp32.exe et vtildump (commande novmp : dévirtualisation de VMProtect, x64 / x86)
+  remill\                    remill-lift-17.exe et ses sémantiques (commande remill.lift : IR LLVM)
+  binja\                     fathom_binja, le plugin Binary Ninja (synchronisation avec Fathom)
+  revng\                     rev.ng pour Windows (commande revng.decompile), dans son archive : Fathom_<version>_revng.zip
   analysis\                  scripts angr et miasm (commandes angr.*, miasm.*), miasm
   install-plugins.ps1        installe/met à jour ScyllaHide, xAnalyzer, OllyDumpEx
   licenses\                  licences d'x64dbg et des plugins
@@ -98,11 +101,11 @@ Un second fichier, `Fathom_<version>_symbols.zip`, contient les symboles de déb
 | Time travel | vue des traces (liste des instructions, vers l'avant) | onglet Time Travel et commandes `tt.*` : n'importe quel thread à n'importe quel instant, mémoire reconstruite, exécution / écriture précédente |
 | Émulation | — | commandes `emu.*` : une fonction du débogué appelée, ou son thread poursuivi, dans un émulateur qui implémente les appels système de Windows (dumpulator), à partir d'un minidump de son état ; traces émulées dans Time Travel |
 | Exécution symbolique | — | plugin Triton (`sym.*`, `taint.*`) : exécution symbolique et analyse de teinte sur l'état du débogué ou une trace enregistrée, résolution Z3 écrite dans le débogué, synthèse d'expressions |
-| Décompilation, désobscurcissement | — | décompilateur de Ghidra sur la mémoire du processus (`decompile`), dévirtualisation de VMProtect (`novmp`), machines virtuelles dans les traces (`vm.*`), angr et miasm sur le débogué (`angr.*`, `miasm.*`) |
+| Décompilation, désobscurcissement | — | décompilateur de Ghidra sur la mémoire du processus (`decompile`), dévirtualisation de VMProtect (`novmp`, x64 et x86), machines virtuelles dans les traces (`vm.*`), angr et miasm sur le débogué (`angr.*`, `miasm.*`), IR LLVM avec remill (`remill.lift`), décompilateur de rev.ng (`revng.decompile`), Binary Ninja (`binja`, plugin) |
 | Automatisation | langage de script x64dbg, SDK C/C++ | + client Python (pybridge) + modèles headless avec lanceur |
 | Dumps mémoire (`.dmp`) | création seulement (`minidump`) | + visualiseur de dumps (`minidump.exe`), ouvert par `.init fichier.dmp` ; les dumps noyau et images mémoire brutes s'ouvrent dans wineye |
 | Noyau / machine entière | — (mode utilisateur seulement) | HvKdFusion : lecture/écriture/dump de la mémoire d'une VM Hyper-V, WinDbg/kd sur une VM, montage MemProcFS, REPL wineye (`hvkd`, `wineye`) |
-| Commandes | — | `.init`, `.save`, `scylla_hide.enable` / `.disable` / `.status`, `hvkd`, `hvkd.log`, `hvkd.check`, `wineye`, `tt.*`, `emu.*`, `novmp`, `angr.*`, `miasm.*` (plugin ExtraCmds), `sym.*`, `taint.*`, `vm.*` (plugin Triton), `decompile` (plugin Decompiler) |
+| Commandes | — | `.init`, `.save`, `scylla_hide.enable` / `.disable` / `.status`, `hvkd`, `hvkd.log`, `hvkd.check`, `wineye`, `tt.*`, `emu.*`, `novmp`, `angr.*`, `miasm.*`, `remill.lift`, `revng.decompile`, `binja` (plugin ExtraCmds), `sym.*`, `taint.*`, `vm.*` (plugin Triton), `decompile` (plugin Decompiler) |
 | Plugins | aucun | ScyllaHide et xAnalyzer inclus, pybridge, ExtraCmds, Triton et Decompiler inclus, OllyDumpEx via `install-plugins.ps1` |
 | Compilation | — | correctif d'un `using namespace std` qui cassait le *unity build* (`patternfind.cpp`) |
 
@@ -400,21 +403,24 @@ Le plugin trouve et simplifie aussi le **code virtualisé** dans les traces (`vm
 
 Test automatique : [`triton/tests/test_triton.py`](triton/tests/test_triton.py) (headless, x64 et x32, 20 assertions : un numéro de série résolu, appliqué et accepté nativement, un branchement inversé, une expression MBA synthétisée en `x + y`, la teinte, une trace enregistrée rejouée et son numéro résolu).
 
-## Décompilateur, dévirtualisation, angr, miasm
+## Décompilateurs, dévirtualisation, angr, miasm, remill, Binary Ninja
 
 D'autres analyses du débogué **tel qu'il est maintenant** (dépaqueté, déchiffré, modifié), depuis le débogueur :
 
 - **Le décompilateur de Ghidra** ([`decompiler/`](decompiler/README.md), `Decompiler.dp64` / `.dp32`) : `decompile [adresse[, fichier]]` transforme la fonction en C avec le décompilateur natif de [Ghidra](https://github.com/NationalSecurityAgency/ghidra). Le code est lu dans la mémoire du processus, la mémoire en lecture seule est constante (les appels par la table d'imports vont à leur cible), les fonctions portent les noms des symboles et étiquettes d'x64dbg, et les chaînes littérales sont commentées en fin de ligne. `decompile.raw` affiche le p-code de Ghidra. Rien à installer : le décompilateur et les spécifications sleigh de Ghidra sont intégrés.
-- **Dévirtualisation de VMProtect** ([`novmp/`](novmp/README.md)) : `novmp [module]` lit l'image du module en mémoire et la donne à [NoVmp](https://github.com/can1357/NoVmp), qui remonte les machines virtuelles de VMProtect x64 3.0 – 3.5 en [VTIL](https://github.com/vtil-project/VTIL-Core) optimisé (`vtildump` les affiche dans le journal).
+- **Dévirtualisation de VMProtect** ([`novmp/`](novmp/README.md)) : `novmp [module]` lit l'image du module en mémoire et la donne à [NoVmp](https://github.com/can1357/NoVmp), qui remonte les machines virtuelles de VMProtect 3.0 – 3.5 en [VTIL](https://github.com/vtil-project/VTIL-Core) optimisé (`vtildump` les affiche dans le journal). NoVmp ne traite que le x64 ; Fathom le porte en x86 (`NoVmp32.exe`, utilisé pour les modules de x32dbg ; le portage est compilé et son émulateur testé, mais il n'a pas été vérifié sur un programme VMProtect x86, et la base du pointeur d'instruction virtuel se règle : `novmp module, vipbase:0`).
 - **Code virtualisé dans une trace** (la méthode de [VMHunt](https://github.com/s3team/VMHunt), dans le plugin Triton) : `vm.detect` trouve les portions virtualisées d'une trace enregistrée (sauvegarde du contexte, répartiteur, gestionnaires, restauration), `vm.simplify n` en rejoue une avec des registres symboliques et affiche ce qu'elle calcule, simplifié et synthétisé : sur la machine virtuelle du test, `(eax_in ^ 0x5a) + ebx_in * 3`.
 - **angr** ([`analysis/`](analysis/README.md)) : `angr.symbolic adresse, taille`, puis `angr.explore cible[, à éviter ...]` explore tous les chemins depuis l'état du thread courant (un minidump du processus chargé dans [angr](https://github.com/angr/angr)) et résout l'entrée qui atteint la cible ; `angr.apply` l'écrit dans le débogué.
+- **remill** ([`remill/`](remill/README.md)) : `remill.lift [adresse[, taille]]` traduit la fonction (lue en mémoire) en IR LLVM avec [remill](https://github.com/lifting-bits/remill), compilé pour Windows par Fathom (remill vise Linux et macOS) : l'IR est dans le journal et dans un fichier `.ll`, prêt pour les outils de LLVM.
+- **rev.ng** ([`revng/`](revng/README.md)) : `revng.decompile [adresse]` décompile la fonction avec [rev.ng](https://rev.ng), qui ne tourne que sous Linux et que Fathom porte sous Windows en natif (les traducteurs de QEMU en bibliothèque sans linux-user, LLVM 16, rev.ng lié dans son module Python). Le module est lu en mémoire, analysé une fois (fonctions, prototypes, types), et le C de la fonction est dans le journal. Modules x64 et x86. rev.ng est livré dans son archive (`Fathom_<version>_revng.zip`, à extraire à côté de `Fathom.exe` : `revng\`, autonome, environ 340 Mo).
+- **Binary Ninja** ([`binja/`](binja/README.md)) : `binja [adresse]` ouvre le module, lu en mémoire à son adresse de chargement, dans [Binary Ninja](https://binary.ninja) à l'adresse (toutes les éditions, Free comprise) ; avec une édition payante, le plugin `fathom_binja` synchronise les deux par pybridge : la vue suit le débogué, adresses montrées dans Fathom, points d'arrêt et « exécuter jusqu'ici » depuis Binary Ninja, traces de Fathom surlignées.
 - **miasm** ([`analysis/`](analysis/README.md)) : `miasm.ir [adresse]` traduit une fonction dans l'IR de [miasm](https://github.com/cea-sec/miasm), `miasm.symb [adresse[, fin]]` l'exécute symboliquement et affiche ce qu'elle calcule, simplifié (`(x ^ y) + 2 * (x & y)` : `RAX = (RCX & RDX) * 2 + (RCX ^ RDX)`).
 
 angr et miasm demandent Python 3.10+ avec leurs paquets : `analysis.setup` les installe (miasm lui-même est intégré).
 
-Tests automatiques (headless, x64 et x32) : [`decompiler/tests/test_decompiler.py`](decompiler/tests/test_decompiler.py) (une boucle, un switch et ses chaînes, des appels d'API par la table d'imports), [`extracmds/tests/test_tools.py`](extracmds/tests/test_tools.py) (miasm, angr qui résout un numéro de série accepté nativement, NoVmp sur un module lu en mémoire, une routine VMProtect affichée par `vtildump`), et la partie `vm.*` de [`triton/tests/test_triton.py`](triton/tests/test_triton.py).
+Tests automatiques (headless, x64 et x32) : [`decompiler/tests/test_decompiler.py`](decompiler/tests/test_decompiler.py) (une boucle, un switch et ses chaînes, des appels d'API par la table d'imports), [`extracmds/tests/test_tools.py`](extracmds/tests/test_tools.py) (miasm, angr qui résout un numéro de série accepté nativement, NoVmp et NoVmp32 sur un module lu en mémoire, une routine VMProtect affichée par `vtildump`, remill sur une fonction, `binja` avec un Binary Ninja factice, rev.ng qui décompile une fonction), [`binja/tests/test_binja.py`](binja/tests/test_binja.py) (la synchronisation du plugin face à un vrai Fathom), `emulator_test` de NoVmp (son émulateur natif, x64 et x86), et la partie `vm.*` de [`triton/tests/test_triton.py`](triton/tests/test_triton.py).
 
-**Non intégrés sous forme de code**, et pourquoi : [remill](https://github.com/lifting-bits/remill) demande une compilation complète de LLVM (l'utiliser sur les dumps que Fathom écrit : `.save`, `minidump`, les images que `novmp` lit en mémoire) ; [rev.ng](https://github.com/revng/revng) ne tourne que sous Linux (WSL, sur les mêmes fichiers) ; l'[API de Binary Ninja](https://github.com/Vector35/binaryninja-api) demande Binary Ninja (commercial), dont les plugins peuvent lire les traces JSON de Fathom (`TraceExport`). [Z3](https://github.com/Z3Prover/z3) est le solveur du plugin Triton (la version officielle 4.16, celle que Triton épingle), et Capstone y est en version 5 (Triton l'exige ; `capstone-next` est la version 6).
+[Z3](https://github.com/Z3Prover/z3) est le solveur du plugin Triton (la version officielle 4.16, celle que Triton épingle), et Capstone y est en version 5 (Triton l'exige ; `capstone-next` est la version 6).
 
 ---
 
@@ -674,7 +680,9 @@ Les exécutables sont produits dans `bin\x64` et `bin\x32` (Qt et les dépendanc
 :: Plugins pybridge et ExtraCmds (même terminal que l'architecture voulue ; build-x32 en 32 bits) ;
 :: le plugin Triton : powershell -File triton\build.ps1 -Sdk <dossier pluginsdk> (les deux architectures)
 :: le plugin Decompiler : powershell -File decompiler\build.ps1 -Sdk <dossier pluginsdk>
-:: NoVmp et vtildump (64 bits) : powershell -File novmp\build.ps1
+:: NoVmp et vtildump (64 et 32 bits) : powershell -File novmp\build.ps1
+:: remill (LLVM 17 et ses dépendances d'abord : des heures) : powershell -File remill\build.ps1
+:: rev.ng pour Windows (MSYS2 ; LLVM 16 d'abord : des heures) : powershell -File revng\build.ps1
 cd pybridge
 cmake -B build-x64 -G Ninja -DCMAKE_BUILD_TYPE=Release -DX64DBG_SDK=<dossier pluginsdk>
 cmake --build build-x64
@@ -694,8 +702,8 @@ Par défaut, les plugins utilisent le `pluginsdk` d'un x64dbg installé avec win
 .\plugins\install-plugins.ps1                       # plugins tiers dans bin\x32 et bin\x64
 py src\tests\run.py --arch x64                       # suite de tests (dont trace_export)
 python hvkdfusion\tests\test_servers.py              # tests protocolaires wineye MCP/DAP/gdb
-.\tools\make-release.ps1 -Version 1.10.0              # archives de release dans dist\ (stage aussi release\)
-.\tools\build-installer.ps1 -Version 1.10.0           # dist\Fathom_1.10.0_setup.exe (nécessite NSIS)
+.\tools\make-release.ps1 -Version 1.11.0              # archives de release dans dist\ (stage aussi release\)
+.\tools\build-installer.ps1 -Version 1.11.0           # dist\Fathom_1.11.0_setup.exe (nécessite NSIS)
 ```
 
 ### Mettre à jour depuis x64dbg officiel
@@ -735,9 +743,12 @@ triton/                              plugin Triton (sym.*, taint.* : exécution 
   build.ps1, tests/                  compilation (Z3, Capstone épinglés), test headless
 decompiler/                          plugin Decompiler (decompile : le décompilateur de Ghidra sur le débogué)
   third_party/ghidra/                décompilateur, zlib et spécifications sleigh x86 de Ghidra (Apache-2.0, FATHOM.md)
-novmp/                               NoVmp + VTIL (dévirtualisation de VMProtect), vtildump, build.ps1
+novmp/                               NoVmp + VTIL (dévirtualisation de VMProtect, x64 et x86), vtildump, build.ps1
+remill/                              remill (Apache-2.0) compilé pour Windows, build.ps1, dist\ (remill-lift)
+binja/                               plugin Binary Ninja (fathom_binja) et son test
+revng/                               rev.ng porté sous Windows : third_party/revng (modifié), patches/ (QEMU), build.ps1, dist\
 analysis/                            scripts angr / miasm des commandes angr.* et miasm.*, miasm (GPL-2.0+)
-extracmds/src/toolcmds.cpp           commandes novmp, angr.*, miasm.*, analysis.setup
+extracmds/src/toolcmds.cpp           commandes novmp, remill.lift, revng.decompile, binja, angr.*, miasm.*, analysis.setup
 emulator/                            émulateur (dumpulator, Python)
   fathom_emu.py                      ligne de commande des commandes emu.*, écriture des traces x64dbg
   dumpulator/, minidump/             dumpulator (BSL-1.0) et son lecteur de minidumps (MIT), modifications dans README.md
@@ -768,7 +779,10 @@ README.x64dbg.md                     README officiel d'x64dbg
 - **OllyDumpEx** : freeware de Low Priority — <https://low-priority.appspot.com/ollydumpex/>, non redistribué.
 - **HvKdFusion** : GPL-3.0-or-later — <https://github.com/EGKrb/HvKdFusion>. Les composants qu'il pilote ne sont pas redistribués : LiveCloudKd (GPL-3.0), MemProcFS et LeechCore (AGPL-3.0), Dokany (LGPL/MIT), ntoseye, WinDbg (licence Microsoft).
 - **Plugin Decompiler** : Ghidra, Apache-2.0 — <https://github.com/NationalSecurityAgency/ghidra> (le décompilateur, son zlib et les spécifications x86, intégrés dans `decompiler/third_party/ghidra`).
-- **NoVmp** : GPL-3.0 — <https://github.com/can1357/NoVmp>, de Can Bölük ; **VTIL** : BSD-3-Clause — <https://github.com/vtil-project/VTIL-Core> ; liés dans `NoVmp.exe` : Capstone (BSD), Keystone (GPL-2.0), linux-pe (MIT).
+- **NoVmp** : GPL-3.0 — <https://github.com/can1357/NoVmp>, de Can Bölük ; **VTIL** : BSD-3-Clause — <https://github.com/vtil-project/VTIL-Core> ; liés dans `NoVmp.exe` / `NoVmp32.exe` : Capstone (BSD), Keystone (GPL-2.0), linux-pe (MIT).
+- **remill** : Apache-2.0 — <https://github.com/lifting-bits/remill> (Trail of Bits ; intégré dans `remill/third_party/remill`, changements dans son FATHOM.md) ; liés dans `remill-lift-17.exe` : LLVM 17 (Apache-2.0 avec exceptions LLVM), XED (Apache-2.0), glog et gflags (BSD-3-Clause), sleigh (Ghidra, Apache-2.0).
+- **rev.ng** : fichiers MIT, GPL-2.0 dans son ensemble — <https://github.com/revng/revng> (rev.ng Labs ; intégré dans `revng/third_party/revng`, changements dans son FATHOM.md) ; avec les forks de rev.ng de QEMU (GPL-2.0, `revng/patches/qemu.patch`), LLVM 16 (Apache-2.0 avec exceptions LLVM) et nanobind (BSD-3-Clause) ; son archive contient Python (PSF) et les paquets qu'utilise rev.ng, glib (LGPL-2.1+), Capstone (BSD) et le runtime MinGW de MSYS2.
+- **Binary Ninja** : commercial, de Vector 35 — <https://binary.ninja>, non redistribué ; le plugin `fathom_binja` est celui de Fathom (GPL-3.0-or-later).
 - **miasm** : GPL-2.0-or-later — <https://github.com/cea-sec/miasm> (intégré dans `analysis/miasm`) ; **angr** : BSD-2-Clause — <https://github.com/angr/angr> (installé par pip, non redistribué). La méthode de `vm.*` : VMHunt (Xu et al., CCS 2018), réimplémentée.
 - **Plugin Triton** : Triton, Apache-2.0 — <https://github.com/JonathanSalwan/Triton>, de Jonathan Salwan et Quarkslab (intégré sans modification dans `triton/third_party/Triton`) ; Z3, MIT — <https://github.com/Z3Prover/z3> (Microsoft ; `libz3.dll` inclus) ; Capstone, BSD-3-Clause — <https://github.com/capstone-engine/capstone> (lié au plugin).
 - **dumpulator** : Boost Software License 1.0 — <https://github.com/mrexodia/dumpulator>, de Duncan Ogilvie (mrexodia) ; son lecteur `minidump` : MIT, de Tamas Jos (skelsec). Nécessite Unicorn (GPL-2.0, installé par pip), Capstone (BSD) et pefile (MIT), non inclus.

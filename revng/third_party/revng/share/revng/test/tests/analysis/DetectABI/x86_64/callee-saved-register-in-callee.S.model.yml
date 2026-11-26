@@ -1,0 +1,23 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+---
+Functions:
+  - Name: callee
+    Prototype:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/1814-RawFunctionDefinition"
+  - Name: caller
+    Prototype:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/1815-RawFunctionDefinition"
+TypeDefinitions:
+  - ID: 1814
+    Kind: RawFunctionDefinition
+    PreservedRegisters:
+      - rbp_x86_64
+  - ID: 1815
+    Kind: RawFunctionDefinition
+    "-Arguments": 0
+    "-ReturnValues": 0

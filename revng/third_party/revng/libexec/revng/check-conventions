@@ -1,0 +1,1004 @@
+#!/usr/bin/env python3
+
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+import abc
+import argparse
+import asyncio
+import os
+import re
+import sys
+import time
+from asyncio import create_subprocess_exec
+from collections import defaultdict
+from dataclasses import dataclass
+from itertools import groupby
+from pathlib import Path
+from string import Template
+from subprocess import PIPE, STDOUT, check_output
+from subprocess import run as process_run
+from textwrap import indent
+from typing import Dict, Iterable, List, Mapping, NoReturn, Optional, Protocol, Sequence, Set
+from typing import Sized, Tuple, TypeVar, Union
+
+import yaml
+
+T = TypeVar("T")
+RuleResult = Mapping[str, Sequence[str]]
+LineResult = Mapping[Path, Sequence[int]]
+FileResult = Sequence[Path]
+term_colors = {
+    "reset": "\033[0;0m",
+    "red": "\033[1;31m",
+    "green": "\033[1;32m",
+    "blue": "\033[1;34m",
+    "purple": "\033[1;35m",
+    "cyan": "\033[1;36m",
+}
+
+
+def colored(text, color: str) -> str:
+    return f"{term_colors[color]}{text}{term_colors['reset']}"
+
+
+term_colon = colored(":", "cyan")
+
+
+class Matcher(Protocol):
+    def __call__(self, path: Path, line: str) -> List[re.Match]:
+        """Abstraction that's used by passes to check if line matches"""
+        ...
+
+
+class FileFilter(Protocol):
+    def __call__(self, path: Path, content: str) -> bool:
+        """Used in filters to determine if a file belongs to a tag
+        path is the path of the file and content is the first 512 bytes of it
+        """
+        ...
+
+
+@dataclass
+class ProcessResult:
+    output: str
+    returncode: int
+
+
+@dataclass
+class PassResult:
+    output: str
+    ok: bool
+
+    def verify(self):
+        return self.output.strip() == "" and self.ok
+
+    @staticmethod
+    def _check_processes(*args: ProcessResult) -> bool:
+        combined_stdout = "\n".join(p.output for p in args)
+        return all(p.returncode == 0 for p in args) and combined_stdout.strip() == ""
+
+    @classmethod
+    def from_process(cls, *processes: ProcessResult) -> "PassResult":
+        return PassResult("\n".join(p.output for p in processes), cls._check_processes(*processes))
+
+    @staticmethod
+    def combine(*pass_results: "PassResult") -> "PassResult":
+        return PassResult(
+            "\n".join(p.output for p in pass_results), all(p.ok for p in pass_results)
+        )
+
+    @staticmethod
+    def make_from(
+        *,
+        files: Mapping[str, FileResult] = {},
+        lines: Mapping[str, LineResult] = {},
+        rules: Iterable[RuleResult] = (),
+    ) -> "PassResult":
+        output = ""
+        output += "".join(generate_error_files(m, f) for m, f in files.items())
+        output += "".join(generate_error_lines(m, l) for m, l in lines.items())
+        output += "".join(generate_rule_results(r) for r in rules)
+        return PassResult(output, all_empty(*files.values(), *lines.values(), *rules))
+
+
+class Pass(abc.ABC):
+    """Abstraction that describes the operations on a set of files
+    When called it will be given a dictionary of <tag>:list<files> and a
+    dictionary of arguments (e.g. dry_run=1)."""
+
+    def __init__(self, name: str):
+        self.name = name
+
+    @abc.abstractmethod
+    async def run(
+        self, files: Dict[str, Dict[Path, str]], args: Dict[str, str | bool]
+    ) -> PassResult: ...
+
+
+class TaggedPass(Pass, abc.ABC):
+    """Specialization of Pass that operates on a single tag.
+    By overriding the `process` method, a list of files with the given tag will
+    be provided. If the file list does not contain any files with the given tag
+    then the `process` method will not be called."""
+
+    def __init__(self, name: str, tag: str):
+        super().__init__(name)
+        self.tag = tag
+
+    async def run(
+        self, files: Dict[str, Dict[Path, str]], args: Dict[str, str | bool]
+    ) -> PassResult:
+        file_list = files[self.tag]
+        if len(file_list.keys()) == 0:
+            return PassResult("", True)
+        return await self.process(files[self.tag], args)
+
+    @abc.abstractmethod
+    async def process(self, files: Dict[Path, str], args: Dict[str, str | bool]) -> PassResult: ...
+
+
+def log(string: str):
+    sys.stdout.write(f"{string}\n")
+
+
+def fail(reason: str, returncode: int = 1) -> NoReturn:
+    sys.stderr.write(f"{reason}\n")
+    sys.stderr.flush()
+    sys.exit(returncode)
+
+
+def template_iterable(iterable: Iterable[str], args: Dict[str, str]) -> List[str]:
+    return [Template(element).substitute(args) for element in iterable]
+
+
+async def run_with_capture(
+    cmd: Sequence[Union[str, Path]], *, input_: None | str = None
+) -> ProcessResult:
+    stdin = PIPE if input_ is not None else None
+    proc = await create_subprocess_exec(cmd[0], *cmd[1:], stdin=stdin, stdout=PIPE, stderr=STDOUT)
+    stdout, _ = await proc.communicate(input_.encode("utf-8") if input_ is not None else None)
+    returncode = await proc.wait()
+    return ProcessResult(stdout.decode("utf-8"), returncode)
+
+
+def read_file(filename, size: Optional[int] = None):
+    with open(filename) as f:
+        return f.read(size)
+
+
+def chunk(values: Sequence[T], number: int = 1) -> List[List[T]]:
+    res: List[List[T]] = [[] for _ in range(0, number)]
+    for i in range(0, len(values)):
+        res[i % number].append(values[i])
+    return [r for r in res if len(r) > 0]
+
+
+def all_empty(*args: Sized) -> bool:
+    return all(len(a) == 0 for a in args)
+
+
+def deserialize_config_item(dictionary: dict):
+    assert "type" in dictionary
+    type_ = dictionary["type"]
+    assert type_ in globals(), f"Type {type_} not defined"
+    return globals()[type_](**{k: v for k, v in dictionary.items() if k != "type"})
+
+
+def deserialize_matchers(matcher_list: List[dict]) -> Dict[str, Matcher]:
+    return {f"{item['name']}:": deserialize_config_item(item["matcher"]) for item in matcher_list}
+
+
+def highlight_line(line: str, matches: List[re.Match]) -> str:
+    result = ""
+    is_red = False
+    for index, char in enumerate(line):
+        if any(m.start() <= index < m.end() for m in matches):
+            result += (term_colors["red"] if not is_red else "") + char
+            is_red = True
+        else:
+            result += (term_colors["reset"] if is_red else "") + char
+            is_red = False
+    return result + (term_colors["reset"] if is_red else "")
+
+
+def line_matcher(files: Dict[Path, str], matchers: Mapping[str, Matcher]) -> RuleResult:
+    result: Dict[str, List[str]] = defaultdict(list)
+    for path, content in files.items():
+        skip_next = False
+        for lineno, line in enumerate(content.splitlines()):
+
+            if skip_next:
+                skip_next = False
+                continue
+
+            if "NOLINTNEXTLINE" in line:
+                skip_next = True
+
+            for msg, matcher in matchers.items():
+                if matches := matcher(path, line):
+                    result[msg].append(
+                        f"{colored(path, 'purple')}{term_colon}{colored(lineno+1, 'green')}"
+                        f"{term_colon} {highlight_line(line, matches)}"
+                    )
+    return result
+
+
+def regexes_matcher(regexes: Iterable[str]) -> Matcher:
+    compiled_regexes = [re.compile(r) for r in regexes]
+
+    def matcher(path: Path, line: str):
+        result = []
+        for regex in compiled_regexes:
+            if match := regex.search(line):
+                result.append(match)
+        return result
+
+    return matcher
+
+
+def regexes_matcher_prefix(prefix: str, regexes: Iterable[str]) -> Matcher:
+    return regexes_matcher((prefix + r for r in regexes))
+
+
+def any_startswith(string: str, prefixes: Iterable[str]) -> bool:
+    return any(string.startswith(p) for p in prefixes)
+
+
+def join_items(items: Iterable[str], join: str = "\n", indent_: str = "  ") -> str:
+    return indent("".join(f"{i}{join}" for i in items), indent_)
+
+
+def generate_error_files(msg: str, files: FileResult) -> str:
+    if len(files) == 0:
+        return ""
+    return f"{msg}\n" + join_items((colored(f, "purple") for f in files))
+
+
+def generate_error_lines(msg: str, files: LineResult) -> str:
+    if len(files) == 0:
+        return ""
+    return f"{msg}\n" + join_items(
+        (
+            f"{colored(path, 'purple')}{term_colon} {'line' if len(lines) == 1 else 'lines'} "
+            + join_items((colored(line, "green") for line in lines), ", ", "")
+            for path, lines in files.items()
+        ),
+    )
+
+
+def generate_rule_results(result: RuleResult) -> str:
+    return "".join(f"{rule}\n" + join_items(items) for rule, items in result.items())
+
+
+class SingleCommandPass(TaggedPass):
+    def __init__(
+        self,
+        name: str,
+        tag: str,
+        command: Iterable[str],
+        dry_command: Optional[Iterable[str]] = None,
+    ):
+        super().__init__(name, tag)
+        self.command = command
+        self.dry_command = dry_command if dry_command is not None else command
+
+    async def process(self, files: Dict[Path, str], args) -> PassResult:
+        cmd_args = template_iterable(self.dry_command if args["dry_run"] else self.command, args)
+        process = await run_with_capture((*cmd_args, *map(str, files)))
+        return PassResult.from_process(process)
+
+
+class ParallelCommandPass(TaggedPass):
+    def __init__(
+        self,
+        name: str,
+        tag: str,
+        command: Iterable[str],
+        dry_command: Optional[Iterable[str]] = None,
+    ):
+        super().__init__(name, tag)
+        self.command = command
+        self.dry_command = dry_command if dry_command is not None else command
+
+    async def process(self, files: Dict[Path, str], args) -> PassResult:
+        cpu_count = os.cpu_count()
+        chunks = chunk(list(files), cpu_count if cpu_count else 1)
+        cmd_args = template_iterable(self.dry_command if args["dry_run"] else self.command, args)
+        processes = [run_with_capture((*cmd_args, *files)) for files in chunks]
+        process_results = await asyncio.gather(*processes)
+        return PassResult.from_process(*process_results)
+
+
+class MyPyPass(SingleCommandPass):
+    class PythonFileBins:
+        """
+        Helper class for dividing python files in non-conflicting bins.
+        Mypy complains if it is passed two files with the same "name" (as
+        defined in the `get_python_module_name` function). This guarantees that
+        the bins produced will never have two files with the same name.
+        """
+
+        def __init__(self) -> None:
+            self.bins: List[Tuple[List[Path], Set[str]]] = []
+
+        @staticmethod
+        def get_python_module_name(filepath: Path):
+            if filepath.suffixes == [".py"]:
+                return filepath.stem
+            elif filepath.suffixes == []:
+                return "__main__"
+            else:
+                return filepath.name
+
+        def add(self, path: Path):
+            i = 0
+            while True:
+                if i >= len(self.bins):
+                    self.bins.append(([], set()))
+
+                name = self.get_python_module_name(path)
+                if name not in self.bins[i][1]:
+                    self.bins[i][0].append(path)
+                    self.bins[i][1].add(name)
+                    break
+
+                i += 1
+
+        def get_bins(self) -> List[List[Path]]:
+            return [paths for paths, _ in self.bins]
+
+    def __init__(self, command: List[str]):
+        super().__init__("mypy", "python", command)
+        # Cache for `is_module_dir`, stores whether a path is a module
+        # directory or not
+        self.module_path_cache: Dict[Path, bool] = {}
+
+    def is_module_dir(self, directory: Path):
+        """
+        Given a directory, determines if it is a module directory.
+        A directory is *not* a module directory for python if itself and all of
+        its parent directories do not contain `__init__.py`.
+        For efficiency reasons, the code will try to leverage the
+        `module_path_cache` as much as possible and avoid as many `stat`s as
+        possible.
+        """
+
+        path_copy = Path(directory)
+        path_parts: List[Path] = []
+
+        while path_copy.parent != path_copy:
+            path_parts.insert(0, path_copy)
+            path_copy = path_copy.parent
+
+        while len(path_parts) != 0:
+            path = path_parts.pop(0)
+
+            if path in self.module_path_cache:
+                if self.module_path_cache[path]:
+                    return True
+                else:
+                    continue
+
+            if (path / "__init__.py").exists():
+                self.module_path_cache[path] = True
+                for part in path_parts:
+                    self.module_path_cache[part] = True
+                return True
+            else:
+                self.module_path_cache[path] = False
+        return False
+
+    async def process(self, files: Dict[Path, str], args) -> PassResult:
+        other_file_bins = self.__class__.PythonFileBins()
+        module_files: List[Path] = []
+        for filepath in files:
+            if self.is_module_dir(filepath.parent):
+                # Module files can be all run together fine
+                module_files.append(filepath)
+            else:
+                # Non-module files need special handling
+                other_file_bins.add(filepath)
+
+        bins = other_file_bins.get_bins()
+        sorted_files: List[List[Path]] = []
+        sorted_files.append(module_files)
+
+        # We can add the first non-module files bin to the list of module
+        # files, to save on a mypy invocation
+        if len(bins) >= 1:
+            sorted_files[0].extend(bins.pop(0))
+        sorted_files.extend(bins)
+
+        runs = []
+        for file_group in sorted_files:
+            if len(file_group) > 0:
+                runs.append(await super().process(dict.fromkeys(file_group, ""), args))
+
+        return PassResult.combine(*runs)
+
+
+class LicenseCheckPass(TaggedPass):
+    def __init__(
+        self,
+        ignore_suffixes: List[str],
+        ignore_pathnames: List[str],
+        ignore_stems: List[str],
+        include_pathnames: List[str],
+    ):
+        super().__init__("license-check", "all")
+        self.ignore_suffixes = ignore_suffixes
+        self.ignore_pathnames = ignore_pathnames
+        self.ignore_stems = ignore_stems
+        self.include_pathnames = include_pathnames
+
+    def skip_test(self, path: Path) -> bool:
+        return (
+            path.suffix in self.ignore_suffixes
+            or path.name in self.ignore_pathnames
+            or path.stem in self.ignore_stems
+        ) and (path.name not in self.include_pathnames)
+
+    @staticmethod
+    def check_license(content: str) -> bool:
+        return any("See LICENSE.md for details" in line for line in content.splitlines()[:20])
+
+    async def process(self, files: Dict[Path, str], args: Dict[str, str | bool]) -> PassResult:
+        missing_license = []
+        for path, content in files.items():
+            if self.skip_test(path):
+                continue
+            if not self.check_license(content):
+                missing_license.append(path)
+        return PassResult.make_from(
+            files={"There are files without a license header:": missing_license}
+        )
+
+
+class FileListPass(TaggedPass):
+    """Checks that a list file names every file of a directory.
+
+    Whatever is handed to this pass, if it sits in `directory` it has to
+    appear in `list_path`, as a path relative to `directory`. Invoked with no
+    arguments it sees every file tracked by git, so it then covers the whole
+    directory; invoked with a subset, as `--HEAD` does, it checks that subset.
+    Either way a file that reaches the repository without reaching the list is
+    reported.
+
+    `match_files_containing`, when given, narrows the requirement to the files
+    that contain it, so a directory may hold files that whoever reads the list
+    is not meant to pick up.
+
+    Blank lines and lines opening with `#` in the list file are ignored."""
+
+    def __init__(self, directory: str, list_path: str, match_files_containing: str = ""):
+        super().__init__("file-list", "all")
+        self.directory = Path(directory)
+        self.list_path = Path(list_path)
+        self.match_files_containing = match_files_containing
+
+    def listed_files(self) -> Set[str]:
+        result = set()
+        for line in read_file(str(self.list_path)).splitlines():
+            stripped = line.strip()
+            if stripped != "" and not stripped.startswith("#"):
+                result.add(stripped)
+        return result
+
+    async def process(self, files: Dict[Path, str], args: Dict[str, str | bool]) -> PassResult:
+        # There is nothing to check when the list is absent, which is the case
+        # whenever check-conventions runs outside this repository.
+        if not self.list_path.is_file():
+            return PassResult("", True)
+
+        listed = self.listed_files()
+        unlisted = [
+            path
+            for path, content in files.items()
+            if path.is_relative_to(self.directory)
+            and (self.match_files_containing == "" or self.match_files_containing in content)
+            and str(path.relative_to(self.directory)) not in listed
+        ]
+
+        return PassResult.make_from(
+            files={f"These files are missing from {self.list_path}:": unlisted}
+        )
+
+
+class BashPass(SingleCommandPass):
+    def __init__(self):
+        super().__init__("bash-check", "bash", ("shellcheck",))
+
+    @staticmethod
+    def check_set(content: str) -> bool:
+        return any(
+            "# rcc-ignore: bash-set-flags" in line or "set -euo pipefail" in line
+            for line in content.splitlines()[:10]
+        )
+
+    async def process(self, files: Dict[Path, str], args: Dict[str, str | bool]) -> PassResult:
+        shellcheck = await super().process(files, args)
+        noset_files = [path for path, content in files.items() if not self.check_set(content)]
+        output = generate_error_files(
+            "There are script files without 'set -euo pipefail':", noset_files
+        )
+        return PassResult.combine(shellcheck, PassResult(output, len(noset_files) == 0))
+
+
+class WhitespaceCheckPass(TaggedPass):
+    def __init__(self):
+        super().__init__("whitespace-check", "all")
+
+    async def process(self, files: Dict[Path, str], args) -> PassResult:
+        trailing_whitespace = defaultdict(list)
+        tabs = defaultdict(list)
+        no_end_newline = []
+        for path, content in files.items():
+            lines = content.splitlines()
+            for index, line in enumerate(lines):
+                if line.endswith(" "):
+                    trailing_whitespace[path].append(index + 1)
+                if "\t" in line:
+                    tabs[path].append(index + 1)
+            if content == "" or content[-1] != "\n":
+                no_end_newline.append(path)
+
+        return PassResult.make_from(
+            files={"Files that don't end in a newline:": no_end_newline},
+            lines={
+                "Whitespace at the end of line:": trailing_whitespace,
+                "Tabs present:": tabs,
+            },
+        )
+
+
+class CPPCheckPass(TaggedPass):
+    def __init__(
+        self,
+        support_files: List[str],
+        ignore_cpp: Dict[str, List[str]],
+        matchers: Dict[str, List[dict]],
+    ):
+        super().__init__("cpp-checks", "c")
+        self.support_files = support_files
+        self.ignore_cpp = ignore_cpp
+        self.non_support_matchers = deserialize_matchers(matchers["non_support"])
+        self.header_matchers = deserialize_matchers(matchers["header"])
+        self.cpp_matchers = deserialize_matchers(matchers["cpp"])
+        self.cpp_object_matchers = deserialize_matchers(matchers["cpp_object"])
+        self.generic_matchers = deserialize_matchers(matchers["generic"])
+        self.generic_matchers["Parenthesis at the end of line:"] = self.parethesis_matcher
+
+    @staticmethod
+    def parethesis_matcher(path: Path, line: str) -> List[re.Match]:
+        if re.search(r"R\"[^ (]*\($", line):
+            return []
+        main_match = re.search(r"\($", line)
+        return [main_match] if main_match else []
+
+    @staticmethod
+    def include_matcher(cpp_files: Dict[Path, str]) -> Matcher:
+        def include_matcher_inner(path: Path, line: str) -> List[re.Match]:
+            if path in cpp_files:
+                match = re.search(r"^\s*#include <.*\.h(|pp)>", line)
+            else:
+                match = re.search(r"^\s*#include <.*\.hpp>", line)
+            return [match] if match else []
+
+        return include_matcher_inner
+
+    @staticmethod
+    def initrevng_matcher(cpp_files: Dict[Path, str]) -> List[Path]:
+        return [
+            file
+            for file, contents in cpp_files.items()
+            if re.search(r"int main\([^)]+\) {", contents)
+            and ("// rcc-ignore: initrevng" not in contents and "InitRevng" not in contents)
+        ]
+
+    async def process(self, files: Dict[Path, str], args) -> PassResult:
+        non_support_files = {
+            path: content for path, content in files.items() if str(path) not in self.support_files
+        }
+
+        cpp_files = {
+            path: content
+            for path, content in files.items()
+            if not any_startswith(str(path), self.ignore_cpp["paths"])
+            and str(path) not in self.ignore_cpp["files"]
+            and path.suffix != ".c"
+        }
+
+        header_files = {path: content for path, content in cpp_files.items() if path.suffix == ".h"}
+        cpp_object_files = {
+            path: content for path, content in cpp_files.items() if path.suffix != ".h"
+        }
+
+        include_matcher = {
+            "Includes should never use <..> except for C++ "
+            "standard includes:": self.include_matcher(cpp_files)
+        }
+
+        generic_result = line_matcher(files, self.generic_matchers)
+        non_support_result = line_matcher(non_support_files, self.non_support_matchers)
+        cpp_include_result = line_matcher(files, include_matcher)
+        cpp_result = line_matcher(cpp_files, self.cpp_matchers)
+        cpp_object_result = line_matcher(cpp_object_files, self.cpp_object_matchers)
+        header_result = line_matcher(header_files, self.header_matchers)
+        main_no_init = self.initrevng_matcher(cpp_object_files)
+
+        headers_without_pragma_once = [
+            file
+            for file, content in header_files.items()
+            if content and content.splitlines()[0] != "#pragma once"
+        ]
+
+        return PassResult.make_from(
+            files={
+                "Header does not start with #pragma once": headers_without_pragma_once,
+                "Main executable does not have 'InitRevng'": main_no_init,
+            },
+            rules=(
+                generic_result,
+                non_support_result,
+                cpp_result,
+                cpp_include_result,
+                header_result,
+                cpp_object_result,
+            ),
+        )
+
+
+class CheckCommitPass(Pass):
+    def __init__(self):
+        super().__init__("check-commit")
+
+    async def run(
+        self, files: Dict[str, Dict[Path, str]], args: Dict[str, str | bool]
+    ) -> PassResult:
+        if not args["check_commit"]:
+            return PassResult("", True)
+
+        commit_msg_cmd = await run_with_capture(["git", "show", "--format=%B", "-s"])
+        if commit_msg_cmd.returncode != 0:
+            return PassResult(commit_msg_cmd.output, False)
+
+        parts = commit_msg_cmd.output.splitlines()
+
+        subject = parts.pop(0)
+
+        first_non_link = False
+        message_lines: List[str] = []
+        for line in reversed(parts):
+            if not first_non_link:
+                if re.match(r"\[\d+\] ", line) or line.strip() == "":
+                    continue
+
+                first_non_link = True
+            message_lines.insert(0, line)
+
+        problems = []
+        # Actual content checks
+        if len(subject) > 50:
+            problems.append("Commit subject line exceeds 50 characters")
+
+        if re.search(r"\bwip\b", subject, re.IGNORECASE):
+            problems.append("Commit subject line contains 'WIP'")
+
+        if subject[-1] == ".":
+            problems.append("Commit subject should not end with a period")
+
+        if len(message_lines) > 0 and message_lines[0] != "":
+            problems.append("Subject not followed by an empty line")
+
+        for index, line in enumerate(message_lines):
+            if len(line) > 72:
+                problems.append(f"Commit message line {index+2} too long ({len(line)})")
+
+        def is_valid_last_line(line):
+            if line[-1] == ".":
+                return True
+            if line == "```":
+                return True
+            return False
+
+        if len(message_lines) > 0 and not is_valid_last_line(message_lines[-1]):
+            problems.append("Last line of the commit does not end with a period")
+
+        commit_joined = f"{subject}\n\n" + "\n".join(message_lines)
+        for index, line in enumerate(commit_joined.splitlines()):
+            if line != line.rstrip():
+                problems.append(f"Trailing whitespace on line {index}")
+
+        # Check commit message with codespell
+        codespell_cmd = await run_with_capture(["codespell", "-c", "-"], input_=commit_joined)
+
+        if len(problems) != 0 or codespell_cmd.returncode != 0:
+            output = colored("Found an invalid commit message", "blue") + ":\n"
+            output += subject + "\n"
+            if len(message_lines) > 0:
+                for line in message_lines:
+                    output += line + "\n"
+            output += "\n"
+
+            if len(problems) != 0:
+                output += colored("Detected problems", "blue") + ":\n"
+                output += "  - " + "\n  - ".join(problems) + "\n"
+            if codespell_cmd.returncode != 0:
+                output += colored("Detected typos", "blue") + ":\n"
+                output += codespell_cmd.output
+            output += "\n\n"
+
+        else:
+            output = ""
+
+        return PassResult(output, len(output) == 0)
+
+
+def suffix_or_shebang(
+    suffixes: Sequence[str] = (), shebang: str = "", exclude: Sequence[str] = ()
+) -> FileFilter:
+    def matcher(path: Path, content: str) -> bool:
+        if str(path) in exclude:
+            return False
+        if len(suffixes) > 0 and path.suffix.startswith(".") and path.suffix[1:] in suffixes:
+            return True
+        if shebang != "" and content != "":
+            first_line = content.splitlines()[0]
+            if re.search(r"#!.*" + shebang, first_line):
+                return True
+        return False
+
+    return matcher
+
+
+def all_except(suffixes: Sequence[str] = ()) -> FileFilter:
+    def matcher(path: Path, content: str) -> bool:
+        if len(suffixes) == 0:
+            return True
+        return not (path.suffix.startswith(".") and path.suffix[1:] in suffixes)
+
+    return matcher
+
+
+def cmake_filter() -> FileFilter:
+    return lambda path, content: "cmake" in path.name.lower()
+
+
+def all_filter() -> FileFilter:
+    return lambda path, content: True
+
+
+def get_config(filename: str) -> Path:
+    filepath = Path(__file__).parent / "../../share/revng" / filename
+    if filepath.is_file():
+        return filepath
+    else:
+        fail(f"Could not find config file {filename}")  # noqa: R503
+
+
+def read_rcc_config():
+    config_path = get_config("rcc-config.yml")
+    with open(config_path) as config_file:
+        return yaml.safe_load(config_file)
+
+
+def filter_files(
+    file_content_list: Dict[Path, str], filters: Dict[str, FileFilter]
+) -> Dict[str, Dict[Path, str]]:
+    return {
+        tag: {
+            filename: content
+            for filename, content in file_content_list.items()
+            if matcher(filename, content)
+        }
+        for tag, matcher in filters.items()
+    }
+
+
+def git_ls_files_wrapper(*args: str) -> List[str]:
+    file_list = check_output(["git", "ls-files", "-z", *args], text=True)
+    deleted_list = check_output(["git", "ls-files", "-z", "--deleted"], text=True)
+    return [f for f in file_list.split("\x00") if f != "" and f not in deleted_list.split("\x00")]
+
+
+def git_diff_wrapper(*args: str) -> List[str]:
+    file_list = check_output(
+        ["git", "diff", "-z", "--diff-filter=AMRC", "--name-status", *args], text=True
+    )
+    split_file_list = [c for c in file_list.split("\x00") if c != ""]
+    result = []
+    while len(split_file_list) > 0:
+        op = split_file_list.pop(0)[0]
+        if op in ["A", "M"]:
+            result.append(split_file_list.pop(0))
+        elif op in ["R", "C"]:
+            split_file_list.pop(0)
+            result.append(split_file_list.pop(0))
+        else:
+            fail(f"Invalid git operation: {op}")
+    return result
+
+
+def get_file_list(args) -> List[Path]:
+    if len(args.FILES) > 0:
+        files = args.FILES
+        for file in (f for f in files if not os.path.isfile(f)):
+            fail(f"File {file} does not exist")
+    elif args.HEAD:
+        files = git_diff_wrapper("HEAD^..HEAD")
+    elif args.commit_range:
+        files = git_diff_wrapper(args.commit_range)
+    elif args.staged:
+        files = git_diff_wrapper("--cached")
+    elif args.unstaged:
+        files = git_ls_files_wrapper("-m", "--exclude-standard")
+    else:
+        files = git_ls_files_wrapper()
+    return [Path(f) for f in files]
+
+
+def read_clang_style(args) -> str:
+    if not args.use_local_clang_format_file:
+        style = get_config("clang-format-style-file.yml").read_text()
+    else:
+        style = "file"
+    if args.print_clang_format_config:
+        process_run(["clang-format", "--dry-run", f"-style={style}", "--dump-config"])
+        sys.exit(0)
+    return style
+
+
+async def inflate_files(initial_dict: Dict[str, Dict[Path, str]]) -> Dict[str, Dict[Path, str]]:
+    paths: Set[Path] = set()
+    for pathset in initial_dict.values():
+        paths.update(pathset.keys())
+    contents = {path: read_file(path) for path in paths}
+    return {
+        tag: {path: contents[path] for path in paths.keys()} for tag, paths in initial_dict.items()
+    }
+
+
+@dataclass
+class PassRun:
+    name: str
+    result: PassResult
+    time: float
+
+
+async def run_passes(files: Dict[str, Dict[Path, str]], args: Dict[str, str | bool], config: dict):
+    async def pass_wrapper(pass_: Pass, *args) -> PassRun:
+        start = time.time()
+        result = await pass_.run(*args)
+        return PassRun(pass_.name, result, time.time() - start)
+
+    def combine_passes(*passes: Pass):
+        async def combined_pass(*args):
+            return [await pass_wrapper(pass_, *args) for pass_ in passes]
+
+        return combined_pass
+
+    write_passes = [deserialize_config_item(pass_) for pass_ in config["write_passes"]]
+    read_passes = [deserialize_config_item(pass_) for pass_ in config["read_passes"]]
+    combined_rw_passes = [
+        combine_passes(*passes) for _, passes in groupby(write_passes, lambda p: p.tag)
+    ]
+
+    runs: List[PassRun] = []
+    start = time.time()
+    rw_pass_runs = [p(files, args) for p in combined_rw_passes]
+    for pass_group in await asyncio.gather(*rw_pass_runs):
+        runs.extend(pass_group)
+    files = await inflate_files(files)
+    ro_pass_runs = [pass_wrapper(p, files, args) for p in read_passes]
+    runs.extend(await asyncio.gather(*ro_pass_runs))
+
+    for run in runs:
+        if not run.result.verify():
+            log(f"Pass {colored(run.name, 'blue')} failed")
+            if run.result.output.strip() != "":
+                log(indent(run.result.output.strip(), "  "))
+
+    if args["print_timings"]:
+        log(f"{colored('Timing Information:', 'blue')}")
+        max_len = max(len(run.name) for run in runs) + 2
+        for run in runs:
+            log(f"{f'{run.name}:' : <{max_len}}{run.time:.4f}s")
+        log("---")
+        log(f"Total Time: {time.time() - start:.4f}s")
+
+    sys.exit(0 if all(r.result.verify() for r in runs) else 1)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawTextHelpFormatter,
+        description="""Checks that the files specified in FILES... respect the rev.ng coding
+conventions, and prints all the violations.
+
+If no FILES are specified then all the files tracked by git will be checked.""",
+        epilog="""RETURN VALUES
+On success exit code is 0.
+On failure, i.e. if there is at least one file that is not respecting the
+coding conventions, exit code is 1.""",
+    )
+    parser.add_argument(
+        "--force-format",
+        action="store_true",
+        help="""Run linters on the specified files before checking.
+WARNING: using this option will overwrite your files, make sure to backup
+important stuff.""",
+    )
+
+    parser.add_argument(
+        "--print-timings",
+        action="store_true",
+        help="After execution, print timing information for each pass",
+    )
+
+    parser.add_argument(
+        "--use-local-clang-format-file",
+        action="store_true",
+        help="""Instead of using the repository config, let clang-format search in its default
+locations for a config file.
+See clang-format documentation for more details.""",
+    )
+
+    parser.add_argument(
+        "--print-clang-format-config",
+        action="store_true",
+        help="""Print the clang-format configuration to stdout and then exit, ignoring other
+arguments except for --use-local-clang-format-file.""",
+    )
+
+    parser.add_argument(
+        "--check-commit",
+        action="store_true",
+        help="Add additional checks regarding the current HEAD commit",
+    )
+
+    parser_file_selection = parser.add_mutually_exclusive_group()
+    parser_file_selection.add_argument(
+        "--commit-range", metavar="RANGE", help="Check files changed in the specified commit range"
+    )
+    parser_file_selection.add_argument(
+        "--HEAD", action="store_true", help="Alias for '--commit-range HEAD^..HEAD'"
+    )
+    parser_file_selection.add_argument(
+        "--staged", action="store_true", help="Only check staged files"
+    )
+    parser_file_selection.add_argument(
+        "--unstaged", action="store_true", help="Only check unstaged files"
+    )
+    parser.add_argument(
+        "FILES",
+        nargs="*",
+        help="List of files to check against the rev.ng coding conventions.",
+    )
+
+    return parser.parse_args()
+
+
+async def amain():
+    args = parse_args()
+    clang_style = read_clang_style(args)
+    file_list = get_file_list(args)
+    files = {filename: read_file(filename, 512) for filename in file_list}
+    config = read_rcc_config()
+    filters = {k: deserialize_config_item(v) for k, v in config["matchers"].items()}
+    filtered_files = filter_files(files, filters)
+    new_args = {
+        "dry_run": not args.force_format,
+        "print_timings": args.print_timings,
+        "check_commit": args.check_commit,
+        "clang_style": clang_style,
+        "isort_config": str(get_config("isort.cfg")),
+        "flake8_config": str(get_config("flake8-config")),
+        "prettier_config": str(get_config("prettierrc.yml")),
+    }
+    await run_passes(filtered_files, new_args, config)
+
+
+if __name__ == "__main__":
+    asyncio.run(amain())

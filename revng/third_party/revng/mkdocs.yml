@@ -1,0 +1,92 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+site_name: rev.ng docs
+docs_dir: share/doc/revng
+theme:
+  name: material
+  palette:
+    scheme: revng
+  font:
+    text: DM Sans
+    code: DM Mono
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
+  features:
+    - navigation.footer
+    - navigation.indexes
+    - content.code.copy
+nav:
+  - "What's rev.ng?": "what-is-revng.md"
+  - "User's manual":
+      - Introduction: "user-manual/index.md"
+      - "Initial setup": "user-manual/initial-setup.md"
+      - "Key concepts":
+          - MetaAddress: "user-manual/key-concepts/metaaddress.md"
+          - Model: "user-manual/key-concepts/model.md"
+          - "Artifacts and analyses": "user-manual/key-concepts/artifacts-and-analyses.md"
+      - Tutorial:
+          - "Your first decompilation": "user-manual/tutorial/first-decompilation.md"
+          - "A model from scratch": "user-manual/tutorial/model-from-scratch.md"
+          - "Editing types in C": "user-manual/tutorial/editing-types-in-c.md"
+          - "Comments and local variables": "user-manual/tutorial/comments-and-local-variables.md"
+      - "Python scripting": "user-manual/python-scripting.md"
+  - "Developer's manual":
+      - developer-manual/index.md
+      - "QEMU helpers": "developer-manual/qemu-helpers.md"
+      - "The code discovery process": "developer-manual/code-discovery.md"
+      - "ABI definition": "references/abi-definition.md"
+  - "References":
+      - "Model": references/model.md
+      - Artifacts: references/artifacts.md
+      - Analyses: references/analyses.md
+      - CLI:
+          - revng:
+              - references/cli/index.md
+              - revng-common: references/cli/revng-common.md
+              - revng-project:
+                  - references/cli/revng-project/index.md
+                  - revng-project-init: references/cli/revng-project/init.md
+                  - revng-project-analyze: references/cli/revng-project/analyze.md
+                  - revng-project-artifact: references/cli/revng-project/artifact.md
+                  - revng-project-daemon: references/cli/revng-project/daemon.md
+              - revng-quick:
+                  - references/cli/revng-quick/index.md
+                  - revng-quick-analyze: references/cli/revng-quick/analyze.md
+                  - revng-quick-artifact: references/cli/revng-quick/artifact.md
+              - revng-pipeline:
+                  - references/cli/revng-pipeline/index.md
+                  - revng-pipeline-run-pipe: references/cli/revng-pipeline/run-pipe.md
+                  - revng-pipeline-run-analysis: references/cli/revng-pipeline/run-analysis.md
+          - revng-merge-llvm: references/cli/revng-merge-llvm.md
+          - revng-ptml: references/cli/revng-ptml.md
+      - "MIME types": references/mime-types.md
+      - PTML: references/ptml.md
+      - Pipeline: references/pipeline.md
+markdown_extensions:
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: "#"
+  - admonition
+  - pymdownx.details
+  - footnotes
+plugins:
+  - search
+  - mkdocs_graphviz:
+      common:
+        node:
+          color: "#cbd4da"
+          fontcolor: "#cbd4da"
+        edge:
+          color: "#cbd4da"
+          fontcolor: "#cbd4da"
+  - toggle-sidebar:
+      toggle_button: all
+extra_css:
+  - stylesheets/main.css
+  - stylesheets/theme.css
+extra_javascript:
+  - javascripts/additional.js

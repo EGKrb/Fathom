@@ -1,0 +1,16 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+commands:
+  - type: revng.test-propagated-prototypes
+    from:
+      - type: revng-qa.compiled-stripped
+        filter: for-propagated-prototypes
+    command: |-
+      cd "$$(temp -d)";
+      revng project init --overwrite --no-initial-auto-analysis "$INPUT";
+      revng project analyze parse-binary -o /dev/null -- --debug-info=no;
+      revng model apply revng.yml "$SOURCE.add-puts.yml" -o revng.yml;
+      revng project analyze detect-abi |
+        revng model compare "$SOURCE".model.yml

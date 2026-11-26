@@ -1,0 +1,43 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+---
+- Name: _start
+  Blocks:
+    - End: "2"
+      ID: "1"
+      Successors:
+        - Destination: "3"
+          Type: DirectBranch
+    - End: "3"
+      ID: "2"
+      Successors:
+        - Destination: "4"
+          Type: DirectBranch
+    - End: "4"
+      ID: "3"
+      Successors:
+        - Destination: "2"
+          Type: DirectBranch
+    - End: "5"
+      ID: "4"
+      Successors:
+        - Destination: ":Invalid"
+          Type: Return
+- Name: prologue
+  # Note: this function is inline, if necessary, we can add it here.
+  Blocks:
+    - ID: "3"
+      End: "4"
+      Successors:
+        - Destination: ":Invalid"
+          Type: BrokenReturn
+- Name: epilogue
+  # Note: this function is noreturn, if necessary, we can add it here.
+  Blocks:
+    - End: "5"
+      ID: "4"
+      Successors:
+        - Destination: ":Invalid"
+          Type: LongJmp

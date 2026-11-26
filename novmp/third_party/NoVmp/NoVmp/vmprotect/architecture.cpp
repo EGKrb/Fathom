@@ -157,7 +157,7 @@ namespace vmp::arch
 		return
 			( variant == 1 ? i.id == X86_INS_MOV || i.id == X86_INS_MOVZX : i.id == X86_INS_MOV ) &&
 			i.operands[ 0 ].type == X86_OP_MEM &&
-			i.operands[ 0 ].mem.base == X86_REG_RSP &&
+			i.operands[ 0 ].mem.base == vmp::REG_NSP &&
 			i.operands[ 0 ].mem.index != X86_REG_INVALID &&
 			i.operands[ 0 ].mem.scale == 1 &&
 			i.operands[ 0 ].mem.disp == disp &&
@@ -169,7 +169,7 @@ namespace vmp::arch
 		return
 			( variant == 1 ? i.id == X86_INS_MOV || i.id == X86_INS_MOVZX : i.id == X86_INS_MOV ) &&
 			i.operands[ 1 ].type == X86_OP_MEM &&
-			i.operands[ 1 ].mem.base == X86_REG_RSP &&
+			i.operands[ 1 ].mem.base == vmp::REG_NSP &&
 			i.operands[ 1 ].mem.index != X86_REG_INVALID &&
 			i.operands[ 1 ].mem.scale == 1 &&
 			i.operands[ 1 ].mem.disp == disp &&
@@ -179,7 +179,7 @@ namespace vmp::arch
 	static bool i_save_vsp_flags( vm_state* vstate, const vtil::amd64::instruction& i0, const vtil::amd64::instruction& i1, uint32_t offset = 0 )
 	{
 		return
-			i0.id == X86_INS_PUSHFQ &&
+			i0.id == vmp::INS_PUSHF &&
 			i1.id == X86_INS_POP &&
 			i1.operands[ 0 ].type == X86_OP_MEM &&
 			i1.operands[ 0 ].mem.base == vstate->reg_vsp &&
@@ -422,7 +422,7 @@ namespace vmp::arch
 				[ ]( vm_state* vstate, instruction& vins, const std::vector<char>& var ) -> bool
 				{
 					auto& is = vins.stream; auto& ps = vins.parameter_sizes;
-					int dt = var[ 0 ] == 8 ? 0 : 1;
+					int dt = var[ 0 ] == vmp::native_size ? 0 : 1;
 					uint8_t sz = var[ 0 ] == 1 ? 2 : var[ 0 ];
 
 					return is.size() == ( 6 + dt ) &&
@@ -434,13 +434,13 @@ namespace vmp::arch
 						i_read_vsp( vstate, is[ 1 ], sz, var[ 0 ] ) &&
 
 						// [[ 00000001400DC64C: sub  rsi, 4
-						( dt == 0 || i_shift_vsp( vstate, is[ 2 ], sz - 8 ) ) &&
+						( dt == 0 || i_shift_vsp( vstate, is[ 2 ], sz - vmp::native_size ) ) &&
 
 						// [[ 00000001400EC46A: add  rax, rcx
 						is[ 2 + dt ].id == X86_INS_ADD &&
 
 						// [[ 00000001400EC46D: mov  qword ptr [rsi + 8], rax
-						i_write_vsp( vstate, is[ 3 + dt ], +8, var[ 0 ] ) &&
+						i_write_vsp( vstate, is[ 3 + dt ], vmp::native_size, var[ 0 ] ) &&
 
 						// [[ 00000001400F3782: pushfq
 						// [[ 00000001400F3787: pop  qword ptr [rsi]
@@ -486,18 +486,18 @@ namespace vmp::arch
 						vtil::amd64::registers.extend( is[ 1 ].operands[ 0 ].reg ) == X86_REG_RDX &&
 						
 						// [[ 00000001400FD750: sub  r10, 8
-						i_shift_vsp( vstate, is[ 2 ], -8 ) &&
+						i_shift_vsp( vstate, is[ 2 ], -vmp::native_size ) &&
 
 						// [[ 00000001400FD75F: imul rdx
 						is[ 3 ].is( X86_INS_IMUL, { X86_OP_REG } ) &&
 						vtil::amd64::registers.extend( is[ 3 ].operands[ 0 ].reg ) == X86_REG_RDX &&
 
 						// [[ 00000001400FD769: mov  qword ptr [r10 + 8], rdx
-						i_write_vsp( vstate, is[ 4 ], +8, var[ 0 ] ) &&
+						i_write_vsp( vstate, is[ 4 ], vmp::native_size, var[ 0 ] ) &&
 						vtil::amd64::registers.extend( is[ 4 ].operands[ 1 ].reg ) == X86_REG_RDX &&
 
 						// [[ 00000001400FD76D: mov  qword ptr [r10 + 0x10], rax
-						i_write_vsp( vstate, is[ 5 ], +8 + sz, var[ 0 ] ) &&
+						i_write_vsp( vstate, is[ 5 ], vmp::native_size + sz, var[ 0 ] ) &&
 						vtil::amd64::registers.extend( is[ 5 ].operands[ 1 ].reg ) == X86_REG_RAX &&
 
 						// [[ 00000001400FD778: pushfq
@@ -531,7 +531,7 @@ namespace vmp::arch
 				[ ]( vm_state* vstate, instruction& vins, const std::vector<char>& var ) -> bool
 				{
 					auto& is = vins.stream; auto& ps = vins.parameter_sizes;
-					int dt = var[ 0 ] == 8 ? 0 : 1;
+					int dt = var[ 0 ] == vmp::native_size ? 0 : 1;
 					uint8_t sz = var[ 0 ] == 1 ? 2 : var[ 0 ];
 
 					return is.size() == ( 8 + dt ) &&
@@ -548,17 +548,17 @@ namespace vmp::arch
 						i_read_vsp( vstate, is[ 2 ], sz * 2, var[ 0 ] ) &&
 						
 						// [[ 00000001400FD750: sub  r10, 8
-						( !dt || i_shift_vsp( vstate, is[ 3 ], sz - 8 ) ) &&
+						( !dt || i_shift_vsp( vstate, is[ 3 ], sz - vmp::native_size ) ) &&
 
 						// [[ 00000001400FD75F: idiv rcx
 						is[ 3 + dt ].is( X86_INS_IDIV, { X86_OP_REG } ) &&
 
 						// [[ 00000001400FD769: mov  qword ptr [r10 + 8], rdx
-						i_write_vsp( vstate, is[ 4 + dt ], +8, var[ 0 ] ) &&
+						i_write_vsp( vstate, is[ 4 + dt ], vmp::native_size, var[ 0 ] ) &&
 						vtil::amd64::registers.extend( is[ 4 + dt ].operands[ 1 ].reg ) == X86_REG_RDX &&
 
 						// [[ 00000001400FD76D: mov  qword ptr [r10 + 0x10], rax
-						i_write_vsp( vstate, is[ 5 + dt ], +8 + sz, var[ 0 ] ) &&
+						i_write_vsp( vstate, is[ 5 + dt ], vmp::native_size + sz, var[ 0 ] ) &&
 						vtil::amd64::registers.extend( is[ 5 + dt ].operands[ 1 ].reg ) == X86_REG_RAX &&
 
 						// [[ 00000001400FD778: pushfq
@@ -605,18 +605,18 @@ namespace vmp::arch
 						vtil::amd64::registers.extend( is[ 1 ].operands[ 0 ].reg ) == X86_REG_RDX &&
 						
 						// [[ 00000001400FD750: sub  r10, 8
-						i_shift_vsp( vstate, is[ 2 ], -8 ) &&
+						i_shift_vsp( vstate, is[ 2 ], -vmp::native_size ) &&
 
 						// [[ 00000001400FD75F: MUL rdx
 						is[ 3 ].is( X86_INS_MUL, { X86_OP_REG } ) &&
 						vtil::amd64::registers.extend( is[ 3 ].operands[ 0 ].reg ) == X86_REG_RDX &&
 
 						// [[ 00000001400FD769: mov  qword ptr [r10 + 8], rdx
-						i_write_vsp( vstate, is[ 4 ], +8, var[ 0 ] ) &&
+						i_write_vsp( vstate, is[ 4 ], vmp::native_size, var[ 0 ] ) &&
 						vtil::amd64::registers.extend( is[ 4 ].operands[ 1 ].reg ) == X86_REG_RDX &&
 
 						// [[ 00000001400FD76D: mov  qword ptr [r10 + 0x10], rax
-						i_write_vsp( vstate, is[ 5 ], +8 + sz, var[ 0 ] ) &&
+						i_write_vsp( vstate, is[ 5 ], vmp::native_size + sz, var[ 0 ] ) &&
 						vtil::amd64::registers.extend( is[ 5 ].operands[ 1 ].reg ) == X86_REG_RAX &&
 
 						// [[ 00000001400FD778: pushfq
@@ -650,7 +650,7 @@ namespace vmp::arch
 				[ ]( vm_state* vstate, instruction& vins, const std::vector<char>& var ) -> bool
 				{
 					auto& is = vins.stream; auto& ps = vins.parameter_sizes;
-					int dt = var[ 0 ] == 8 ? 0 : 1;
+					int dt = var[ 0 ] == vmp::native_size ? 0 : 1;
 					uint8_t sz = var[ 0 ] == 1 ? 2 : var[ 0 ];
 
 					return is.size() == ( 8 + dt ) &&
@@ -667,17 +667,17 @@ namespace vmp::arch
 						i_read_vsp( vstate, is[ 2 ], sz * 2, var[ 0 ] ) &&
 						
 						// [[ 00000001400FD750: sub  r10, 8
-						( !dt || i_shift_vsp( vstate, is[ 3 ], sz - 8 ) ) &&
+						( !dt || i_shift_vsp( vstate, is[ 3 ], sz - vmp::native_size ) ) &&
 
 						// [[ 00000001400FD75F: div rcx
 						is[ 3 + dt ].is( X86_INS_DIV, { X86_OP_REG } ) &&
 
 						// [[ 00000001400FD769: mov  qword ptr [r10 + 8], rdx
-						i_write_vsp( vstate, is[ 4 + dt ], 8, var[ 0 ] ) &&
+						i_write_vsp( vstate, is[ 4 + dt ], vmp::native_size, var[ 0 ] ) &&
 						vtil::amd64::registers.extend( is[ 4 + dt ].operands[ 1 ].reg ) == X86_REG_RDX &&
 
 						// [[ 00000001400FD76D: mov  qword ptr [r10 + 0x10], rax
-						i_write_vsp( vstate, is[ 5 + dt ], 8 + sz, var[ 0 ] ) &&
+						i_write_vsp( vstate, is[ 5 + dt ], vmp::native_size + sz, var[ 0 ] ) &&
 						vtil::amd64::registers.extend( is[ 5 + dt ].operands[ 1 ].reg ) == X86_REG_RAX &&
 
 						// [[ 00000001400FD778: pushfq
@@ -712,7 +712,7 @@ namespace vmp::arch
 				[ ]( vm_state* vstate, instruction& vins, const std::vector<char>& var ) -> bool
 				{
 					auto& is = vins.stream; auto& ps = vins.parameter_sizes;
-					int dt = var[ 0 ] == 8 ? 0 : 1;
+					int dt = var[ 0 ] == vmp::native_size ? 0 : 1;
 					uint8_t sz = var[ 0 ] == 1 ? 2 : var[ 0 ];
 
 					return is.size() == ( 8 + dt ) &&
@@ -724,7 +724,7 @@ namespace vmp::arch
 						i_read_vsp( vstate, is[ 1 ], sz, var[ 0 ] ) &&
 
 						// [[ 00000001400DC64C: sub  rsi, 4
-						( dt == 0 || i_shift_vsp( vstate, is[ 2 ], sz - 8 ) ) &&
+						( dt == 0 || i_shift_vsp( vstate, is[ 2 ], sz - vmp::native_size ) ) &&
 
 						// [[ 00000001400E37F1: not  rax
 						is[ 2 + dt ].id == X86_INS_NOT &&
@@ -736,7 +736,7 @@ namespace vmp::arch
 						is[ 4 + dt ].id == X86_INS_AND &&
 
 						// [[ 00000001400EC46D: mov  qword ptr [rsi + 8], rax
-						i_write_vsp( vstate, is[ 5 + dt ], 8, var[ 0 ] ) &&
+						i_write_vsp( vstate, is[ 5 + dt ], vmp::native_size, var[ 0 ] ) &&
 
 						// [[ 00000001400E381E: pushfq
 						// [[ 00000001400E381F: pop  qword ptr [rbp]
@@ -770,7 +770,7 @@ namespace vmp::arch
 				[ ]( vm_state* vstate, instruction& vins, const std::vector<char>& var ) -> bool
 				{
 					auto& is = vins.stream; auto& ps = vins.parameter_sizes;
-					int dt = var[ 0 ] == 8 ? 0 : 1;
+					int dt = var[ 0 ] == vmp::native_size ? 0 : 1;
 					uint8_t sz = var[ 0 ] == 1 ? 2 : var[ 0 ];
 
 					return is.size() == ( 8 + dt ) &&
@@ -782,7 +782,7 @@ namespace vmp::arch
 						i_read_vsp( vstate, is[ 1 ], sz, var[ 0 ] ) &&
 
 						// [[ 00000001400DC64C: sub  rsi, 4
-						( dt == 0 || i_shift_vsp( vstate, is[ 2 ], sz - 8 ) ) &&
+						( dt == 0 || i_shift_vsp( vstate, is[ 2 ], sz - vmp::native_size ) ) &&
 
 						// [[ 00000001400E37F1: not  rax
 						is[ 2 + dt ].id == X86_INS_NOT &&
@@ -794,7 +794,7 @@ namespace vmp::arch
 						is[ 4 + dt ].id == X86_INS_OR &&
 
 						// [[ 00000001400EC46D: mov  qword ptr [rsi + 8], rax
-						i_write_vsp( vstate, is[ 5 + dt ], 8, var[ 0 ] ) &&
+						i_write_vsp( vstate, is[ 5 + dt ], vmp::native_size, var[ 0 ] ) &&
 
 						// [[ 00000001400E381E: pushfq
 						// [[ 00000001400E381F: pop  qword ptr [rbp]
@@ -843,7 +843,7 @@ namespace vmp::arch
 						is[ 3 ].id == X86_INS_SHR &&
 
 						// 00000001400510DE: mov  qword ptr [rbp + 8], rdi
-						i_write_vsp( vstate, is[ 4 ], 8, var[ 0 ] ) &&
+						i_write_vsp( vstate, is[ 4 ], vmp::native_size, var[ 0 ] ) &&
 
 						// [[ 00000001400E381E: pushfq
 						// [[ 00000001400E381F: pop  qword ptr [rbp]
@@ -892,7 +892,7 @@ namespace vmp::arch
 						is[ 3 ].id == X86_INS_SHL &&
 
 						// 00000001400510DE: mov  qword ptr [rbp + 8], rdi
-						i_write_vsp( vstate, is[ 4 ], 8, var[ 0 ] ) &&
+						i_write_vsp( vstate, is[ 4 ], vmp::native_size, var[ 0 ] ) &&
 
 						// [[ 00000001400E381E: pushfq
 						// [[ 00000001400E381F: pop  qword ptr [rbp]
@@ -945,7 +945,7 @@ namespace vmp::arch
 						is[ 4 ].id == X86_INS_SHRD &&
 
 						// [[ 00000001400890AB: mov  qword ptr [r9 + 8], r10
-						i_write_vsp( vstate, is[ 5 ], 8, var[ 0 ] ) &&
+						i_write_vsp( vstate, is[ 5 ], vmp::native_size, var[ 0 ] ) &&
 
 						// [[ 00000001400E381E: pushfq
 						// [[ 00000001400E381F: pop  qword ptr [rbp]
@@ -998,7 +998,7 @@ namespace vmp::arch
 						is[ 4 ].id == X86_INS_SHLD &&
 
 						// [[ 00000001400890AB: mov  qword ptr [r9 + 8], r10
-						i_write_vsp( vstate, is[ 5 ], 8, var[ 0 ] ) &&
+						i_write_vsp( vstate, is[ 5 ], vmp::native_size, var[ 0 ] ) &&
 
 						// [[ 00000001400E381E: pushfq
 						// [[ 00000001400E381F: pop  qword ptr [rbp]
@@ -1026,13 +1026,13 @@ namespace vmp::arch
 				[ ]( vm_state* vstate, instruction& vins, const std::vector<char>& var ) -> bool
 				{
 					auto& is = vins.stream; auto& ps = vins.parameter_sizes;
-					int dt = var[ 0 ] == 8 ? 0 : 1;
+					int dt = var[ 0 ] == vmp::native_size ? 0 : 1;
 					uint8_t sz = var[ 0 ] == 1 ? 2 : var[ 0 ];
 
 					return is.size() == ( 3 + dt ) &&
 
 						// [[ 0000000140038C8B: mov  rdi, qword ptr [rsi]
-						i_read_vsp( vstate, is[ 0 ], 0, 8 ) &&
+						i_read_vsp( vstate, is[ 0 ], 0, vmp::native_size ) &&
 
 						// [[ 0000000140038C90: mov  rdx, qword ptr ss:[rdi]
 						( is[ 1 ].id == X86_INS_MOV || is[ 1 ].id == X86_INS_MOVZX ) &&
@@ -1042,7 +1042,7 @@ namespace vmp::arch
 						is[ 1 ].operands[ 1 ].size == var[ 0 ] &&
 
 						// [[ 000000014005EB12: add  rsi, 4
-						( dt == 0 || i_shift_vsp( vstate, is[ 2 ], 8 - sz ) ) &&
+						( dt == 0 || i_shift_vsp( vstate, is[ 2 ], vmp::native_size - sz ) ) &&
 
 						// [[ 0000000140038C97: mov  qword ptr [rsi], rdx
 						i_write_vsp( vstate, is[ 2 + dt ], 0 , var[ 0 ] );
@@ -1075,13 +1075,13 @@ namespace vmp::arch
 					return is.size() == 4 &&
 
 						// [[ 00000001400E16C9: mov  rbp, qword ptr [rsi]
-						i_read_vsp( vstate, is[ 0 ], 0, 8 ) &&
+						i_read_vsp( vstate, is[ 0 ], 0, vmp::native_size ) &&
 
 						// [[ 00000001400E16CF: mov  r9, qword ptr [rsi + 8]
-						i_read_vsp( vstate, is[ 1 ], 8, var[ 0 ] ) &&
+						i_read_vsp( vstate, is[ 1 ], vmp::native_size, var[ 0 ] ) &&
 
 						// [[ 00000001400E16DE: add  rsi, 0x10
-						i_shift_vsp( vstate, is[ 2 ], 0x8 + var[ 0 ] ) &&
+						i_shift_vsp( vstate, is[ 2 ], vmp::native_size + var[ 0 ] ) &&
 
 						// [[ 00000001400E16E8: mov  qword ptr [rbp], r9
 						is[ 3 ].id == X86_INS_MOV &&
@@ -1119,13 +1119,13 @@ namespace vmp::arch
 					return is.size() == 5 &&
 
 						// [[ 00000001400E6751: mov  rdi, qword ptr [r11]
-						i_read_vsp( vstate, is[ 0 ], 0, 8 ) &&
+						i_read_vsp( vstate, is[ 0 ], 0, vmp::native_size ) &&
 
 						// [[ 00000001400EBF4E: mov  edx, dword ptr [r11 + 8]
-						i_read_vsp( vstate, is[ 1 ], 8, var[ 0 ] ) &&
+						i_read_vsp( vstate, is[ 1 ], vmp::native_size, var[ 0 ] ) &&
 
 						// [[ 00000001400EBF52: add  r11, 8
-						i_shift_vsp( vstate, is[ 2 ], 8 ) &&
+						i_shift_vsp( vstate, is[ 2 ], vmp::native_size ) &&
 
 						// [[ 00000001400EBF5E: lock xchg    dword ptr [rdi], edx
 						is[ 3 ].id == X86_INS_XCHG &&
@@ -1298,7 +1298,7 @@ namespace vmp::arch
 					return is.size() == 1 &&
 
 						// [[ 00007FFB7246A04F: mov r10, qword ptr [r10]
-						i_read_vsp( vstate, is[ 0 ], 0, 8 ) &&
+						i_read_vsp( vstate, is[ 0 ], 0, vmp::native_size ) &&
 						is[ 0 ].operands[ 0 ].type == X86_OP_REG &&
 						is[ 0 ].operands[ 0 ].reg == vstate->reg_vsp;
 				},
@@ -1337,7 +1337,7 @@ namespace vmp::arch
 							is[ 0 ].operands[ 0 ].type == X86_OP_REG &&
 							// is[ 0 ].operands[ 0 ].reg == vstate->reg_vsp && (Can't check this as this is pre-mutation VSP)
 							is[ 0 ].operands[ 1 ].type == X86_OP_IMM &&
-							is[ 0 ].operands[ 1 ].imm == 8 &&
+							is[ 0 ].operands[ 1 ].imm == vmp::native_size &&
 
 							// [[ 000000014009FCEC: lea  rbx, [rip - 7]
 							is[ 1 ].id == X86_INS_LEA;
@@ -1353,7 +1353,7 @@ namespace vmp::arch
 							is[ 1 ].operands[ 0 ].type == X86_OP_REG &&
 							// is[ 1 ].operands[ 0 ].reg == vstate->reg_vsp && (Can't check this as this is pre-mutation VSP)
 							is[ 1 ].operands[ 1 ].type == X86_OP_IMM &&
-							is[ 1 ].operands[ 1 ].imm == 8 &&
+							is[ 1 ].operands[ 1 ].imm == vmp::native_size &&
 
 							// [[ 000000014009FCEC: lea  rbx, [rip - 7]
 							is[ 2 ].id == X86_INS_LEA;
@@ -1363,7 +1363,7 @@ namespace vmp::arch
 
 				// Reflect the side effects of VIP=[VSP] (Not reflected properly as VSP might mutate)
 				//
-				[ ]( auto*, instruction& i, auto& ) { i.stack_reads.insert( 0 ); i.stack_delta = +8; }
+				[ ]( auto*, instruction& i, auto& ) { i.stack_reads.insert( 0 ); i.stack_delta = +vmp::native_size; }
 			}
 		},
 					
@@ -1422,10 +1422,10 @@ namespace vmp::arch
 						is[ 0 ].operands[ 1 ].reg == X86_REG_CR0 &&
 
 						// [[ 0000000140095245: sub  r10, 8
-						i_shift_vsp( vstate, is[ 1 ], -0x8 ) &&
+						i_shift_vsp( vstate, is[ 1 ], -vmp::native_size ) &&
 
 						// [[ 000000014009524C: mov  dword ptr [r10], edx
-						i_write_vsp( vstate, is[ 2 ], 0, 8 );
+						i_write_vsp( vstate, is[ 2 ], 0, vmp::native_size );
 				}
 			}
 		},
@@ -1445,10 +1445,10 @@ namespace vmp::arch
 						is[ 0 ].operands[ 1 ].reg == X86_REG_CR3 &&
 
 						// [[ 0000000140095245: sub  r10, 8
-						i_shift_vsp( vstate, is[ 1 ], -0x8 ) &&
+						i_shift_vsp( vstate, is[ 1 ], -vmp::native_size ) &&
 
 						// [[ 000000014009524C: mov  dword ptr [r10], edx
-						i_write_vsp( vstate, is[ 2 ], 0, 8 );
+						i_write_vsp( vstate, is[ 2 ], 0, vmp::native_size );
 				}
 			}
 		},
@@ -1596,7 +1596,7 @@ namespace vmp::arch
 			auto is_ctx_mem_op = [ ] ( const cs_x86_op& op ) -> std::optional<x86_reg>
 			{
 				if ( op.type == X86_OP_MEM &&
-					 op.mem.base == X86_REG_RSP &&
+					 op.mem.base == vmp::REG_NSP &&
 					 op.mem.index != X86_REG_INVALID &&
 					 op.mem.scale == 1 &&
 					 op.mem.disp == 0 )

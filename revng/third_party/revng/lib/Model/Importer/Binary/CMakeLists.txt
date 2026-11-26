@@ -1,0 +1,19 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+revng_add_analyses_library_internal(
+  revngModelImporterBinary
+  BinaryImporter.cpp
+  BinaryImporterHelper.cpp
+  ELFImporter.cpp
+  ELFLDDTree.cpp
+  MachOImporter.cpp
+  Options.cpp
+  PECOFFImporter.cpp
+  PECOFFLDDTree.cpp
+  ImportBinaryAnalysis.cpp)
+
+llvm_map_components_to_libnames(LLVM_LIBRARIES Object)
+target_link_libraries(revngModelImporterBinary revngModel revngModelImporter
+                      revngModelImporterDebugInfo revngABI ${LLVM_LIBRARIES})

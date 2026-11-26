@@ -1,0 +1,37 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+revng_add_library_internal(
+  revngLift
+  SHARED
+  CodeGenerator.cpp
+  CSVOffsets.cpp
+  ExternalJumpsHandler.cpp
+  InstructionTranslator.cpp
+  IRAnnotators.cpp
+  LibTcg.cpp
+  Lift.cpp
+  LinkSupportPipe.cpp
+  JumpTargetManager.cpp
+  NoReturnAnalysis.cpp
+  PostLiftVerifyPass.cpp
+  RootAnalyzer.cpp
+  SelfReferencingDbgAnnotationWriter.cpp
+  ValueMaterializerPass.cpp
+  VariableManager.cpp)
+
+target_link_libraries(
+  revngLift
+  PUBLIC dl
+         m
+         revngABI
+         revngBasicAnalyses
+         revngModelImporterDebugInfo
+         revngFunctionCallIdentification
+         revngModel
+         revngSupport
+         revngTypeShrinking
+         revngEarlyFunctionAnalysis
+         revngValueMaterializer
+         ${LLVM_LIBRARIES})

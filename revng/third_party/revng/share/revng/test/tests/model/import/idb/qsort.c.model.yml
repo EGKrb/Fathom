@@ -1,0 +1,82 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+ImportedDynamicFunctions:
+  - Name: qsort
+    Prototype:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/3821538295510931842-CABIFunctionDefinition"
+Functions:
+  - Name: cmpfunc
+    Prototype:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/5944255354151483434-CABIFunctionDefinition"
+TypeDefinitions:
+  - Kind: CABIFunctionDefinition
+    ID: 3821538295510931842
+    ABI: SystemV_x86_64
+    Arguments:
+      - Index: 0
+        Type:
+          Kind: PointerType
+          PointerSize: 8
+          PointeeType:
+            Kind: PrimitiveType
+            PrimitiveKind: Void
+        Name: base
+      - Index: 1
+        Type:
+          Kind: DefinedType
+          Definition: "/TypeDefinitions/855760813070670525-TypedefDefinition"
+        Name: nmemb
+      - Index: 2
+        Type:
+          Kind: DefinedType
+          Definition: "/TypeDefinitions/855760813070670525-TypedefDefinition"
+        Name: size
+      - Index: 3
+        Type:
+          Kind: DefinedType
+          Definition: "/TypeDefinitions/7339777181910699325-TypedefDefinition"
+        Name: compar
+  - Kind: TypedefDefinition
+    ID: 855760813070670525
+    Name: size_t
+    UnderlyingType:
+      Kind: PrimitiveType
+      PrimitiveKind: Unsigned
+      Size: 8
+  - Kind: TypedefDefinition
+    ID: 7339777181910699325
+    Name: __compar_fn_t
+    UnderlyingType:
+      Kind: PointerType
+      PointerSize: 8
+      PointeeType:
+        Kind: DefinedType
+        Definition: "/TypeDefinitions/5090678720539169893-CABIFunctionDefinition"
+  - Kind: CABIFunctionDefinition
+    ID: 5090678720539169893
+    ABI: SystemV_x86_64
+    ReturnType:
+      Kind: PrimitiveType
+      PrimitiveKind: Number
+      Size: 4
+    Arguments:
+      - Index: 0
+        Type:
+          Kind: PointerType
+          PointerSize: 8
+          PointeeType:
+            Kind: PrimitiveType
+            IsConst: true
+            PrimitiveKind: Void
+      - Index: 1
+        Type:
+          Kind: PointerType
+          PointerSize: 8
+          PointeeType:
+            Kind: PrimitiveType
+            IsConst: true
+            PrimitiveKind: Void

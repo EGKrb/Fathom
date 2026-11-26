@@ -1,0 +1,54 @@
+---
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+Architecture: x86_64
+
+Functions:
+  - Entry: "0x401129:Code_x86_64"
+    Name: fn
+    Prototype:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/3001-CABIFunctionDefinition"
+    ExportedNames:
+      - fn
+TypeDefinitions:
+  - Kind: CABIFunctionDefinition
+    ID: 3001
+    ABI: SystemV_x86_64
+    Arguments:
+      - Index: 0
+        Type:
+          Kind: PointerType
+          PointerSize: 8
+          PointeeType:
+            Kind: DefinedType
+            Definition: "/TypeDefinitions/3002-StructDefinition"
+        Name: b_array
+  - Kind: StructDefinition
+    ID: 3002
+    Name: B
+    Fields:
+      - Offset: 0
+        Name: a1
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Unsigned
+          Size: 4
+      - Offset: 4
+        Name: a2
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Unsigned
+          Size: 4
+    Size: 8
+
+Segments:
+  - StartAddress: "0x400000:Generic64"
+    VirtualSize: 40960
+    StartOffset: 0
+    FileSize: 40960
+    IsReadable: true
+    IsWriteable: false
+    IsExecutable: true

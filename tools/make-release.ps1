@@ -9,7 +9,8 @@ Prerequisites (see README.md, "Compiler"):
   - extracmds\build-x64\ExtraCmds.dp64 and extracmds\build-x32\ExtraCmds.dp32 built
   - triton\build-x64\Triton.dp64 and triton\build-x32\Triton.dp32 built (triton\build.ps1)
   - decompiler\build-x64\Decompiler.dp64 and decompiler\build-x32\Decompiler.dp32 built (decompiler\build.ps1)
-  - novmp\build\NoVmp.exe and vtildump.exe built (novmp\build.ps1)
+  - novmp\build\NoVmp.exe, vtildump.exe and novmp\build32\NoVmp32.exe, vtildump32.exe built (novmp\build.ps1)
+  - remill\dist staged (remill\build.ps1)
   - build-cross-x64\minidump.exe built (tools\build-minidump-viewer.ps1)
 
 Steps:
@@ -17,7 +18,8 @@ Steps:
   2. runs cmake\release.cmake (official layout: release\, pluginsdk\, pdb\)
   3. adds ScyllaHide and xAnalyzer (official downloads, SHA-256 checked) and pybridge
   4. adds the Python client, examples, headless templates, HvKdFusion, the emulator, licenses and LISEZMOI.md
-  5. writes dist\<Name>_<Version>.zip and dist\<Name>_<Version>_symbols.zip (Name defaults to Fathom)
+  5. writes dist\<Name>_<Version>.zip and dist\<Name>_<Version>_symbols.zip (Name defaults to Fathom), and
+     dist\<Name>_<Version>_revng.zip when revng\dist is built (rev.ng, about 340 MB: its own archive, release\revng\)
 
 OllyDumpEx is not redistributable: the archive contains install-plugins.ps1 to download it.
 
@@ -46,7 +48,8 @@ $required = @(
     'extracmds\build-x64\ExtraCmds.dp64', 'extracmds\build-x32\ExtraCmds.dp32',
     'triton\build-x64\Triton.dp64', 'triton\build-x32\Triton.dp32',
     'decompiler\build-x64\Decompiler.dp64', 'decompiler\build-x32\Decompiler.dp32',
-    'novmp\build\NoVmp.exe', 'novmp\build\vtildump.exe',
+    'novmp\build\NoVmp.exe', 'novmp\build\vtildump.exe', 'novmp\build32\NoVmp32.exe', 'novmp\build32\vtildump32.exe',
+    'remill\dist\remill-lift-17.exe', 'remill\dist\semantics\amd64_avx.bc', 'remill\dist\semantics\x86_avx.bc',
     'build-cross-x64\minidump.exe'
 )
 foreach ($file in $required) {
@@ -125,10 +128,25 @@ foreach ($arch in 'x32', 'x64') {
     Copy-Item $hostExe (Join-Path $hosts "emulator_host_$arch.exe")
 }
 
-# NoVmp (novmp command of ExtraCmds: VMProtect devirtualization) and vtildump
+# NoVmp (novmp command of ExtraCmds: VMProtect devirtualization) and vtildump, x64 and x86 (NoVmp32, Fathom's port)
 $novmp = Join-Path $main 'novmp'
 New-Item -ItemType Directory -Force $novmp | Out-Null
 Copy-Item (Join-Path $root 'novmp\build\NoVmp.exe'), (Join-Path $root 'novmp\build\vtildump.exe'), (Join-Path $root 'novmp\README.md') $novmp
+Copy-Item (Join-Path $root 'novmp\build32\NoVmp32.exe'), (Join-Path $root 'novmp\build32\vtildump32.exe') $novmp
+
+# remill (remill.lift command of ExtraCmds: machine code to LLVM IR), built for Windows, with its semantics
+$remill = Join-Path $main 'remill'
+New-Item -ItemType Directory -Force $remill | Out-Null
+Copy-Item -Recurse (Join-Path $root 'remill\dist\*') $remill
+Copy-Item (Join-Path $root 'remill\README.md') $remill
+
+# Binary Ninja plugin (fathom_binja: synchronization with Fathom through pybridge), with pybridge's client next to it
+$binja = Join-Path $main 'binja'
+New-Item -ItemType Directory -Force $binja | Out-Null
+Copy-Item -Recurse (Join-Path $root 'binja\fathom_binja') $binja
+Copy-Item (Join-Path $root 'binja\README.md') $binja
+Copy-Item (Join-Path $root 'pybridge\python\x64dbg_bridge.py') (Join-Path $binja 'fathom_binja')
+Get-ChildItem -Recurse -Directory $binja -Filter '__pycache__' | Remove-Item -Recurse -Force
 
 # angr / miasm (angr.* and miasm.* commands of ExtraCmds): scripts and miasm
 $analysis = Join-Path $main 'analysis'
@@ -160,6 +178,16 @@ Copy-Item (Join-Path $root 'novmp\third_party\VTIL-Core\LICENSE.md') (Join-Path 
 Copy-Item (Join-Path $root 'novmp\build\_deps\keystone-src\COPYING') (Join-Path $licenses 'Keystone-LICENSE.txt')
 Copy-Item (Join-Path $root 'novmp\build\_deps\capstone-src\LICENSE.TXT') (Join-Path $licenses 'Capstone-NoVmp-LICENSE.txt')
 Copy-Item (Join-Path $root 'novmp\build\_deps\linuxpe-src\LICENSE.md') (Join-Path $licenses 'linux-pe-LICENSE.txt') -ErrorAction SilentlyContinue
+# remill (Apache-2.0) and what remill-lift links: LLVM (Apache-2.0 with LLVM exceptions), XED (Apache-2.0),
+# glog, gflags (BSD-3-Clause), sleigh (Ghidra, Apache-2.0: Ghidra-LICENSE.txt above)
+Copy-Item (Join-Path $root 'remill\third_party\remill\LICENSE') (Join-Path $licenses 'remill-LICENSE.txt')
+$remillDeps = Join-Path $env:USERPROFILE 'remill-deps\build'
+foreach ($dep in @{ 'LLVM' = 'llvm-prefix\src\llvm\llvm\LICENSE.TXT'; 'XED' = 'xed-prefix\src\xed\LICENSE';
+                    'glog' = 'glog-prefix\src\glog\COPYING'; 'gflags' = 'gflags-prefix\src\gflags\COPYING.txt' }.GetEnumerator()) {
+    $source = Join-Path $remillDeps $dep.Value
+    if (Test-Path $source) { Copy-Item $source (Join-Path $licenses "remill-$($dep.Key)-LICENSE.txt") }
+    else { Write-Warning "license of $($dep.Key) not found ($source)" }
+}
 # miasm (GPL-2.0-or-later)
 Copy-Item (Join-Path $root 'analysis\LICENSE.miasm') (Join-Path $licenses 'miasm-LICENSE.txt')
 # Libraries linked into minidump.exe
@@ -177,12 +205,35 @@ $readme = $readme.Replace('%VERSION%', $Version).Replace('%COMMIT%', $commit)
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $zip = Join-Path $OutDir "${ArchiveName}_$Version.zip"
 $symbols = Join-Path $OutDir "${ArchiveName}_${Version}_symbols.zip"
-Remove-Item -Force $zip, $symbols, (Join-Path $OutDir 'SHA256SUMS.txt') -ErrorAction SilentlyContinue
+$revngZip = Join-Path $OutDir "${ArchiveName}_${Version}_revng.zip"
+Remove-Item -Force $zip, $symbols, $revngZip, (Join-Path $OutDir 'SHA256SUMS.txt') -ErrorAction SilentlyContinue
 Compress-Archive -CompressionLevel Optimal -Path (Join-Path $package 'release'), (Join-Path $package 'pluginsdk'), (Join-Path $package 'commithash.txt') -DestinationPath $zip
 Compress-Archive -CompressionLevel Optimal -Path (Join-Path $package 'pdb'), (Join-Path $package 'commithash.txt') -DestinationPath $symbols
+$archives = @($zip, $symbols)
+
+# rev.ng (revng.decompile command of ExtraCmds), built for Windows by revng\build.ps1: its own archive, release\revng\,
+# extracted over the release
+$revngDist = Join-Path $root 'revng\dist'
+if (Test-Path (Join-Path $revngDist 'revng.cmd')) {
+    $revngPackage = Join-Path $package 'revng-archive'
+    $revngTarget = Join-Path $revngPackage 'release\revng'
+    New-Item -ItemType Directory -Force $revngTarget | Out-Null
+    Copy-Item -Recurse (Join-Path $revngDist '*') $revngTarget
+    Copy-Item (Join-Path $root 'revng\README.md') $revngTarget
+    $revngLicenses = Join-Path $revngTarget 'licenses'
+    New-Item -ItemType Directory -Force $revngLicenses | Out-Null
+    Copy-Item (Join-Path $root 'revng\third_party\revng\LICENSE') (Join-Path $revngLicenses 'revng-LICENSE.txt')
+    Copy-Item (Join-Path $root 'revng\third_party\revng\LICENSE.mit') (Join-Path $revngLicenses 'revng-LICENSE.mit.txt')
+    Copy-Item (Join-Path $root 'revng\third_party\FATHOM.md') (Join-Path $revngLicenses 'revng-FATHOM.md')
+    Copy-Item (Join-Path $root 'revng\patches\qemu.patch') (Join-Path $revngLicenses 'qemu-changes.patch')
+    Compress-Archive -CompressionLevel Optimal -Path (Join-Path $revngPackage 'release') -DestinationPath $revngZip
+    $archives += $revngZip
+} else {
+    Write-Warning 'revng\dist not built (revng\build.ps1): no rev.ng archive'
+}
 
 $sums = ''
-foreach ($file in $zip, $symbols) {
+foreach ($file in $archives) {
     $hash = (Get-FileHash -Algorithm SHA256 $file).Hash.ToLowerInvariant()
     $sums += "{0}  {1}`n" -f $hash, (Split-Path -Leaf $file)
     "{0,-45} {1,8:N1} MB  sha256 {2}" -f (Split-Path -Leaf $file), ((Get-Item $file).Length / 1MB), $hash

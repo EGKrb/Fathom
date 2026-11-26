@@ -1,0 +1,31 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+TypeDefinitions:
+  - Kind: StructDefinition
+    ID: 17825711661244524544
+    Name: Node
+    Fields:
+      - Offset: 0
+        Name: content_uint32
+        Type:
+          Kind: DefinedType
+          Definition: "/TypeDefinitions/16313795245817021241-TypedefDefinition"
+      - Offset: 4
+        Name: prev
+        Type:
+          Kind: PointerType
+          PointerSize: 8
+          PointeeType:
+            Kind: DefinedType
+            Definition: "/TypeDefinitions/14968854803921815239-TypedefDefinition"
+      - Offset: 12
+        Name: next
+        Type:
+          Kind: PointerType
+          PointerSize: 8
+          PointeeType:
+            Kind: DefinedType
+            Definition: "/TypeDefinitions/14968854803921815239-TypedefDefinition"
+    Size: 20

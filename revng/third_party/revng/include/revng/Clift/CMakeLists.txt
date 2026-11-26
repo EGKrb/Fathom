@@ -1,0 +1,69 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+set(LLVM_TARGET_DEFINITIONS CliftAttributes.td)
+mlir_tablegen(CliftAttributes.h.inc -gen-attrdef-decls)
+mlir_tablegen(CliftAttributes.cpp.inc -gen-attrdef-defs)
+
+set(LLVM_TARGET_DEFINITIONS CliftAttributesBytecode.td)
+mlir_tablegen(CliftAttributesBytecode.h.inc -gen-attrdef-decls)
+mlir_tablegen(CliftAttributesBytecode.cpp.inc -gen-attrdef-defs)
+
+set(LLVM_TARGET_DEFINITIONS CliftEnums.td)
+mlir_tablegen(CliftEnums.h.inc -gen-enum-decls)
+mlir_tablegen(CliftEnums.cpp.inc -gen-enum-defs)
+
+set(LLVM_TARGET_DEFINITIONS CliftTypeInterfacesBasic.td)
+mlir_tablegen(CliftTypeInterfacesBasic.h.inc -gen-type-interface-decls)
+mlir_tablegen(CliftTypeInterfacesBasic.cpp.inc -gen-type-interface-defs)
+
+set(LLVM_TARGET_DEFINITIONS CliftTypeInterfacesObject.td)
+mlir_tablegen(CliftTypeInterfacesObject.h.inc -gen-type-interface-decls)
+mlir_tablegen(CliftTypeInterfacesObject.cpp.inc -gen-type-interface-defs)
+
+set(LLVM_TARGET_DEFINITIONS CliftTypeInterfacesDefined.td)
+mlir_tablegen(CliftTypeInterfacesDefined.h.inc -gen-type-interface-decls)
+mlir_tablegen(CliftTypeInterfacesDefined.cpp.inc -gen-type-interface-defs)
+
+set(LLVM_TARGET_DEFINITIONS CliftTypeInterfacesClass.td)
+mlir_tablegen(CliftTypeInterfacesClass.h.inc -gen-type-interface-decls)
+mlir_tablegen(CliftTypeInterfacesClass.cpp.inc -gen-type-interface-defs)
+
+set(LLVM_TARGET_DEFINITIONS CliftTypeInterfacesPrimitive.td)
+mlir_tablegen(CliftTypeInterfacesPrimitive.h.inc -gen-type-interface-decls)
+mlir_tablegen(CliftTypeInterfacesPrimitive.cpp.inc -gen-type-interface-defs)
+
+set(LLVM_TARGET_DEFINITIONS CliftTypeInterfacesValue.td)
+mlir_tablegen(CliftTypeInterfacesValue.h.inc -gen-type-interface-decls)
+mlir_tablegen(CliftTypeInterfacesValue.cpp.inc -gen-type-interface-defs)
+
+set(LLVM_TARGET_DEFINITIONS CliftTypeInterfacesIntegral.td)
+mlir_tablegen(CliftTypeInterfacesIntegral.h.inc -gen-type-interface-decls)
+mlir_tablegen(CliftTypeInterfacesIntegral.cpp.inc -gen-type-interface-defs)
+
+set(LLVM_TARGET_DEFINITIONS CliftAttrInterfaces.td)
+mlir_tablegen(CliftAttrInterfaces.h.inc -gen-attr-interface-decls)
+mlir_tablegen(CliftAttrInterfaces.cpp.inc -gen-attr-interface-defs)
+
+set(LLVM_TARGET_DEFINITIONS CliftOpInterfacesBasic.td)
+mlir_tablegen(CliftOpInterfacesBasic.h.inc -gen-op-interface-decls)
+mlir_tablegen(CliftOpInterfacesBasic.cpp.inc -gen-op-interface-defs)
+
+set(LLVM_TARGET_DEFINITIONS CliftOpInterfacesLabel.td)
+mlir_tablegen(CliftOpInterfacesLabel.h.inc -gen-op-interface-decls)
+mlir_tablegen(CliftOpInterfacesLabel.cpp.inc -gen-op-interface-defs)
+
+set(LLVM_TARGET_DEFINITIONS CliftOpInterfacesJump.td)
+mlir_tablegen(CliftOpInterfacesJump.h.inc -gen-op-interface-decls)
+mlir_tablegen(CliftOpInterfacesJump.cpp.inc -gen-op-interface-defs)
+
+set(LLVM_TARGET_DEFINITIONS CliftOpInterfacesControlFlow.td)
+mlir_tablegen(CliftOpInterfacesControlFlow.h.inc -gen-op-interface-decls)
+mlir_tablegen(CliftOpInterfacesControlFlow.cpp.inc -gen-op-interface-defs)
+
+set(LLVM_TARGET_DEFINITIONS CliftOpInterfacesExpr.td)
+mlir_tablegen(CliftOpInterfacesExpr.h.inc -gen-op-interface-decls)
+mlir_tablegen(CliftOpInterfacesExpr.cpp.inc -gen-op-interface-defs)
+
+add_mlir_dialect(Clift clift)

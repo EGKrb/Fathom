@@ -135,7 +135,7 @@ namespace vmp
 
 			// Push relocation offset.
 			//
-			auto treloc = block->tmp( 64 );
+			auto treloc = block->tmp( vmp::native_bits );
 			block->mov( treloc, vtil::REG_IMGBASE )
 				 ->sub( treloc, vstate->img->get_real_image_base() )
 				 ->push( treloc );
@@ -207,7 +207,7 @@ namespace vmp
 
 				// Pop target from stack.
 				//
-				vtil::operand jmp_dest = block->tmp( 64 );
+				vtil::operand jmp_dest = block->tmp( vmp::native_bits );
 				block->pop( jmp_dest );
 
 				// Insert vexit to the location.
@@ -241,7 +241,7 @@ namespace vmp
 					// Try to read from the top of the stack.
 					//
 					auto continue_from = ( tracer.rtrace_p( { std::prev( block->end() ),
-										   { tracer( { std::prev( block->end() ), vtil::REG_SP } ) + block->sp_offset, 64 } } ) -
+										   { tracer( { std::prev( block->end() ), vtil::REG_SP } ) + block->sp_offset, vmp::native_bits } } ) -
 										   (vstate->img->has_relocs ? vtil::symbolic::variable{ {}, vtil::REG_IMGBASE }.to_expression() : vtil::symbolic::expression{ vstate->img->get_real_image_base() })).simplify( true );
 #if DISCOVERY_VERBOSE_OUTPUT
 					log( "continue => %s\n", continue_from.to_string() );
@@ -260,7 +260,7 @@ namespace vmp
 							//
 							block->wback().base = &vtil::ins::vxcall;
 							block->wback().vip = vstate->vip;
-							block->shift_sp( 8, false, block->end() );
+							block->shift_sp( vmp::native_size, false, block->end() );
 
 							/* TODO:
 							// Check if it's alloca_probe inserted by the compiler, in which case we can ignore
@@ -328,7 +328,7 @@ namespace vmp
 				// Reached real exit, determine destination.
 				//
 				auto exit_destination = jmp_dest.is_immediate()
-					? vtil::symbolic::expression{ jmp_dest.imm().u64, jmp_dest.bit_count() }
+					? vtil::symbolic::expression{ jmp_dest.imm().uval, jmp_dest.bit_count() }
 					: (tracer.rtrace_p({ std::prev(block->end()), jmp_dest.reg() }) - (vstate->img->has_relocs ? vtil::symbolic::variable{ {}, vtil::REG_IMGBASE }.to_expression() : vtil::symbolic::expression{ vstate->img->get_real_image_base() })).simplify(true);
 #if DISCOVERY_VERBOSE_OUTPUT
 				log( "exit => %s\n", exit_destination.to_string() );
@@ -367,12 +367,12 @@ namespace vmp
 					//
 					for ( auto& [id, ins] : non_virt_chunk.stream )
 					{
-						if ( ins.is( X86_INS_PUSHFQ, {} ) )
+						if ( ins.is( vmp::INS_PUSHF, {} ) )
 						{
 							block->pushf();
 							continue;
 						}
-						else if ( ins.is( X86_INS_POPFQ, {} ) )
+						else if ( ins.is( vmp::INS_POPF, {} ) )
 						{
 							block->popf();
 							continue;
@@ -381,7 +381,7 @@ namespace vmp
 						for ( auto reg_read : ins.regs_read )
 						{
 							vtil::operand op = x86_reg( reg_read );
-							if ( reg_read == X86_REG_RSP ) op = { vtil::REG_SP };
+							if ( reg_read == vmp::REG_NSP ) op = { vtil::REG_SP };
 							if ( reg_read == X86_REG_EFLAGS ) op = { vtil::REG_FLAGS };
 							block->vpinr( op );
 						}
@@ -392,7 +392,7 @@ namespace vmp
 						for ( auto reg_write : ins.regs_write )
 						{
 							vtil::operand op = x86_reg( reg_write );
-							fassert( reg_write != X86_REG_RSP );
+							fassert( reg_write != vmp::REG_NSP );
 							if ( reg_write == X86_REG_EFLAGS ) op = { vtil::REG_FLAGS };
 							block->vpinw( op );
 						}
@@ -409,7 +409,7 @@ namespace vmp
 					
 					// Replace the destination of the jump.
 					//
-					block->wback().operands[ 0 ] = { block_next->entry_vip, 64 };
+					block->wback().operands[ 0 ] = { block_next->entry_vip, vmp::native_bits };
 					break;
 				}
 
@@ -468,7 +468,7 @@ namespace vmp
 				{
 					// Pop target from stack.
 					//
-					auto jmp_dest = block->tmp( 64 );
+					auto jmp_dest = block->tmp( vmp::native_bits );
 					block->pop( jmp_dest );
 
 					if ( vstate->dir_vip < 0 )

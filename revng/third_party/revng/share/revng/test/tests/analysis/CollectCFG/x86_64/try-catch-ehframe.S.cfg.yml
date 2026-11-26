@@ -1,0 +1,29 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+---
+- Name: function_call
+  Blocks:
+    - ID: "1"
+      End: "2"
+      Successors:
+        - Destination: ":Invalid"
+          Type: Return
+- Name: _start
+  Blocks:
+    - End: "3"
+      ID: "2"
+      Successors:
+        - Destination: "1"
+          Type: FunctionCall
+    - End: "4"
+      ID: "3"
+      Successors:
+        - Destination: "5"
+          Type: DirectBranch
+    - End: "6"
+      ID: "5"
+      Successors:
+        - Destination: ":Invalid"
+          Type: Return

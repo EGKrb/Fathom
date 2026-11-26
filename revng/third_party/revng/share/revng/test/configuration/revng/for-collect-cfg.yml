@@ -1,0 +1,37 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+commands:
+  - type: revng.test-collect-cfg
+    from:
+      - type: revng-qa.compiled
+        filter: for-collect-cfg and !stripped
+    command: |-
+      revng quick artifact emit-cfg --analyses=parse-binary,detect-abi --yaml "$INPUT" -- --debug-names |
+        yq -r '.[] | values' |
+        yq -sy . |
+        ./filter.py |
+        revng model to-json --remap |
+        revng model compare "${SOURCE}.cfg.yml"
+    scripts:
+      filter.py: |-
+        #!/usr/bin/env python3
+
+        import sys
+        import yaml
+
+        def should_keep(cfg):
+            if cfg.get("Name", ""):
+                return True
+
+            for block in cfg["Blocks"]:
+                for successor in block["Successors"]:
+                    if successor.get("DynamicFunction", ""):
+                        return True
+
+            return False
+
+        bundles = yaml.safe_load(sys.stdin.read())
+        cfgs = [b["MainFunction"] for b in bundles]
+        print(yaml.dump([cfg for cfg in cfgs if should_keep(cfg)]))

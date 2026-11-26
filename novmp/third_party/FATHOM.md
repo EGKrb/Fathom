@@ -15,4 +15,19 @@ VTIL of today, where a routine owns its blocks (`std::unique_ptr`) and `routine:
   `backup = rtn->clone()`;
 - `NoVmp/vmprotect/vtil_lifter.cpp`: `explored_blocks[ entry_vip ].get()`.
 
-VTIL is unchanged.
+
+**Changes for x86** (Fathom's port: `NoVmp32.exe`, NoVmp built as a 32-bit program, where VTIL's native
+architecture is x86):
+
+- `NoVmp/vmprotect/native.hpp` (new): what depends on the native architecture (register size, native registers,
+  `pushfd`/`pushfq`, PE32/PE32+ headers, TEB segment, self-references of the image, relocated loads, base of the
+  virtual instruction pointer, which `-vipbase` sets);
+- `NoVmp/vmprotect/architecture.cpp`, `subroutines.cpp`, `vtil_lifter.cpp`, `il2vtil.cpp`, `image_desc.hpp`,
+  `deobfuscator.hpp`, `vm_state.hpp`: the 8-byte sizes, `rsp`/`rax`/... and `gs:` replaced by those of
+  `native.hpp`; the context saved at the VM entry has 8 + 2 slots on x86;
+- `NoVmp/emulator/emulator.cpp`: the native emulator in x86 assembly for the 32-bit build (the x64 shellcode is
+  unchanged); `NoVmp/emulator/rwx_allocator.cpp`: `_WIN32` instead of `_WIN64`;
+- `NoVmp/main.cpp`: the `-vipbase` option; the demo compiler (x64 code generation) is left out of the x86 build.
+
+VTIL, for x86: `VTIL-Architecture/routine/basic_block.cpp` assembles `vemit` with the x86 assembler when the
+routine's architecture is x86 (it only handled amd64).

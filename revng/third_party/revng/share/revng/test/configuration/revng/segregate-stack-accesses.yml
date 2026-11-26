@@ -1,0 +1,34 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+commands:
+  - type: revng.test-segregate-stack-accesses
+    from:
+      - type: revng-qa.compiled-with-debug-info
+        filter: for-segregate-stack-accesses
+    suffix: /
+    command: |-
+      cd "$OUTPUT";
+      export REVNG_OPTIONS="$${REVNG_OPTIONS:-} --debug-names";
+
+      revng project init --overwrite --no-initial-auto-analysis "$INPUT";
+      revng project analyze parse-binary -o /dev/null;
+
+      revng model override-by-name
+        revng.yml
+        ${SOURCE}.override.$QEMU_NAME.yml
+        > model-tmp.yml;
+      mv model-tmp.yml revng.yml;
+      rm -r .cache;
+
+      revng project analyze detect-abi -o /dev/null;
+      revng project analyze detect-stack-size -o /dev/null;
+
+      revng project artifact segregate-stack-accesses --tar |
+        revng merge llvm |
+        revng opt -remove-llvmassume-calls -instcombine-noarrays -sroa-noarrays -drop-redundant-ptrint-casts -dce -type-shrinking -dce -drop-redundant-ptrint-casts -early-cse -instsimplify -dce -S |
+        FileCheck --check-prefix=CHECK-$QEMU_NAME ${SOURCE}.filecheck.ll;
+      revng project analyze analyze-data-layout -o /dev/null;
+
+      revng project artifact emit-c -o /dev/null;

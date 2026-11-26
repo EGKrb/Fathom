@@ -1,0 +1,1171 @@
+#pragma once
+
+//
+// This file is distributed under the MIT License. See LICENSE.md for details.
+//
+
+#include <string>
+#include <vector>
+
+#include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/Triple.h"
+
+#include "revng/ADT/STLExtras.h"
+#include "revng/Model/Architecture.h"
+#include "revng/Model/PrimitiveKind.h"
+#include "revng/Support/Assert.h"
+#include "revng/Support/EnumSwitch.h"
+#include "revng/Support/Generator.h"
+#include "revng/Support/YAMLTraits.h"
+
+#include "revng/Model/Generated/Early/Register.h"
+
+namespace model::Register {
+
+constexpr inline model::Architecture::Values
+getReferenceArchitecture(Values V) {
+  revng_assert(isValid(V));
+
+  switch (V) {
+  case eax_x86:
+  case ebx_x86:
+  case ecx_x86:
+  case edx_x86:
+  case esi_x86:
+  case edi_x86:
+  case ebp_x86:
+  case esp_x86:
+  case st0_x86:
+  case zmm0_x86:
+  case zmm1_x86:
+  case zmm2_x86:
+  case zmm3_x86:
+  case zmm4_x86:
+  case zmm5_x86:
+  case zmm6_x86:
+  case zmm7_x86:
+    return model::Architecture::x86;
+  case rax_x86_64:
+  case rbx_x86_64:
+  case rcx_x86_64:
+  case rdx_x86_64:
+  case rbp_x86_64:
+  case rsp_x86_64:
+  case rsi_x86_64:
+  case rdi_x86_64:
+  case r8_x86_64:
+  case r9_x86_64:
+  case r10_x86_64:
+  case r11_x86_64:
+  case r12_x86_64:
+  case r13_x86_64:
+  case r14_x86_64:
+  case r15_x86_64:
+  case zmm0_x86_64:
+  case zmm1_x86_64:
+  case zmm2_x86_64:
+  case zmm3_x86_64:
+  case zmm4_x86_64:
+  case zmm5_x86_64:
+  case zmm6_x86_64:
+  case zmm7_x86_64:
+  case fs_x86_64:
+    return model::Architecture::x86_64;
+  case r0_arm:
+  case r1_arm:
+  case r2_arm:
+  case r3_arm:
+  case r4_arm:
+  case r5_arm:
+  case r6_arm:
+  case r7_arm:
+  case r8_arm:
+  case r9_arm:
+  case r10_arm:
+  case r11_arm:
+  case r12_arm:
+  case r13_arm:
+  case r14_arm:
+  case r15_arm:
+  case q0_arm:
+  case q1_arm:
+  case q2_arm:
+  case q3_arm:
+  case q4_arm:
+  case q5_arm:
+  case q6_arm:
+  case q7_arm:
+    return model::Architecture::arm;
+  case x0_aarch64:
+  case x1_aarch64:
+  case x2_aarch64:
+  case x3_aarch64:
+  case x4_aarch64:
+  case x5_aarch64:
+  case x6_aarch64:
+  case x7_aarch64:
+  case x8_aarch64:
+  case x9_aarch64:
+  case x10_aarch64:
+  case x11_aarch64:
+  case x12_aarch64:
+  case x13_aarch64:
+  case x14_aarch64:
+  case x15_aarch64:
+  case x16_aarch64:
+  case x17_aarch64:
+  case x18_aarch64:
+  case x19_aarch64:
+  case x20_aarch64:
+  case x21_aarch64:
+  case x22_aarch64:
+  case x23_aarch64:
+  case x24_aarch64:
+  case x25_aarch64:
+  case x26_aarch64:
+  case x27_aarch64:
+  case x28_aarch64:
+  case x29_aarch64:
+  case lr_aarch64:
+  case sp_aarch64:
+  case v0_aarch64:
+  case v1_aarch64:
+  case v2_aarch64:
+  case v3_aarch64:
+  case v4_aarch64:
+  case v5_aarch64:
+  case v6_aarch64:
+  case v7_aarch64:
+  case v8_aarch64:
+  case v9_aarch64:
+  case v10_aarch64:
+  case v11_aarch64:
+  case v12_aarch64:
+  case v13_aarch64:
+  case v14_aarch64:
+  case v15_aarch64:
+  case v16_aarch64:
+  case v17_aarch64:
+  case v18_aarch64:
+  case v19_aarch64:
+  case v20_aarch64:
+  case v21_aarch64:
+  case v22_aarch64:
+  case v23_aarch64:
+  case v24_aarch64:
+  case v25_aarch64:
+  case v26_aarch64:
+  case v27_aarch64:
+  case v28_aarch64:
+  case v29_aarch64:
+  case v30_aarch64:
+  case v31_aarch64:
+    return model::Architecture::aarch64;
+  case v0_mips:
+  case v1_mips:
+  case a0_mips:
+  case a1_mips:
+  case a2_mips:
+  case a3_mips:
+  case s0_mips:
+  case s1_mips:
+  case s2_mips:
+  case s3_mips:
+  case s4_mips:
+  case s5_mips:
+  case s6_mips:
+  case s7_mips:
+  case t0_mips:
+  case t1_mips:
+  case t2_mips:
+  case t3_mips:
+  case t4_mips:
+  case t5_mips:
+  case t6_mips:
+  case t7_mips:
+  case t8_mips:
+  case t9_mips:
+  case gp_mips:
+  case sp_mips:
+  case fp_mips:
+  case ra_mips:
+  case f0_mips:
+  case f1_mips:
+  case f2_mips:
+  case f3_mips:
+  case f4_mips:
+  case f5_mips:
+  case f6_mips:
+  case f7_mips:
+  case f8_mips:
+  case f9_mips:
+  case f10_mips:
+  case f11_mips:
+  case f12_mips:
+  case f13_mips:
+  case f14_mips:
+  case f15_mips:
+  case f16_mips:
+  case f17_mips:
+  case f18_mips:
+  case f19_mips:
+  case f20_mips:
+  case f21_mips:
+  case f22_mips:
+  case f23_mips:
+  case f24_mips:
+  case f25_mips:
+  case f26_mips:
+  case f27_mips:
+  case f28_mips:
+  case f29_mips:
+  case f30_mips:
+  case f31_mips:
+    return model::Architecture::mips;
+  case r0_systemz:
+  case r1_systemz:
+  case r2_systemz:
+  case r3_systemz:
+  case r4_systemz:
+  case r5_systemz:
+  case r6_systemz:
+  case r7_systemz:
+  case r8_systemz:
+  case r9_systemz:
+  case r10_systemz:
+  case r11_systemz:
+  case r12_systemz:
+  case r13_systemz:
+  case r14_systemz:
+  case r15_systemz:
+  case f0_systemz:
+  case f1_systemz:
+  case f2_systemz:
+  case f3_systemz:
+  case f4_systemz:
+  case f5_systemz:
+  case f6_systemz:
+  case f7_systemz:
+  case f8_systemz:
+  case f9_systemz:
+  case f10_systemz:
+  case f11_systemz:
+  case f12_systemz:
+  case f13_systemz:
+  case f14_systemz:
+  case f15_systemz:
+    return model::Architecture::systemz;
+  case Count:
+  case Invalid:
+  default:
+    revng_abort();
+  }
+}
+
+constexpr inline bool
+isUsedInArchitecture(model::Register::Values Register,
+                     model::Architecture::Values Architecture) {
+  revng_assert(isValid(Register));
+
+  auto ReferenceArchitecture = getReferenceArchitecture(Register);
+  revng_assert(Architecture != model::Architecture::Invalid);
+  if (Architecture == ReferenceArchitecture)
+    return true;
+
+  // `mipsel` uses `mips` registers.
+  if (Architecture == model::Architecture::mipsel)
+    if (ReferenceArchitecture == model::Architecture::mips)
+      return true;
+
+  return false;
+}
+
+inline llvm::StringRef getRegisterName(Values V) {
+  revng_assert(isValid(V));
+
+  llvm::StringRef FullName = getName(V);
+  auto Architecture = getReferenceArchitecture(V);
+  revng_assert(Architecture != model::Architecture::Invalid);
+  llvm::StringRef Name = model::Architecture::getName(Architecture);
+  revng_assert(FullName.substr(FullName.size() - Name.size()) == Name);
+  return FullName.substr(0, FullName.size() - Name.size() - 1);
+}
+
+/// Return the size of the register in bytes
+inline uint64_t getSize(Values V) {
+  revng_assert(isValid(V));
+
+  switch (V) {
+  case eax_x86:
+  case ebx_x86:
+  case ecx_x86:
+  case edx_x86:
+  case esi_x86:
+  case edi_x86:
+  case ebp_x86:
+  case esp_x86:
+    return 4;
+
+  case st0_x86:
+    return 10;
+
+  case zmm0_x86:
+  case zmm1_x86:
+  case zmm2_x86:
+  case zmm3_x86:
+  case zmm4_x86:
+  case zmm5_x86:
+  case zmm6_x86:
+  case zmm7_x86:
+    // Setting this to anything bigger than `8` leads to
+    // ```
+    // libtcg-helpers-full-i386.bc: error: Unterminated VBR
+    // ```
+    // TODO: set the register size to its real value.
+    return 8;
+
+  case rax_x86_64:
+  case rbx_x86_64:
+  case rcx_x86_64:
+  case rdx_x86_64:
+  case rbp_x86_64:
+  case rsp_x86_64:
+  case rsi_x86_64:
+  case rdi_x86_64:
+  case r8_x86_64:
+  case r9_x86_64:
+  case r10_x86_64:
+  case r11_x86_64:
+  case r12_x86_64:
+  case r13_x86_64:
+  case r14_x86_64:
+  case r15_x86_64:
+    return 8;
+
+  case zmm0_x86_64:
+  case zmm1_x86_64:
+  case zmm2_x86_64:
+  case zmm3_x86_64:
+  case zmm4_x86_64:
+  case zmm5_x86_64:
+  case zmm6_x86_64:
+  case zmm7_x86_64:
+    return 64;
+
+  case fs_x86_64:
+    // FS register is 16 bits (2 bytes), even if `FS.base` can be used to access
+    // more than that.
+    return 2;
+
+  case r0_arm:
+  case r1_arm:
+  case r2_arm:
+  case r3_arm:
+  case r4_arm:
+  case r5_arm:
+  case r6_arm:
+  case r7_arm:
+  case r8_arm:
+  case r9_arm:
+  case r10_arm:
+  case r11_arm:
+  case r12_arm:
+  case r13_arm:
+  case r14_arm:
+  case r15_arm:
+    return 4;
+
+  case q0_arm:
+  case q1_arm:
+  case q2_arm:
+  case q3_arm:
+  case q4_arm:
+  case q5_arm:
+  case q6_arm:
+  case q7_arm:
+    return 16;
+
+  case x0_aarch64:
+  case x1_aarch64:
+  case x2_aarch64:
+  case x3_aarch64:
+  case x4_aarch64:
+  case x5_aarch64:
+  case x6_aarch64:
+  case x7_aarch64:
+  case x8_aarch64:
+  case x9_aarch64:
+  case x10_aarch64:
+  case x11_aarch64:
+  case x12_aarch64:
+  case x13_aarch64:
+  case x14_aarch64:
+  case x15_aarch64:
+  case x16_aarch64:
+  case x17_aarch64:
+  case x18_aarch64:
+  case x19_aarch64:
+  case x20_aarch64:
+  case x21_aarch64:
+  case x22_aarch64:
+  case x23_aarch64:
+  case x24_aarch64:
+  case x25_aarch64:
+  case x26_aarch64:
+  case x27_aarch64:
+  case x28_aarch64:
+  case x29_aarch64:
+  case lr_aarch64:
+  case sp_aarch64:
+    return 8;
+
+  case v0_aarch64:
+  case v1_aarch64:
+  case v2_aarch64:
+  case v3_aarch64:
+  case v4_aarch64:
+  case v5_aarch64:
+  case v6_aarch64:
+  case v7_aarch64:
+  case v8_aarch64:
+  case v9_aarch64:
+  case v10_aarch64:
+  case v11_aarch64:
+  case v12_aarch64:
+  case v13_aarch64:
+  case v14_aarch64:
+  case v15_aarch64:
+  case v16_aarch64:
+  case v17_aarch64:
+  case v18_aarch64:
+  case v19_aarch64:
+  case v20_aarch64:
+  case v21_aarch64:
+  case v22_aarch64:
+  case v23_aarch64:
+  case v24_aarch64:
+  case v25_aarch64:
+  case v26_aarch64:
+  case v27_aarch64:
+  case v28_aarch64:
+  case v29_aarch64:
+  case v30_aarch64:
+  case v31_aarch64:
+    return 16;
+
+  case v0_mips:
+  case v1_mips:
+  case a0_mips:
+  case a1_mips:
+  case a2_mips:
+  case a3_mips:
+  case s0_mips:
+  case s1_mips:
+  case s2_mips:
+  case s3_mips:
+  case s4_mips:
+  case s5_mips:
+  case s6_mips:
+  case s7_mips:
+  case t0_mips:
+  case t1_mips:
+  case t2_mips:
+  case t3_mips:
+  case t4_mips:
+  case t5_mips:
+  case t6_mips:
+  case t7_mips:
+  case t8_mips:
+  case t9_mips:
+  case gp_mips:
+  case sp_mips:
+  case fp_mips:
+  case ra_mips:
+    return 4;
+
+  case f0_mips:
+  case f1_mips:
+  case f2_mips:
+  case f3_mips:
+  case f4_mips:
+  case f5_mips:
+  case f6_mips:
+  case f7_mips:
+  case f8_mips:
+  case f9_mips:
+  case f10_mips:
+  case f11_mips:
+  case f12_mips:
+  case f13_mips:
+  case f14_mips:
+  case f15_mips:
+  case f16_mips:
+  case f17_mips:
+  case f18_mips:
+  case f19_mips:
+  case f20_mips:
+  case f21_mips:
+  case f22_mips:
+  case f23_mips:
+  case f24_mips:
+  case f25_mips:
+  case f26_mips:
+  case f27_mips:
+  case f28_mips:
+  case f29_mips:
+  case f30_mips:
+  case f31_mips:
+    // These registers are actually 32-bit BUT qemu models them as 64-bit.
+    //
+    // Most likely to reuse the same logic for both 32-bit and 64-bit MIPS.
+    //
+    // TODO: set the real size.
+    return 8;
+
+  case r0_systemz:
+  case r1_systemz:
+  case r2_systemz:
+  case r3_systemz:
+  case r4_systemz:
+  case r5_systemz:
+  case r6_systemz:
+  case r7_systemz:
+  case r8_systemz:
+  case r9_systemz:
+  case r10_systemz:
+  case r11_systemz:
+  case r12_systemz:
+  case r13_systemz:
+  case r14_systemz:
+  case r15_systemz:
+    return 8;
+
+  case f0_systemz:
+  case f1_systemz:
+  case f2_systemz:
+  case f3_systemz:
+  case f4_systemz:
+  case f5_systemz:
+  case f6_systemz:
+  case f7_systemz:
+  case f8_systemz:
+  case f9_systemz:
+  case f10_systemz:
+  case f11_systemz:
+  case f12_systemz:
+  case f13_systemz:
+  case f14_systemz:
+  case f15_systemz:
+    return 16;
+
+  default: {
+    std::string Error = "Unsupported register: '" + getName(V).str() + "'.";
+    revng_abort(Error.c_str());
+  }
+  }
+
+  revng_abort("Unreachable!");
+}
+
+template<model::Architecture::Values Architecture>
+constexpr model::Register::Values getFirst() {
+  if constexpr (Architecture == model::Architecture::x86)
+    return model::Register::eax_x86;
+  else if constexpr (Architecture == model::Architecture::arm)
+    return model::Register::r0_arm;
+  else if constexpr (Architecture == model::Architecture::mips)
+    return model::Register::v0_mips;
+  else if constexpr (Architecture == model::Architecture::mipsel)
+    return model::Register::v0_mips;
+  else if constexpr (Architecture == model::Architecture::x86_64)
+    return model::Register::rax_x86_64;
+  else if constexpr (Architecture == model::Architecture::aarch64)
+    return model::Register::x0_aarch64;
+  else if constexpr (Architecture == model::Architecture::systemz)
+    return model::Register::r0_systemz;
+  else
+    static_assert(value_always_false<Architecture>::value,
+                  "Unsupported architecture");
+}
+
+template<model::Architecture::Values Architecture>
+constexpr model::Register::Values getLast() {
+  if constexpr (Architecture == model::Architecture::x86)
+    return model::Register::zmm7_x86;
+  else if constexpr (Architecture == model::Architecture::arm)
+    return model::Register::q7_arm;
+  else if constexpr (Architecture == model::Architecture::mips)
+    return model::Register::f31_mips;
+  else if constexpr (Architecture == model::Architecture::mipsel)
+    return model::Register::f31_mips;
+  else if constexpr (Architecture == model::Architecture::x86_64)
+    return model::Register::fs_x86_64;
+  else if constexpr (Architecture == model::Architecture::aarch64)
+    return model::Register::v31_aarch64;
+  else if constexpr (Architecture == model::Architecture::systemz)
+    return model::Register::f15_systemz;
+  else
+    static_assert(value_always_false<Architecture>::value,
+                  "Unsupported architecture");
+}
+
+template<model::Architecture::Values Architecture>
+constexpr size_t getCount() {
+  return getLast<Architecture>() - getFirst<Architecture>() + 1;
+}
+
+constexpr model::Register::Values
+getFirst(model::Architecture::Values Architecture) {
+  return skippingEnumSwitch<1>(Architecture, []<model::Architecture::Values A> {
+    return getFirst<A>();
+  });
+}
+
+constexpr model::Register::Values
+getLast(model::Architecture::Values Architecture) {
+  return skippingEnumSwitch<1>(Architecture, []<model::Architecture::Values A> {
+    return getLast<A>();
+  });
+}
+
+constexpr size_t getCount(model::Architecture::Values Architecture) {
+  return skippingEnumSwitch<1>(Architecture, []<model::Architecture::Values A> {
+    return getCount<A>();
+  });
+}
+
+inline model::Architecture::Values
+canonicalArchitecture(model::Architecture::Values Architecture) {
+  if (Architecture == model::Architecture::mipsel)
+    return model::Architecture::mips;
+
+  return Architecture;
+}
+
+inline Values fromRegisterName(llvm::StringRef Name,
+                               model::Architecture::Values Architecture) {
+  Architecture = canonicalArchitecture(Architecture);
+  std::string FullName = Name.str();
+  FullName += "_";
+  FullName += model::Architecture::getName(Architecture).str();
+
+  return fromName(FullName);
+}
+
+inline std::optional<unsigned> getMContextIndex(Values V) {
+  revng_assert(isValid(V));
+
+  switch (V) {
+  case rax_x86_64:
+    return 0xD;
+  case rbx_x86_64:
+    return 0xB;
+  case rcx_x86_64:
+    return 0xE;
+  case rdx_x86_64:
+    return 0xC;
+  case rbp_x86_64:
+    return 0xA;
+  case rsp_x86_64:
+    return 0xF;
+  case rsi_x86_64:
+    return 0x9;
+  case rdi_x86_64:
+    return 0x8;
+  case r8_x86_64:
+    return 0x0;
+  case r9_x86_64:
+    return 0x1;
+  case r10_x86_64:
+    return 0x2;
+  case r11_x86_64:
+    return 0x3;
+  case r12_x86_64:
+    return 0x4;
+  case r13_x86_64:
+    return 0x5;
+  case r14_x86_64:
+    return 0x6;
+  case r15_x86_64:
+    return 0x7;
+  default:
+    break;
+  }
+
+  if (getReferenceArchitecture(V) == model::Architecture::x86_64)
+    return std::nullopt;
+  else
+    revng_abort("Not supported for this architecture");
+}
+
+/// Return the name of the CSV corresponding to \param V.
+///
+/// Important: this function can only be called on registers for which
+/// \ref getCSVCount returns 1.
+std::string singleCSVName(Values V);
+
+/// Return the register corresponding to the \param Name
+Values fromCSVName(llvm::StringRef Name,
+                   model::Architecture::Values Architecture);
+
+/// Returns how many CSVs are needed to represent register \param V.
+uint64_t getCSVCount(Values V);
+
+/// One of the CSVs (the LLVM globals representing slices of CPU state)
+/// composing a register, identified by its name plus its placement within
+/// the register.
+///
+/// Most registers are represented by a single CSV (call \ref getCSVCount to
+/// confirm this on a per-register basis).
+///
+/// An example of a register that requires multiple CSVs is a 512-bit `zmm0`.
+struct CSV {
+  /// The name of this CSV.
+  std::string Name;
+
+  /// Its byte offset within the register.
+  uint64_t StartOffset = 0;
+
+  /// Its size in bytes.
+  uint64_t Size = 0;
+};
+
+/// \return the ordered list of CSVs composing register \p V.
+cppcoro::generator<model::Register::CSV> getCSVs(Values V);
+
+/// A portion of a register.
+struct Portion {
+public:
+  Values Register = Values::Invalid;
+  uint64_t StartOffset = 0;
+  uint64_t Size = 0;
+
+public:
+  Portion() = default;
+
+  /// This constructor initializes the portion to a given size at the *start*
+  /// of the given register. That is to say, it forces \ref StartOffset to 0.
+  Portion(model::Register::Values Register, uint64_t Size) :
+    Register(Register), StartOffset(0), Size(Size) {
+
+    if (Size > model::Register::getSize(Register)) {
+      std::string Error = "Unable to create a portion of size "
+                          + std::to_string(Size) + " for a register (`"
+                          + model::Register::getName(Register).str()
+                          + "`) of size "
+                          + std::to_string(model::Register::getSize(Register))
+                          + ".";
+      revng_abort(Error.c_str());
+    }
+  }
+
+  /// This constructor initializes a register portion from the matching CSV.
+  ///
+  /// The `Register` field is set to `Invalid` when \p Name is not a known
+  /// register CSV. Each CSV currently covers a whole register,
+  /// so `StartOffset` is always 0 and `Size` equals the register size.
+  explicit Portion(llvm::StringRef CSVName,
+                   model::Architecture::Values Architecture);
+};
+
+constexpr inline model::PrimitiveKind::Values getPrimitiveKind(Values V) {
+  revng_assert(isValid(V));
+
+  switch (V) {
+  case eax_x86:
+  case ebx_x86:
+  case ecx_x86:
+  case edx_x86:
+  case esi_x86:
+  case edi_x86:
+  case ebp_x86:
+  case esp_x86:
+  case rax_x86_64:
+  case rbx_x86_64:
+  case rcx_x86_64:
+  case rdx_x86_64:
+  case rbp_x86_64:
+  case rsp_x86_64:
+  case rsi_x86_64:
+  case rdi_x86_64:
+  case r8_x86_64:
+  case r9_x86_64:
+  case r10_x86_64:
+  case r11_x86_64:
+  case r12_x86_64:
+  case r13_x86_64:
+  case r14_x86_64:
+  case r15_x86_64:
+  case r0_arm:
+  case r1_arm:
+  case r2_arm:
+  case r3_arm:
+  case r4_arm:
+  case r5_arm:
+  case r6_arm:
+  case r7_arm:
+  case r8_arm:
+  case r9_arm:
+  case r10_arm:
+  case r11_arm:
+  case r12_arm:
+  case r13_arm:
+  case r14_arm:
+  case r15_arm:
+  case x0_aarch64:
+  case x1_aarch64:
+  case x2_aarch64:
+  case x3_aarch64:
+  case x4_aarch64:
+  case x5_aarch64:
+  case x6_aarch64:
+  case x7_aarch64:
+  case x8_aarch64:
+  case x9_aarch64:
+  case x10_aarch64:
+  case x11_aarch64:
+  case x12_aarch64:
+  case x13_aarch64:
+  case x14_aarch64:
+  case x15_aarch64:
+  case x16_aarch64:
+  case x17_aarch64:
+  case x18_aarch64:
+  case x19_aarch64:
+  case x20_aarch64:
+  case x21_aarch64:
+  case x22_aarch64:
+  case x23_aarch64:
+  case x24_aarch64:
+  case x25_aarch64:
+  case x26_aarch64:
+  case x27_aarch64:
+  case x28_aarch64:
+  case x29_aarch64:
+  case lr_aarch64:
+  case sp_aarch64:
+  case v0_mips:
+  case v1_mips:
+  case a0_mips:
+  case a1_mips:
+  case a2_mips:
+  case a3_mips:
+  case s0_mips:
+  case s1_mips:
+  case s2_mips:
+  case s3_mips:
+  case s4_mips:
+  case s5_mips:
+  case s6_mips:
+  case s7_mips:
+  case t0_mips:
+  case t1_mips:
+  case t2_mips:
+  case t3_mips:
+  case t4_mips:
+  case t5_mips:
+  case t6_mips:
+  case t7_mips:
+  case t8_mips:
+  case t9_mips:
+  case gp_mips:
+  case sp_mips:
+  case fp_mips:
+  case ra_mips:
+  case r0_systemz:
+  case r1_systemz:
+  case r2_systemz:
+  case r3_systemz:
+  case r4_systemz:
+  case r5_systemz:
+  case r6_systemz:
+  case r7_systemz:
+  case r8_systemz:
+  case r9_systemz:
+  case r10_systemz:
+  case r11_systemz:
+  case r12_systemz:
+  case r13_systemz:
+  case r14_systemz:
+  case r15_systemz:
+    return model::PrimitiveKind::PointerOrNumber;
+
+  case st0_x86:
+  case zmm0_x86:
+  case zmm1_x86:
+  case zmm2_x86:
+  case zmm3_x86:
+  case zmm4_x86:
+  case zmm5_x86:
+  case zmm6_x86:
+  case zmm7_x86:
+  case zmm0_x86_64:
+  case zmm1_x86_64:
+  case zmm2_x86_64:
+  case zmm3_x86_64:
+  case zmm4_x86_64:
+  case zmm5_x86_64:
+  case zmm6_x86_64:
+  case zmm7_x86_64:
+  case q0_arm:
+  case q1_arm:
+  case q2_arm:
+  case q3_arm:
+  case q4_arm:
+  case q5_arm:
+  case q6_arm:
+  case q7_arm:
+  case v0_aarch64:
+  case v1_aarch64:
+  case v2_aarch64:
+  case v3_aarch64:
+  case v4_aarch64:
+  case v5_aarch64:
+  case v6_aarch64:
+  case v7_aarch64:
+  case v8_aarch64:
+  case v9_aarch64:
+  case v10_aarch64:
+  case v11_aarch64:
+  case v12_aarch64:
+  case v13_aarch64:
+  case v14_aarch64:
+  case v15_aarch64:
+  case v16_aarch64:
+  case v17_aarch64:
+  case v18_aarch64:
+  case v19_aarch64:
+  case v20_aarch64:
+  case v21_aarch64:
+  case v22_aarch64:
+  case v23_aarch64:
+  case v24_aarch64:
+  case v25_aarch64:
+  case v26_aarch64:
+  case v27_aarch64:
+  case v28_aarch64:
+  case v29_aarch64:
+  case v30_aarch64:
+  case v31_aarch64:
+  case f0_mips:
+  case f1_mips:
+  case f2_mips:
+  case f3_mips:
+  case f4_mips:
+  case f5_mips:
+  case f6_mips:
+  case f7_mips:
+  case f8_mips:
+  case f9_mips:
+  case f10_mips:
+  case f11_mips:
+  case f12_mips:
+  case f13_mips:
+  case f14_mips:
+  case f15_mips:
+  case f16_mips:
+  case f17_mips:
+  case f18_mips:
+  case f19_mips:
+  case f20_mips:
+  case f21_mips:
+  case f22_mips:
+  case f23_mips:
+  case f24_mips:
+  case f25_mips:
+  case f26_mips:
+  case f27_mips:
+  case f28_mips:
+  case f29_mips:
+  case f30_mips:
+  case f31_mips:
+  case f0_systemz:
+  case f1_systemz:
+  case f2_systemz:
+  case f3_systemz:
+  case f4_systemz:
+  case f5_systemz:
+  case f6_systemz:
+  case f7_systemz:
+  case f8_systemz:
+  case f9_systemz:
+  case f10_systemz:
+  case f11_systemz:
+  case f12_systemz:
+  case f13_systemz:
+  case f14_systemz:
+  case f15_systemz:
+    return model::PrimitiveKind::Float;
+
+  case fs_x86_64:
+    return model::PrimitiveKind::Generic;
+
+  case Count:
+  case Invalid:
+  default:
+    revng_abort();
+  }
+}
+
+} // namespace model::Register
+
+template<>
+inline model::Register::Values
+getInvalidValueFromYAMLScalar<model::Register::Values>() {
+  return model::Register::Invalid;
+}
+
+template<>
+struct llvm::yaml::MappingTraits<model::Register::Portion> {
+  static void mapping(IO &IO, model::Register::Portion &Portion) {
+    IO.mapRequired("Register", Portion.Register);
+    IO.mapRequired("Size", Portion.Size);
+  }
+};
+LLVM_YAML_IS_SEQUENCE_VECTOR(model::Register::Portion)
+
+namespace model::Architecture {
+
+constexpr inline model::Register::Values getStackPointer(Values V) {
+  revng_assert(isValid(V));
+
+  using namespace model::Register;
+
+  switch (V) {
+  case x86:
+    return esp_x86;
+
+  case x86_64:
+    return rsp_x86_64;
+
+  case arm:
+    return r13_arm;
+
+  case mips:
+  case mipsel:
+    return sp_mips;
+
+  case aarch64:
+    return sp_aarch64;
+
+  case systemz:
+    return r15_systemz;
+
+  default:
+    revng_abort();
+  }
+}
+
+constexpr inline model::Register::Values getSyscallNumberRegister(Values V) {
+  revng_assert(isValid(V));
+
+  using namespace model::Register;
+
+  switch (V) {
+  case x86:
+    return eax_x86;
+
+  case x86_64:
+    return rax_x86_64;
+
+  case arm:
+    return r7_arm;
+
+  case mips:
+  case mipsel:
+    return v0_mips;
+
+  case aarch64:
+    return x8_aarch64;
+
+  case systemz:
+    return r1_systemz;
+
+  default:
+    revng_abort();
+  }
+}
+
+constexpr inline model::Register::Values getReturnAddressRegister(Values V) {
+  revng_assert(isValid(V));
+
+  using namespace model::Register;
+
+  switch (V) {
+  case x86:
+  case x86_64:
+    return model::Register::Invalid;
+
+  case arm:
+    return r14_arm;
+
+  case mips:
+  case mipsel:
+    return ra_mips;
+
+  case aarch64:
+    return lr_aarch64;
+
+  case systemz:
+    return r14_systemz;
+
+  default:
+    revng_abort();
+  }
+}
+
+inline std::optional<unsigned>
+getPCMContextIndex(model::Architecture::Values V) {
+  switch (V) {
+  case x86_64:
+    return 0x10;
+
+  case arm:
+    return 0x12;
+
+  default:
+    return std::nullopt;
+  }
+}
+
+inline cppcoro::generator<model::Register::Values> registers(Values V) {
+  revng_assert(isValid(V));
+
+  using namespace model::Register;
+  auto Next = [](model::Register::Values &V) {
+    V = static_cast<model::Register::Values>(static_cast<unsigned long>(V) + 1);
+  };
+  for (auto Register = getFirst(V); Register <= getLast(V); Next(Register)) {
+    co_yield Register;
+  }
+}
+
+} // namespace model::Architecture
+
+namespace model::Register {
+
+inline cppcoro::generator<model::Register::Values> allRegisters() {
+  using namespace model::Architecture;
+
+  // TODO: we might want to provide a similar iteration utilities for
+  //       architectures so that we don't need to manually specify every
+  //       one of them here.
+  for (model::Register::Values Register : registers(x86))
+    co_yield Register;
+  for (model::Register::Values Register : registers(x86_64))
+    co_yield Register;
+  for (model::Register::Values Register : registers(arm))
+    co_yield Register;
+  for (model::Register::Values Register : registers(aarch64))
+    co_yield Register;
+  for (model::Register::Values Register : registers(mips))
+    co_yield Register;
+  for (model::Register::Values Register : registers(mipsel))
+    co_yield Register;
+  for (model::Register::Values Register : registers(systemz))
+    co_yield Register;
+}
+
+} // namespace model::Register
+
+#include "revng/Model/Generated/Late/Register.h"

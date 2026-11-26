@@ -1,0 +1,10 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+---
+Changes:
+  - Path:            "/TypeDefinitions/2002-RawFunctionDefinition/RawFunctionDefinition::PreservedRegisters"
+    Remove:          rax_x86_64
+...
+# CHECK-NOT: - /function/0x500000:Code_x86_64

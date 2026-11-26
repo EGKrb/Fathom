@@ -1,0 +1,1329 @@
+//
+// This file is distributed under the MIT License. See LICENSE.md for details.
+//
+
+#ifndef MLIR_CLIFT
+#define MLIR_CLIFT
+
+include "mlir/Interfaces/CallInterfaces.td"
+include "mlir/Interfaces/InferTypeOpInterface.td"
+include "mlir/Interfaces/SideEffectInterfaces.td"
+include "mlir/IR/BuiltinAttributes.td"
+include "mlir/IR/FunctionInterfaces.td"
+include "mlir/IR/RegionKindInterface.td"
+include "mlir/IR/SymbolInterfaces.td"
+
+include "revng/Clift/CliftOpInterfaces.td"
+include "revng/Clift/CliftOpTraits.td"
+include "revng/Clift/CliftTypes.td"
+
+def APFloatAttr : Attr<CPred<"$_self.isa<mlir::FloatAttr>()">,
+                             "arbitrary floating point attribute"> {
+  let storageType = [{ mlir::FloatAttr }];
+  let returnType = [{ mlir::APFloat }];
+}
+
+class Clift_Op<string mnemonic, list<Trait> traits = []>
+  : Op<Clift_Dialect,
+       mnemonic,
+       !listconcat(traits, [NoTerminator])>;
+
+//===-------------------------- Type constraints --------------------------===//
+
+def Clift_AnyAddressableType
+  : Type<CPred<"mlir::isa<clift::AddressableType>($_self)">,
+         "addressable type">;
+
+def Clift_AnyExpressionType
+  : Type<Or<[Clift_AnyAddressableType.predicate, Clift_BoolType.predicate]>,
+         "addressable or boolean type">;
+
+def Clift_AnyObjectType
+  : Type<CPred<"clift::unwrapped_isa<clift::ObjectType>($_self)">,
+         "object type">;
+
+def Clift_AnyValueType
+  : Type<CPred<"clift::unwrapped_isa<clift::ValueType>($_self)">,
+         "value type">;
+
+def Clift_AnyScalarType
+  : Type<CPred<"clift::isScalarType($_self)">,
+         "scalar type">;
+
+def Clift_AnyScalarTypeOrBool
+  : Type<Or<[Clift_AnyScalarType.predicate, Clift_BoolType.predicate]>,
+         "scalar type or bool">;
+
+def Clift_AnyIntegerType
+  : Type<CPred<"clift::unwrapped_isa<clift::IntegralType>($_self)">,
+         "integer type">;
+
+def Clift_AnyPrimitiveIntegerType
+  : Type<CPred<"clift::unwrapped_isa<clift::IntegerType>($_self)">,
+         "primitive integer type">;
+
+def Clift_AnyFloatingPointType
+  : Type<CPred<"clift::unwrapped_isa<clift::FloatType>($_self)">,
+         "floating point type">;
+
+def Clift_AnyPointerType
+  : Type<CPred<"clift::unwrapped_isa<clift::PointerType>($_self)">,
+         "pointer type">;
+
+def Clift_AnyArrayType
+  : Type<CPred<"clift::unwrapped_isa<clift::ArrayType>($_self)">,
+         "array type">;
+
+def Clift_AnyFunctionType
+  : Type<CPred<"clift::unwrapped_isa<clift::FunctionType>($_self)">,
+         "function type">;
+
+def Clift_AnyArrayOrFunctionType
+  : Type<Or<[Clift_AnyArrayType.predicate, Clift_AnyFunctionType.predicate]>,
+         "array or function type">;
+
+def Clift_AnyNonVoidType
+  : Type<CPred<"not clift::unwrapped_isa<clift::VoidType>($_self)">,
+         "non-void type">;
+
+class Clift_AnyNonConstType<Type type>
+  : Type<And<[type.predicate,
+              CPred<"not clift::isConst($_self)">]>,
+         "non-const " # type.summary>;
+
+class Clift_AnyModifiableType<Type type>
+  : Type<And<[type.predicate,
+              CPred<"clift::isModifiableType($_self)">]>,
+         "modifiable " # type.summary>;
+
+class Clift_AllTypesMatch<list<string> names>
+  : AllMatchSameOperatorTrait<names,
+                              "clift::removeConst($_self.getType())",
+                              "type (ignoring qualifiers)">;
+
+class Clift_AllSizesMatch<list<string> names>
+  : AllMatchSameOperatorTrait<names,
+                              "clift::getObjectSize($_self.getType())",
+                              "object size">;
+
+class Clift_ValueComparison<string comparison_operator,
+                            string comparison_summary,
+                            string lhs_name,
+                            string rhs_name,
+                            string operator,
+                            string summary>
+  : PredOpTrait<"the " # summary # " of " # lhs_name # " and " # rhs_name # " are " # comparison_summary,
+                CPred<!subst("$_self", "$" # lhs_name, operator) # comparison_operator # !subst("$_self", "$" # rhs_name, operator)>>;
+
+class Clift_ValuesAreNotEqual<string lhs_name, string rhs_name, string operator, string summary>
+  : Clift_ValueComparison<"!=", "not equal", lhs_name, rhs_name, operator, summary>;
+
+class Clift_ValuesAreOrdered<string lhs_name, string rhs_name, string operator, string summary>
+  : Clift_ValueComparison<"<", "ordered", lhs_name, rhs_name, operator, summary>;
+
+class Clift_ObjectSizesAreNotEqual<string lhs_name, string rhs_name>
+  : Clift_ValuesAreNotEqual<lhs_name, rhs_name, "clift::getObjectSize($_self.getType())", "sizes">;
+
+class Clift_ObjectSizesAreOrdered<string lhs_name, string rhs_name>
+  : Clift_ValuesAreOrdered<lhs_name, rhs_name, "clift::getObjectSize($_self.getType())", "sizes">;
+
+class Clift_AllPointeeTypesMatch<list<string> names>
+  : AllMatchSameOperatorTrait<names,
+                              "clift::unwrapped_cast<clift::PointerType>($_self.getType()).getPointeeType()",
+                              "pointee type">;
+
+class Clift_UnqualifiedTypeMatches<string qualified, string unqualified>
+  : TypesMatchWith<qualified # " type (ignoring qualifiers) matches the " # unqualified # " type",
+                   qualified,
+                   unqualified,
+                   "clift::removeConst($_self)">;
+
+class Clift_PointeeTypeMatches<string pointer, string value>
+  : TypesMatchWith<pointer # " pointee type matches the " # value # " type",
+                   pointer,
+                   value,
+                   "clift::unwrapped_cast<clift::PointerType>($_self).getPointeeType()">;
+
+class Clift_LValueOperand<string name>
+  : PredOpTrait<"operand " # name # " is an lvalue expression",
+                CPred<"clift::isLvalueExpression($" # name # ")">>;
+
+//===---------------------------- Region types ----------------------------===//
+
+class Clift_OptionalRegion<Region region>
+  : Region<Or<[CPred<"$_self.empty()">, region.predicate]>,
+           "optional " # region.summary>;
+
+def Clift_StatementRegion
+  : Clift_OptionalRegion<Region<CPred<"clift::impl::verifyStatementRegion($_self)">,
+                                      "region containing statements">>;
+
+def Clift_ExpressionRegion
+  : Region<CPred<"clift::impl::verifyExpressionRegion($_self)">,
+           "region representing an expression">;
+
+def Clift_ConditionRegion
+  : Region<CPred<"clift::impl::verifyConditionRegion($_self)">,
+           "region representing a condition expression">;
+
+//===------------------------ Top level operations ------------------------===//
+
+def Clift_FunctionOp : Clift_Op<"func",
+                                [Clift_GlobalOpInterface,
+                                 CallableOpInterface,
+                                 FunctionOpInterface,
+                                 IsolatedFromAbove]> {
+  let arguments = (ins StrAttr:$sym_name,
+                       TypeAttrOf<Clift_AnyFunctionType>:$type,
+                       OptionalAttr<DictArrayAttr>:$arg_attrs,
+                       OptionalAttr<DictArrayAttr>:$res_attrs,
+                       UnitAttr:$noreturn,
+                       UnitAttr:$always_inline,
+                       UnitAttr:$has_one_broken_return,
+                       DefaultValuedStrAttr<StrAttr, "">:$handle);
+
+  let description = [{
+    expression.
+  }];
+
+  let regions = (region Clift_StatementRegion:$body);
+
+  let builders = [
+    OpBuilder<(ins "llvm::StringRef":$Name,
+                   "clift::FunctionType":$FunctionType)>
+  ];
+
+  let hasCustomAssemblyFormat = 1;
+
+  code extraClassDeclaration = [{
+    [[nodiscard]] static mlir::StringAttr
+    getFunctionTypeAttrName(mlir::OperationName Name) {
+      return getTypeAttrName(Name);
+    }
+
+    [[nodiscard]] mlir::StringAttr getFunctionTypeAttrName() {
+      return getTypeAttrName();
+    }
+
+    [[nodiscard]] mlir::TypeAttr getFunctionTypeAttr() {
+      return getTypeAttr();
+    }
+
+    void setFunctionTypeAttr(mlir::TypeAttr Attr) {
+      return setTypeAttr(Attr);
+    }
+
+    [[nodiscard]] FunctionType getFunctionType() {
+      return clift::unwrapped_cast<FunctionType>(getType());
+    }
+
+    [[nodiscard]] mlir::Type getReturnType() {
+      return getFunctionType().getReturnType();
+    }
+
+    [[nodiscard]] unsigned getArgCount() {
+      return getFunctionType().getArgumentTypes().size();
+    }
+
+
+    [[nodiscard]] clift::AttrDictView getArgAttrs(unsigned Index) {
+      std::optional<mlir::ArrayAttr> Attrs = getArgAttrs();
+      mlir::DictionaryAttr DictAttr = Attrs ?
+                        mlir::cast<mlir::DictionaryAttr>((*Attrs)[Index]) :
+                        mlir::DictionaryAttr::get(getContext());
+      return AttrDictView(DictAttr);
+    }
+
+    [[nodiscard]] clift::AttrDictView getResAttrs(unsigned Index) {
+      std::optional<mlir::ArrayAttr> Attrs = getArgAttrs();
+      mlir::DictionaryAttr DictAttr = Attrs ?
+                        mlir::cast<mlir::DictionaryAttr>((*Attrs)[Index]) :
+                        mlir::DictionaryAttr::get(getContext());
+      return AttrDictView(DictAttr);
+    }
+
+
+    [[nodiscard]] mlir::Region::BlockListType& getBlocks() {
+        return getBody().getBlocks();
+    }
+
+    [[nodiscard]] mlir::Block::args_iterator args_begin() {
+        return getBody().front().args_begin();
+    }
+
+    [[nodiscard]] mlir::Block::args_iterator args_end() {
+        return getBody().front().args_end();
+    }
+
+
+    // Implementation of CallableOpInterface
+
+    [[nodiscard]] mlir::Region *getCallableRegion() {
+        return isExternal() ? nullptr : &getBody();
+    }
+
+    /// Returns the result types of this function.
+    [[nodiscard]] llvm::ArrayRef<mlir::Type> getCallableResults() {
+      return getResultTypes();
+    }
+
+
+    // Implementation of FunctionOpInterface
+
+    [[nodiscard]] llvm::ArrayRef<mlir::Type> getArgumentTypes();
+    [[nodiscard]] llvm::ArrayRef<mlir::Type> getResultTypes();
+
+   [[nodiscard]] mlir::Type cloneTypeWith(mlir::TypeRange Inputs,
+                                          mlir::TypeRange Results);
+  }];
+}
+
+def Clift_GlobalVariableOp : Clift_Op<"global",
+                                      [Clift_GlobalOpInterface,
+                                       NoRegionArguments,
+                                       IsolatedFromAbove]> {
+  let arguments = (ins SymbolNameAttr:$sym_name,
+                       TypeAttrOf<Clift_AddressableType>:$type,
+                       DefaultValuedStrAttr<StrAttr, "">:$handle);
+
+  let description = [{
+    global variable
+  }];
+
+  let regions = (region Clift_OptionalRegion<Clift_ExpressionRegion>:$initializer);
+
+  let assemblyFormat = [{
+    $sym_name `:` $type (`=` $initializer^)? attr-dict-with-keyword
+  }];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------- Statements -----------------------------===//
+
+class Clift_BasicStatementOp<string mnemonic,
+                             Trait interface,
+                             list<Trait> traits = []>
+  : Clift_Op<mnemonic, !listconcat(traits, [interface])>;
+
+class Clift_StatementOp<string mnemonic, list<Trait> traits = []>
+  : Clift_BasicStatementOp<mnemonic,
+                           Clift_StatementOpInterface,
+                           !listconcat(traits, [NoRegionArguments])>;
+
+class Clift_JumpStatementOp<string mnemonic>
+  : Clift_BasicStatementOp<mnemonic,
+                           Clift_JumpStatementOpInterface,
+                           [NoRegionArguments, Clift_NoFallthrough]>;
+
+// Two bit integer used to represent two flags, each indicating the presence of
+// the break and continue label assignments respectively.
+def LoopLabelMaskAttr : TypedUnsignedIntegerAttrBase<UI<2>,
+                                                     "uint8_t",
+                                                     "Loop label mask">;
+
+class Clift_LoopStatementOp<string mnemonic, list<Trait> traits = []>
+  : Clift_BasicStatementOp<mnemonic,
+                           Clift_LoopOpInterface,
+                           !listconcat(traits, [Clift_AssignsLoopLabels])> {
+
+  let arguments = (ins LoopLabelMaskAttr:$label_mask,
+                       Variadic<Clift_LabelType>:$labels);
+
+  // The generation of default builders for loop operations is skipped to avoid
+  // mistakes, as building a valid loop with explicit label mask and operands
+  // would be error prone.
+  let skipDefaultBuilders = 1;
+
+  let builders = [
+    OpBuilder<(ins CArg<"clift::LoopOpInterface", "{}">:$OtherLoop)>
+  ];
+}
+
+def Clift_MakeLabelOp : Clift_StatementOp<"make_label", [Clift_NopStatement]> {
+  let arguments = (ins DefaultValuedStrAttr<StrAttr, "">:$name,
+                       DefaultValuedStrAttr<StrAttr, "">:$handle);
+
+  let results = (outs Clift_LabelType:$result);
+
+  let assemblyFormat = [{
+    attr-dict
+  }];
+
+  let hasCanonicalizeMethod = 1;
+  let hasVerifier = 1;
+
+  let builders = [
+    OpBuilder<(ins), [{
+      build($_builder,
+            $_state,
+            clift::LabelType::get($_builder.getContext()));
+    }]>
+  ];
+
+  let extraClassDeclaration = [{
+    [[nodiscard]] LabelAssignmentOpInterface getAssignment();
+  }];
+}
+
+def Clift_AssignLabelOp
+  : Clift_BasicStatementOp<"assign_label",
+                           DeclareOpInterfaceMethods<Clift_LabelAssignmentOpInterface>,
+                           [Clift_NopStatement]> {
+
+  let arguments = (ins Clift_LabelType:$label);
+
+  let assemblyFormat = [{
+    $label attr-dict
+  }];
+
+  let extraClassDeclaration = [{
+    [[nodiscard]] MakeLabelOp getLabelOp();
+  }];
+}
+
+def Clift_BlockStatementOp
+  : Clift_StatementOp<"block",
+                      [DeclareOpInterfaceMethods<Clift_StatementRegionOpInterface>,
+                       DeclareOpInterfaceMethods<Clift_StatementOpInterface,
+                                                 ["isIndirectlyNoFallthrough"]>]> {
+
+  let regions = (region Clift_StatementRegion:$block);
+
+  let assemblyFormat = [{
+    $block attr-dict-with-keyword
+  }];
+}
+
+def Clift_BreakToOp : Clift_JumpStatementOp<"break_to"> {
+  // The target label operand is optional: a break_to with no operand represents
+  // a plain C `break` targeting the innermost enclosing loop. The operand is
+  // dropped by the promote-break-continue pass when that promotion is valid.
+  let arguments = (ins Optional<Clift_LabelType>:$label);
+
+  let assemblyFormat = [{
+    ($label^)? attr-dict
+  }];
+
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    [[nodiscard]] MakeLabelOp getLabelOp();
+  }];
+}
+
+def Clift_ContinueToOp : Clift_JumpStatementOp<"continue_to"> {
+  // The target label operand is optional: a continue_to with no operand
+  // represents a plain C `continue` targeting the innermost enclosing loop. The
+  // operand is dropped by the promote-break-continue pass when that promotion is
+  // valid.
+  let arguments = (ins Optional<Clift_LabelType>:$label);
+
+  let assemblyFormat = [{
+    ($label^)? attr-dict
+  }];
+
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    [[nodiscard]] MakeLabelOp getLabelOp();
+  }];
+}
+
+def Clift_DoWhileOp
+  : Clift_LoopStatementOp<"do_while",
+                          [NoRegionArguments,
+                           DeclareOpInterfaceMethods<Clift_StatementRegionOpInterface>,
+                           DeclareOpInterfaceMethods<Clift_ExpressionRegionOpInterface>,
+                           DeclareOpInterfaceMethods<Clift_StatementOpInterface,
+                                                     ["isIndirectlyNoFallthrough"]>]> {
+
+  let regions = (region Clift_StatementRegion:$body,
+                        Clift_ConditionRegion:$condition);
+
+  // The leading `` suppresses the space the printer inserts before the label
+  // directive, which prints each label with its own leading space instead. This
+  // keeps a label-less loop free of stray whitespace.
+  let assemblyFormat = [{
+    `` custom<CliftLoopLabels>($label_mask, $labels)
+    `body` $body `cond` $condition attr-dict-with-keyword
+  }];
+}
+
+def Clift_ExpressionStatementOp
+  : Clift_StatementOp<"expr", [DeclareOpInterfaceMethods<Clift_ExpressionRegionOpInterface>,
+                               DeclareOpInterfaceMethods<Clift_StatementOpInterface,
+                                                         ["isIndirectlyNoFallthrough",
+                                                          "isDiscardedExpression"]>]> {
+
+  let regions = (region Clift_ExpressionRegion:$expression);
+
+  let assemblyFormat = [{
+    $expression attr-dict-with-keyword
+  }];
+}
+
+def Clift_ForOp
+  : Clift_LoopStatementOp<"for",
+                          [DeclareOpInterfaceMethods<Clift_StatementRegionOpInterface>,
+                           DeclareOpInterfaceMethods<Clift_ExpressionRegionOpInterface>,
+                           DeclareOpInterfaceMethods<Clift_StatementOpInterface,
+                                                     ["isDeclaratorRegion",
+                                                      "getBlockArgumentVariable",
+                                                      "isDiscardedExpression",
+                                                      "isIndirectlyNoFallthrough"]>]> {
+
+  let regions = (region Clift_StatementRegion:$initializer,
+                        Clift_OptionalRegion<Clift_ConditionRegion>:$condition,
+                        Clift_OptionalRegion<Clift_ExpressionRegion>:$expression,
+                        Clift_StatementRegion:$body);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+}
+
+def Clift_GotoOp : Clift_JumpStatementOp<"goto"> {
+  let arguments = (ins Clift_LabelType:$label);
+
+  let assemblyFormat = [{
+    $label attr-dict
+  }];
+
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    [[nodiscard]] MakeLabelOp getLabelOp();
+  }];
+}
+
+def Clift_IfOp
+  : Clift_BasicStatementOp<"if",
+                           Clift_BranchOpInterface,
+                           [DeclareOpInterfaceMethods<Clift_StatementRegionOpInterface>,
+                            DeclareOpInterfaceMethods<Clift_ExpressionRegionOpInterface>,
+                            DeclareOpInterfaceMethods<Clift_StatementOpInterface,
+                                                      ["isIndirectlyNoFallthrough"]>]> {
+
+  let regions = (region Clift_ConditionRegion:$condition,
+                        Clift_StatementRegion:$then,
+                        Clift_StatementRegion:$else);
+
+  let assemblyFormat = [{
+    $condition `then` $then (`else` $else^)? attr-dict-with-keyword
+  }];
+}
+
+def Clift_LocalVariableOp
+  : Clift_BasicStatementOp<"local",
+                           Clift_StatementOpInterface,
+                           [DeclareOpInterfaceMethods<Clift_ExpressionRegionOpInterface>,
+                            DeclareOpInterfaceMethods<Clift_StatementOpInterface,
+                                                      ["getBlockArgumentVariable"]>]> {
+
+  let arguments = (ins DefaultValuedStrAttr<StrAttr, "">:$name,
+                       DefaultValuedStrAttr<StrAttr, "">:$handle);
+
+  let results = (outs Clift_AnyObjectType:$result);
+
+  let regions = (region Clift_OptionalRegion<Clift_ExpressionRegion>:$initializer);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+}
+
+def Clift_ReturnOp
+  : Clift_StatementOp<"return",
+                      [Clift_NoFallthrough,
+                       DeclareOpInterfaceMethods<Clift_ExpressionRegionOpInterface>]> {
+
+  let regions = (region Clift_OptionalRegion<Clift_ExpressionRegion>:$result);
+
+  let assemblyFormat = [{
+    $result attr-dict-with-keyword
+  }];
+
+  let hasVerifier = 1;
+}
+
+def Clift_RequireOp : Clift_StatementOp<"require", [Clift_NopStatement]> {
+  let arguments = (ins AnyType:$local);
+
+  let assemblyFormat = [{
+    $local attr-dict `:` type($local)
+  }];
+
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    [[nodiscard]] LocalVariableOp getLocalOp();
+  }];
+}
+
+def Clift_SwitchOp
+  : Clift_BasicStatementOp<"switch",
+                           Clift_BranchOpInterface,
+                           [DeclareOpInterfaceMethods<Clift_StatementRegionOpInterface>,
+                            DeclareOpInterfaceMethods<Clift_ExpressionRegionOpInterface>,
+                            DeclareOpInterfaceMethods<Clift_StatementOpInterface,
+                                                      ["isIndirectlyNoFallthrough"]>]> {
+
+  let arguments = (ins Clift_SwitchCaseArrayAttr:$cases);
+
+  let regions = (region Clift_ExpressionRegion:$condition,
+                        Clift_StatementRegion:$default,
+                        VariadicRegion<Clift_StatementRegion>:$case_regions);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+
+  let builders = [
+    OpBuilder<(ins "SwitchCaseArrayAttr":$cases)>,
+  ];
+
+  code extraClassDeclaration = [{
+    [[nodiscard]] mlir::Type getConditionType();
+
+    [[nodiscard]] mlir::Region &getConditionRegion() {
+      return getRegion(0);
+    }
+
+    [[nodiscard]] bool hasDefaultCase() {
+      return not getDefaultCaseRegion().empty();
+    }
+
+    [[nodiscard]] mlir::Region &getDefaultCaseRegion() {
+      return getRegion(1);
+    }
+
+    [[nodiscard]] unsigned getCaseRegionCount() {
+      return getNumRegions() - 2;
+    }
+
+    [[nodiscard]] unsigned getCaseCount() {
+      return getCases().getCaseCount();
+    }
+
+    [[nodiscard]] auto getCaseValues() {
+      return std::views::transform(getCases(), &SwitchCase::Value);
+    }
+
+    [[nodiscard]] auto getCaseValues(unsigned Index) {
+      auto Cases = getCases();
+      return std::views::transform(std::ranges::equal_range(Cases,
+                                                            Index,
+                                                            std::less(),
+                                                            &SwitchCase::Region),
+                                   &SwitchCase::Value);
+    }
+
+    [[nodiscard]] mlir::Region &getCaseRegion(const unsigned Index) {
+      return getCaseRegions()[Index];
+    }
+
+    [[nodiscard]] mlir::Region *findCaseRegion(uint64_t Value);
+  }];
+}
+
+def Clift_WhileOp
+  : Clift_LoopStatementOp<"while",
+                          [NoRegionArguments,
+                           DeclareOpInterfaceMethods<Clift_StatementRegionOpInterface>,
+                           DeclareOpInterfaceMethods<Clift_ExpressionRegionOpInterface>,
+                           DeclareOpInterfaceMethods<Clift_StatementOpInterface,
+                                                     ["isIndirectlyNoFallthrough"]>]> {
+
+  let regions = (region Clift_ConditionRegion:$condition,
+                        Clift_StatementRegion:$body);
+
+  // The leading `` suppresses the space the printer inserts before the label
+  // directive, which prints each label with its own leading space instead. This
+  // keeps a label-less loop free of stray whitespace.
+  let assemblyFormat = [{
+    `` custom<CliftLoopLabels>($label_mask, $labels)
+    `cond` $condition `body` $body attr-dict-with-keyword
+  }];
+}
+
+//===----------------------------- Expressions ----------------------------===//
+
+class Clift_BasicExpressionOp<string mnemonic,
+                              Trait interface,
+                              list<Trait> traits = []>
+  : Clift_Op<mnemonic, !listconcat(traits, [interface,
+                                            NoMemoryEffect,
+                                            NoRegionArguments])>;
+
+class Clift_ExpressionOp<string mnemonic, list<Trait> traits = []>
+  : Clift_BasicExpressionOp<mnemonic, Clift_ExpressionOpInterface, traits>;
+
+def Clift_UndefOp : Clift_ExpressionOp<"undef"> {
+  let results = (outs Clift_AnyAddressableType:$result);
+
+  let assemblyFormat = [{
+    attr-dict `:` type($result)
+  }];
+}
+
+def Clift_YieldOp : Clift_Op<"yield", [Terminator]> {
+
+  let arguments = (ins Clift_AnyExpressionType:$value);
+
+  let assemblyFormat = [{
+    $value attr-dict `:` type($value)
+  }];
+}
+
+def Clift_ImmediateOp : Clift_ExpressionOp<"imm"> {
+  let arguments = (ins APIntAttr:$value);
+
+  let results = (outs Clift_AnyNonConstType<Clift_AnyIntegerType>:$result);
+
+  let builders = [
+    OpBuilder<(ins "mlir::Type":$Type, "uint64_t":$Value), [{
+      build($_builder,
+            $_state,
+            Type,
+            llvm::APInt(getObjectSize(Type) * 8, Value));
+    }]>,
+
+    OpBuilder<(ins "mlir::Type":$Type, "llvm::APInt":$Value), [{
+      build($_builder,
+            $_state,
+            Type,
+            mlir::IntegerAttr::get($_builder.getContext(),
+                                   llvm::APSInt(Value)));
+    }]>
+  ];
+
+  let extraClassDeclaration = [{
+    [[nodiscard]] int64_t getSExtValue() const {
+      return ImmediateOp(*this).getValue().getSExtValue();
+    }
+
+    [[nodiscard]] uint64_t getZExtValue() const {
+      return ImmediateOp(*this).getValue().getZExtValue();
+    }
+  }];
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+}
+
+def Clift_FImmediateOp : Clift_ExpressionOp<"fimm"> {
+  let arguments = (ins APFloatAttr:$value);
+
+  let results = (outs Clift_AnyNonConstType<Clift_AnyFloatingPointType>:$result);
+
+  let extraClassDeclaration = [{
+    [[nodiscard]] FloatType getFloatType() {
+      return clift::unwrapped_dyn_cast<FloatType>(getType());
+    }
+  }];
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+}
+
+def Clift_NullOp : Clift_ExpressionOp<"null"> {
+  let results = (outs Clift_AnyNonConstType<Clift_AnyPointerType>:$result);
+
+  let assemblyFormat = [{
+    attr-dict `:` type($result)
+  }];
+
+  let extraClassDeclaration = [{
+    [[nodiscard]] PointerType getPointerType() {
+      return clift::unwrapped_dyn_cast<PointerType>(getType());
+    }
+
+    [[nodiscard]] uint64_t getPointerSize() {
+      return getPointerType().getPointerSize();
+    }
+
+    [[nodiscard]] mlir::Type getPointeeType() {
+      return getPointerType().getPointeeType();
+    }
+  }];
+}
+
+def Clift_TrueOp : Clift_ExpressionOp<"true"> {
+  let results = (outs Clift_BoolType:$result);
+
+  let assemblyFormat = [{
+    attr-dict
+  }];
+}
+
+def Clift_FalseOp : Clift_ExpressionOp<"false"> {
+  let results = (outs Clift_BoolType:$result);
+
+  let assemblyFormat = [{
+    attr-dict
+  }];
+}
+
+def Clift_StringOp
+  : Clift_ExpressionOp<"str",
+                       [DeclareOpInterfaceMethods<Clift_ExpressionOpInterface,
+                                                  ["isLvalueExpression"]>]> {
+
+  let arguments = (ins StrAttr:$value);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = [{
+    $value attr-dict `:` type($result)
+  }];
+
+  let hasVerifier = 1;
+}
+
+class Clift_UnaryArithmeticOp<string mnemonic>
+  : Clift_ExpressionOp<mnemonic,
+                       [Clift_UnqualifiedTypeMatches<"value", "result">]> {
+
+  let arguments = (ins Clift_AnyIntegerType:$value);
+  let results = (outs Clift_AnyNonConstType<Clift_AnyIntegerType>:$result);
+
+  let assemblyFormat = [{
+    $value attr-dict `:` type($value)
+  }];
+}
+
+class Clift_UnaryFloatingPointOp<string mnemonic>
+  : Clift_ExpressionOp<mnemonic,
+                       [Clift_UnqualifiedTypeMatches<"value", "result">]> {
+
+  let arguments = (ins Clift_AnyFloatingPointType:$value);
+  let results = (outs Clift_AnyNonConstType<Clift_AnyFloatingPointType>:$result);
+
+  let assemblyFormat = [{
+    $value attr-dict `:` type($value)
+  }];
+}
+
+class Clift_BinaryArithmeticOp<string mnemonic, list<Trait> traits = []>
+  : Clift_ExpressionOp<mnemonic,
+                       !listconcat(traits,
+                                   [Clift_AllTypesMatch<["lhs", "rhs", "result"]>])> {
+
+  let arguments = (ins Clift_AnyIntegerType:$lhs,
+                       Clift_AnyIntegerType:$rhs);
+
+  let results = (outs Clift_AnyNonConstType<Clift_AnyIntegerType>:$result);
+
+  let builders = [
+    OpBuilder<(ins "mlir::Value":$Lhs, "mlir::Value":$Rhs), [{
+      build($_builder, $_state, Lhs.getType(), Lhs, Rhs);
+    }]>
+  ];
+
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict `:`
+    custom<CliftOpTypes>(type($result), type($lhs), type($rhs))
+  }];
+}
+
+class Clift_BinaryFloatingPointOp<string mnemonic, list<Trait> traits = []>
+ : Clift_ExpressionOp<mnemonic,
+                      !listconcat(traits,
+                                  [Clift_AllTypesMatch<["lhs", "rhs", "result"]>])> {
+
+  let arguments = (ins Clift_AnyFloatingPointType:$lhs,
+                       Clift_AnyFloatingPointType:$rhs);
+
+  let results = (outs Clift_AnyNonConstType<Clift_AnyFloatingPointType>:$result);
+
+  let builders = [
+    OpBuilder<(ins "mlir::Value":$Lhs, "mlir::Value":$Rhs), [{
+      build($_builder, $_state, Lhs.getType(), Lhs, Rhs);
+    }]>
+  ];
+
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict `:`
+    custom<CliftOpTypes>(type($result), type($lhs), type($rhs))
+  }];
+}
+
+class Clift_PointerArithmeticOp<string mnemonic, list<Trait> traits = []>
+  : Clift_ExpressionOp<mnemonic, traits> {
+
+  let arguments = (ins AnyType:$lhs, AnyType:$rhs);
+  let results = (outs Clift_AnyNonConstType<AnyType>:$result);
+
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict `:` `(`
+    custom<CliftPointerArithmeticOpTypes>(type($result), type($lhs), type($rhs))
+    `)`
+  }];
+
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    [[nodiscard]] unsigned getPointerOperandIndex() {
+      return clift::impl::getPointerArithmeticPointerOperandIndex(getOperation());
+    }
+
+    [[nodiscard]] mlir::Value getPointer() {
+      return getOperation()->getOperand(getPointerOperandIndex());
+    }
+
+    [[nodiscard]] unsigned getOffsetOperandIndex() {
+      return clift::impl::getPointerArithmeticOffsetOperandIndex(getOperation());
+    }
+
+    [[nodiscard]] mlir::Value getOffset() {
+      return getOperation()->getOperand(getOffsetOperandIndex());
+    }
+  }];
+}
+
+class Clift_BinaryLogicalOp<string mnemonic> : Clift_ExpressionOp<mnemonic> {
+  let arguments = (ins Clift_BoolType:$lhs,
+                       Clift_BoolType:$rhs);
+
+  let results = (outs Clift_BoolType:$result);
+
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict
+  }];
+}
+
+class Clift_ShiftOp<string mnemonic>
+  : Clift_ExpressionOp<mnemonic,
+                       [Clift_UnqualifiedTypeMatches<"lhs", "result">]> {
+
+  let arguments = (ins Clift_AnyIntegerType:$lhs,
+                       Clift_AnyIntegerType:$rhs);
+
+  let results = (outs Clift_AnyNonConstType<Clift_AnyIntegerType>:$result);
+
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict `:` custom<CliftOpOperandTypes>(type($lhs), type($rhs))
+  }];
+}
+
+class Clift_ComparisonOp<string mnemonic>
+  : Clift_ExpressionOp<mnemonic,
+                       [Commutative,
+                        Clift_AllTypesMatch<["lhs", "rhs"]>]> {
+
+  let arguments = (ins Clift_AnyScalarType:$lhs,
+                       Clift_AnyScalarType:$rhs);
+
+  let results = (outs Clift_BoolType:$result);
+
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict `:`
+    custom<CliftOpOperandTypes>(type($lhs), type($rhs))
+  }];
+}
+
+class Clift_UnaryIntegerMutationOp<string mnemonic>
+  : Clift_ExpressionOp<mnemonic,
+                       [AllTypesMatch<["value", "result"]>,
+                        Clift_LValueOperand<"value">,
+                        DeclareOpInterfaceMethods<Clift_ExpressionOpInterface,
+                                                  ["isLvalueExpression",
+                                                   "lvalueToRvalueConversion"]>]> {
+
+  let arguments = (ins Clift_AnyModifiableType<Clift_AnyIntegerType>:$value);
+  let results = (outs Clift_AnyIntegerType:$result);
+
+  let assemblyFormat = [{
+    $value attr-dict `:` type($value)
+  }];
+
+  let extraClassDefinition = [{
+    bool $cppClass::isLvalueExpression() {
+      return true;
+    }
+
+    LvalueToRvalueConversion
+    $cppClass::lvalueToRvalueConversion(mlir::OpOperand &Operand) {
+      revng_assert(Operand.getOwner() == getOperation());
+      return LvalueToRvalueConversion::No;
+    }
+  }];
+}
+
+def Clift_NegOp : Clift_UnaryArithmeticOp<"neg">;
+def Clift_AddOp : Clift_BinaryArithmeticOp<"add", [Commutative]>;
+def Clift_SubOp : Clift_BinaryArithmeticOp<"sub">;
+def Clift_MulOp : Clift_BinaryArithmeticOp<"mul", [Commutative]>;
+def Clift_SDivOp : Clift_BinaryArithmeticOp<"sdiv">;
+def Clift_UDivOp : Clift_BinaryArithmeticOp<"udiv">;
+def Clift_SRemOp : Clift_BinaryArithmeticOp<"srem">;
+def Clift_URemOp : Clift_BinaryArithmeticOp<"urem">;
+
+def Clift_FNegOp : Clift_UnaryFloatingPointOp<"fneg">;
+def Clift_FAddOp : Clift_BinaryFloatingPointOp<"fadd", [Commutative]>;
+def Clift_FSubOp : Clift_BinaryFloatingPointOp<"fsub">;
+def Clift_FMulOp : Clift_BinaryFloatingPointOp<"fmul", [Commutative]>;
+def Clift_FDivOp : Clift_BinaryFloatingPointOp<"fdiv">;
+
+def Clift_FCmpEqOp : Clift_ComparisonOp<"feq">;
+def Clift_FCmpNeOp : Clift_ComparisonOp<"fne">;
+def Clift_FCmpLtOp : Clift_ComparisonOp<"flt">;
+def Clift_FCmpGtOp : Clift_ComparisonOp<"fgt">;
+def Clift_FCmpLeOp : Clift_ComparisonOp<"fle">; // codespell:ignore fle
+def Clift_FCmpGeOp : Clift_ComparisonOp<"fge">;
+
+def Clift_PtrAddOp : Clift_PointerArithmeticOp<"ptr_add", [Commutative]>;
+def Clift_PtrSubOp : Clift_PointerArithmeticOp<"ptr_sub">;
+
+def Clift_PtrDiffOp : Clift_ExpressionOp<"ptr_diff"> {
+  let arguments = (ins Clift_AnyPointerType:$lhs,
+                       Clift_AnyPointerType:$rhs);
+
+  let results = (outs Clift_AnyNonConstType<AnyType>:$result);
+
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict `:`
+    custom<CliftOpOperandTypes>(type($lhs), type($rhs)) `->` type($result)
+  }];
+
+  let hasVerifier = 1;
+}
+
+def Clift_LogicalNotOp : Clift_ExpressionOp<"not"> {
+  let arguments = (ins Clift_BoolType:$value);
+  let results = (outs Clift_BoolType:$result);
+
+  let assemblyFormat = [{
+    $value attr-dict
+  }];
+}
+
+def Clift_LogicalAndOp : Clift_BinaryLogicalOp<"and">;
+def Clift_LogicalOrOp : Clift_BinaryLogicalOp<"or">;
+
+def Clift_BitwiseNotOp : Clift_UnaryArithmeticOp<"bitnot">;
+def Clift_BitwiseAndOp : Clift_BinaryArithmeticOp<"bitand", [Commutative]>;
+def Clift_BitwiseOrOp : Clift_BinaryArithmeticOp<"bitor", [Commutative]>;
+def Clift_BitwiseXorOp : Clift_BinaryArithmeticOp<"bitxor", [Commutative]>;
+
+def Clift_ShlOp : Clift_ShiftOp<"shl">;
+def Clift_ShrOp : Clift_ShiftOp<"shr">;
+def Clift_SarOp : Clift_ShiftOp<"sar">;
+
+def Clift_CmpEqOp : Clift_ComparisonOp<"eq">;
+def Clift_CmpNeOp : Clift_ComparisonOp<"ne">;
+
+def Clift_SCmpLtOp : Clift_ComparisonOp<"slt">;
+def Clift_UCmpLtOp : Clift_ComparisonOp<"ult">;
+def Clift_SCmpGtOp : Clift_ComparisonOp<"sgt">;
+def Clift_UCmpGtOp : Clift_ComparisonOp<"ugt">;
+def Clift_SCmpLeOp : Clift_ComparisonOp<"sle">;
+def Clift_UCmpLeOp : Clift_ComparisonOp<"ule">;
+def Clift_SCmpGeOp : Clift_ComparisonOp<"sge">;
+def Clift_UCmpGeOp : Clift_ComparisonOp<"uge">;
+
+def Clift_IncrementOp : Clift_UnaryIntegerMutationOp<"inc">;
+def Clift_DecrementOp : Clift_UnaryIntegerMutationOp<"dec">;
+
+def Clift_PostIncrementOp : Clift_UnaryIntegerMutationOp<"post_inc">;
+def Clift_PostDecrementOp : Clift_UnaryIntegerMutationOp<"post_dec">;
+
+class Clift_CastExpressionOp<string mnemonic, list<Trait> traits = []>
+  : Clift_BasicExpressionOp<mnemonic, Clift_CastOpInterface, traits> {
+
+  let assemblyFormat = [{
+    $value attr-dict `:` type($value) `->` type($result)
+  }];
+}
+
+def Clift_DecayOp
+  : Clift_CastExpressionOp<"decay",
+                           [DeclareOpInterfaceMethods<Clift_ExpressionOpInterface,
+                                                      ["lvalueToRvalueConversion"]>]> {
+
+  let arguments = (ins Clift_AnyArrayOrFunctionType:$value);
+  let results = (outs Clift_AnyNonConstType<Clift_AnyPointerType>:$result);
+
+  let builders = [
+    OpBuilder<(ins "mlir::Value":$Operand, "uint64_t":$PointerSize)>
+  ];
+}
+
+def Clift_TestOp : Clift_CastExpressionOp<"test"> {
+  let arguments = (ins Clift_AnyScalarTypeOrBool:$value);
+
+  let results = (outs Clift_BoolType:$result);
+
+  let assemblyFormat = [{
+    $value attr-dict `:` type($value)
+  }];
+
+  let hasCanonicalizeMethod = 1;
+}
+
+def Clift_BoolExtendOp : Clift_CastExpressionOp<"bext"> {
+  let arguments = (ins Clift_BoolType:$value);
+
+  let results = (outs Clift_AnyIntegerType:$result);
+
+  let assemblyFormat = [{
+    $value attr-dict `:` type($result)
+  }];
+}
+
+def Clift_BitCastOp
+  : Clift_CastExpressionOp<"bitcast",
+                           [Clift_AllSizesMatch<["value", "result"]>]> {
+
+  let arguments = (ins Clift_AnyValueType:$value);
+  let results = (outs Clift_AnyNonConstType<Clift_AnyValueType>:$result);
+}
+
+def Clift_ZeroExtendOp
+  : Clift_CastExpressionOp<"zext",
+                           [Clift_ObjectSizesAreOrdered<"value", "result">]> {
+
+  let arguments = (ins Clift_AnyIntegerType:$value);
+
+  let results = (outs Clift_AnyNonConstType<Clift_AnyIntegerType>:$result);
+}
+
+def Clift_SignExtendOp
+  : Clift_CastExpressionOp<"sext",
+                           [Clift_ObjectSizesAreOrdered<"value", "result">]> {
+
+  let arguments = (ins Clift_AnyIntegerType:$value);
+
+  let results = (outs Clift_AnyNonConstType<Clift_AnyIntegerType>:$result);
+}
+
+def Clift_TruncateOp
+  : Clift_CastExpressionOp<"truncate",
+                           [Clift_ObjectSizesAreOrdered<"result", "value">]> {
+
+  let arguments = (ins Clift_AnyIntegerType:$value);
+
+  let results = (outs Clift_AnyNonConstType<Clift_AnyIntegerType>:$result);
+}
+
+def Clift_SignedToFloatOp : Clift_CastExpressionOp<"stof"> {
+  let arguments = (ins Clift_AnyIntegerType:$value);
+  let results = (outs Clift_AnyNonConstType<Clift_AnyFloatingPointType>:$result);
+}
+
+def Clift_UnsignedToFloatOp : Clift_CastExpressionOp<"utof"> {
+  let arguments = (ins Clift_AnyIntegerType:$value);
+  let results = (outs Clift_AnyNonConstType<Clift_AnyFloatingPointType>:$result);
+}
+
+def Clift_FloatToSignedOp : Clift_CastExpressionOp<"ftos"> {
+  let arguments = (ins Clift_AnyFloatingPointType:$value);
+  let results = (outs Clift_AnyNonConstType<Clift_AnyIntegerType>:$result);
+}
+
+def Clift_FloatToUnsignedOp : Clift_CastExpressionOp<"ftou"> {
+  let arguments = (ins Clift_AnyFloatingPointType:$value);
+  let results = (outs Clift_AnyNonConstType<Clift_AnyIntegerType>:$result);
+}
+
+def Clift_FloatToFloatOp
+  : Clift_CastExpressionOp<"ftof",
+                           [Clift_ObjectSizesAreNotEqual<"value", "result">]> {
+
+  let arguments = (ins Clift_AnyFloatingPointType:$value);
+  let results = (outs Clift_AnyNonConstType<Clift_AnyFloatingPointType>:$result);
+}
+
+def Clift_PtrResizeOp
+  : Clift_CastExpressionOp<"ptr_resize",
+                           [Clift_AllPointeeTypesMatch<["value", "result"]>]> {
+
+  let arguments = (ins Clift_AnyPointerType:$value);
+  let results = (outs Clift_AnyNonConstType<Clift_AnyPointerType>:$result);
+
+  let assemblyFormat = [{
+    $value attr-dict `:` type($value) `->` type($result)
+  }];
+
+  let hasVerifier = 1;
+}
+
+def Clift_ImplicitCastOp : Clift_ExpressionOp<"implicit_cast"> {
+  let arguments = (ins Clift_AnyExpressionType:$value);
+  let results = (outs Clift_AnyExpressionType:$result);
+
+  let assemblyFormat = [{
+    $value attr-dict `:` type($value) `->` type($result)
+  }];
+
+  let hasVerifier = 1;
+}
+
+def Clift_AddressofOp
+  : Clift_ExpressionOp<"addressof",
+                       [Clift_PointeeTypeMatches<"result", "object">,
+                        Clift_LValueOperand<"object">,
+                        DeclareOpInterfaceMethods<Clift_ExpressionOpInterface,
+                                                  ["lvalueToRvalueConversion"]>]> {
+
+  let arguments = (ins AnyType:$object);
+  let results = (outs Clift_AnyNonConstType<Clift_AnyPointerType>:$result);
+
+  let assemblyFormat = [{
+    $object attr-dict `:` type($result)
+  }];
+}
+
+def Clift_IndirectionOp
+  : Clift_ExpressionOp<"indirection",
+                       [Clift_PointeeTypeMatches<"pointer", "result">,
+                        DeclareOpInterfaceMethods<Clift_ExpressionOpInterface,
+                                                  ["isLvalueExpression"]>]> {
+
+  let arguments = (ins Clift_AnyPointerType:$pointer);
+  let results = (outs Clift_AnyNonVoidType:$result);
+
+  let assemblyFormat = [{
+    $pointer attr-dict `:` type($pointer)
+  }];
+}
+
+def Clift_AssignOp
+  : Clift_ExpressionOp<"assign",
+                       [AllTypesMatch<["lhs", "result"]>,
+                        Clift_AllTypesMatch<["lhs", "rhs"]>,
+                        Clift_LValueOperand<"lhs">,
+                        DeclareOpInterfaceMethods<Clift_ExpressionOpInterface,
+                                                  ["isLvalueExpression",
+                                                   "lvalueToRvalueConversion"]>]> {
+
+  let arguments = (ins Clift_AnyModifiableType<Clift_AnyValueType>:$lhs,
+                       AnyType:$rhs);
+
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict `:`
+    custom<CliftOpOperandTypes>(type($lhs), type($rhs))
+  }];
+}
+
+class Clift_AccessOp<string mnemonic, list<string> expr_methods>
+  : Clift_ExpressionOp<mnemonic,
+                       [DeclareOpInterfaceMethods<Clift_AccessOpInterface,
+                                                  ["getClassType"]>,
+                        DeclareOpInterfaceMethods<Clift_ExpressionOpInterface,
+                                                  !listconcat(expr_methods,
+                                                              ["isLvalueExpression"])>]> {
+
+  let arguments = (ins AnyType:$value, I64Attr:$member_index);
+  let results = (outs AnyType:$result);
+
+  let builders = [
+    OpBuilder<(ins "mlir::Value":$Operand, "uint64_t":$MemberIndex)>
+  ];
+
+  let assemblyFormat = [{
+    `<` $member_index `>` $value attr-dict `:` type($value) `->` type($result)
+  }];
+
+  let hasVerifier = 1;
+}
+
+def Clift_DirectAccessOp : Clift_AccessOp<"access",
+                                          ["lvalueToRvalueConversion"]>;
+
+def Clift_IndirectAccessOp : Clift_AccessOp<"ptr_access", []>;
+
+def Clift_SubscriptOp
+  : Clift_ExpressionOp<"subscript",
+                       [Clift_PointeeTypeMatches<"pointer", "result">,
+                        DeclareOpInterfaceMethods<Clift_ExpressionOpInterface,
+                                                  ["isLvalueExpression"]>]> {
+  let arguments = (ins Clift_AnyPointerType:$pointer,
+                       Clift_AnyIntegerType:$index);
+
+  let results = (outs Clift_AnyObjectType:$result);
+
+  let assemblyFormat = [{
+    $pointer `,` $index attr-dict `:` `(` type($pointer) `,` type($index) `)`
+  }];
+}
+
+def Clift_CommaOp
+  : Clift_ExpressionOp<"comma",
+                       [AllTypesMatch<["rhs", "result"]>,
+                        DeclareOpInterfaceMethods<Clift_ExpressionOpInterface,
+                                                  ["isLvalueExpression",
+                                                   "isDiscardedOperand"]>]> {
+
+  let arguments = (ins Clift_AnyAddressableType:$lhs,
+                       Clift_AnyAddressableType:$rhs);
+
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs)
+  }];
+}
+
+def Clift_UseOp
+  : Clift_ExpressionOp<"use",
+                       [DeclareOpInterfaceMethods<SymbolUserOpInterface>,
+                        DeclareOpInterfaceMethods<Clift_ExpressionOpInterface,
+                                                  ["isLvalueExpression"]>]> {
+
+  let arguments = (ins FlatSymbolRefAttr:$symbol_name);
+  let results = (outs Clift_AnyAddressableType:$result);
+
+  let assemblyFormat = [{
+    $symbol_name attr-dict `:` type($result)
+  }];
+
+  let extraClassDeclaration = [{
+    [[nodiscard]] GlobalOpInterface getUsedGlobal();
+  }];
+}
+
+def Clift_CallOp : Clift_ExpressionOp<"call"> {
+  let arguments = (ins AnyType:$callee,
+                       Variadic<AnyType>:$arguments);
+
+  let results = (outs Clift_AnyNonConstType<AnyType>:$result);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    [[nodiscard]] mlir::Type getCalleeType() {
+      return getCallee().getType();
+    }
+
+    [[nodiscard]] FunctionType getFunctionType();
+    [[nodiscard]] FunctionOp getCalledFunction();
+  }];
+}
+
+def Clift_TernaryOp
+  : Clift_ExpressionOp<"ternary",
+                       [Clift_AllTypesMatch<["lhs", "rhs"]>,
+                        Clift_UnqualifiedTypeMatches<"lhs", "result">]> {
+
+  let arguments = (ins Clift_BoolType:$condition,
+                       AnyType:$lhs,
+                       AnyType:$rhs);
+
+  let results = (outs Clift_AnyNonConstType<Clift_AnyAddressableType>:$result);
+
+  let assemblyFormat = [{
+    $condition `,` $lhs `,` $rhs attr-dict `:`
+    custom<CliftOpOperandTypes>(type($lhs), type($rhs))
+  }];
+}
+
+def Clift_AggregateOp : Clift_ExpressionOp<"aggregate"> {
+  let arguments = (ins Variadic<AnyType>:$initializers);
+  let results = (outs Clift_AnyNonConstType<AnyType>:$result);
+
+  let hasCustomAssemblyFormat = 1;
+  let hasVerifier = 1;
+}
+
+#endif

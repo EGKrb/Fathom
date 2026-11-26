@@ -18,6 +18,7 @@
 #include <linuxpe>
 #include <algorithm>
 #include <vtil/arch>
+#include "native.hpp"
 
 namespace vmp
 {
@@ -35,8 +36,8 @@ namespace vmp
 		std::vector<uint8_t> raw;
 		uint64_t override_image_base = 0;
 
-		win::image_x64_t* get_pe_header() { return ( win::image_x64_t* ) raw.data(); }
-		win::nt_headers_x64_t* get_nt_headers() { return get_pe_header()->get_nt_headers(); }
+		vmp::image_t* get_pe_header() { return ( vmp::image_t* ) raw.data(); }
+		vmp::nt_headers_t* get_nt_headers() { return get_pe_header()->get_nt_headers(); }
 		uint64_t get_mapped_image_base() { return get_nt_headers()->optional_header.image_base; }
 		uint64_t get_real_image_base() { return override_image_base ? override_image_base : get_mapped_image_base(); }
 

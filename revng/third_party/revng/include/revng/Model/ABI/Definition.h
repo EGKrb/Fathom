@@ -1,0 +1,290 @@
+#pragma once
+
+//
+// This file is distributed under the MIT License. See LICENSE.md for details.
+//
+
+#include <vector>
+
+#include "revng/ADT/SortedVector.h"
+#include "revng/Model/ABI.h"
+#include "revng/Model/ABI/ScalarType.h"
+#include "revng/Model/ArrayType.h"
+#include "revng/Model/DefinedType.h"
+#include "revng/Model/PointerType.h"
+#include "revng/Model/PrimitiveType.h"
+#include "revng/Model/RawFunctionDefinition.h"
+#include "revng/Model/Register.h"
+#include "revng/Support/AlignmentHelpers.h"
+#include "revng/Support/CDataModel.h"
+#include "revng/Support/Debug.h"
+#include "revng/TupleTree/TupleTree.h"
+#include "revng/TupleTree/TupleTreeDiff.h"
+
+#include "revng/Model/ABI/Generated/Early/Definition.h"
+
+namespace abi {
+
+class Definition : public abi::generated::Definition {
+public:
+  using abi::generated::Definition::Definition;
+
+public:
+  static const Definition &get(model::ABI::Values ABI);
+
+public:
+  llvm::StringRef getName() const { return model::ABI::getName(ABI()); }
+  uint64_t getPointerSize() const { return model::ABI::getPointerSize(ABI()); }
+  model::Architecture::Values getArchitecture() const {
+    return model::ABI::getArchitecture(ABI());
+  }
+
+  [[nodiscard]] const ScalarType *findIntegerType(uint64_t Size) const;
+  [[nodiscard]] const ScalarType *findFloatingPointType(uint64_t Size) const;
+
+  const ScalarType &getWidestIntegerType() const;
+
+  /// Make sure current definition is valid.
+  bool verify() const debug_function;
+
+  /// Checks whether a given function type definition contradicts this ABI
+  ///
+  /// \note this is not an exhaustive check, so if it returns `false`,
+  /// the function definitely is NOT compatible, but if it returns `true`
+  /// it might either be compatible or not.
+  ///
+  /// \param RFT The function to check
+  ///
+  /// \return `false` if the function is definitely NOT compatible with the ABI,
+  ///         `true` if it might be compatible.
+  bool
+  isPreliminarilyCompatibleWith(const model::RawFunctionDefinition &RFT) const;
+
+  struct AlignmentInfo {
+    uint64_t Value;
+    bool IsNatural;
+  };
+  using AlignmentCache = std::unordered_map<const model::TypeDefinition *,
+                                            AlignmentInfo>;
+
+  /// Compute the natural alignment of the type in accordance with
+  /// the current ABI
+  ///
+  /// \note  It mirrors, `model::TypeDefinition::size()` pretty closely, see
+  /// documentation
+  ///        related to it (and usage of the coroutines inside this codebase
+  ///        in general) for more details on how it works.
+  ///
+  /// \param Type The type to compute the alignment of.
+  /// \param ABI The ABI used to determine alignment of the primitive components
+  ///        of the type
+  ///
+  /// \return either an alignment or a `std::nullopt` when it's not applicable.
+  template<model::AnyType AnyType>
+  std::optional<uint64_t> alignment(const AnyType &Type) const {
+    AlignmentCache Cache;
+    return alignment(Type, Cache);
+  }
+
+  template<model::AnyType AnyType>
+  std::optional<bool> hasNaturalAlignment(const AnyType &Type) const {
+    AlignmentCache Cache;
+    return hasNaturalAlignment(Type, Cache);
+  }
+
+  std::optional<uint64_t> alignment(const model::Type &Type,
+                                    AlignmentCache &Cache) const;
+  std::optional<uint64_t> alignment(const model::TypeDefinition &Type,
+                                    AlignmentCache &Cache) const;
+  std::optional<bool> hasNaturalAlignment(const model::Type &Type,
+                                          AlignmentCache &Cache) const;
+  std::optional<bool>
+  hasNaturalAlignment(const model::TypeDefinition &Definition,
+                      AlignmentCache &Cache) const;
+
+  [[nodiscard]] CDataModel getDataModel() const;
+
+public:
+  using RegisterSet = std::set<model::Register::Values>;
+
+  /// Try to deduce the specific "holes" in the provided register state
+  /// information.
+  ///
+  /// In short, when we have any information about arguments (for example, if
+  /// we know that `r2` is used as a function argument) - we can extrapolate it
+  /// to uncover more information about other register (in this example, that
+  /// `r0` and `r1` must also either be active *unused* arguments *or* padding).
+  /// This in information is embedded into the returned map.
+  ///
+  /// \returns `std::nullopt` if \ref State does not match the ABI (i.e. it
+  ///          marks a non-argument register (like `r5` in the example used) as
+  ///          an argument).
+  std::optional<RegisterSet>
+  tryDeducingArgumentRegisterState(RegisterSet &&Arguments) const;
+  std::optional<RegisterSet>
+  tryDeducingReturnValueRegisterState(RegisterSet &&ReturnValues) const;
+
+  /// A more strict version of \ref tryDeducingArgumentRegisterState.
+  ///
+  /// The difference is that `tryDeducingArgumentRegisterState` expects all
+  /// the input information to be 100% correct, with the most likely problem
+  /// being the fact that we didn't detect ABI correctly (the original function
+  /// uses one that differs from the one specified), while this one
+  /// (`enforceArgumentRegisterState`) believes the ABI first and foremost,
+  /// allowing this deduction to discard any contradicting data (for example
+  /// if `r5` is specified as an argument, it's silently changed to `No`
+  /// because ABI does not allow it to be).
+  RegisterSet enforceArgumentRegisterState(RegisterSet &&Arguments) const;
+  RegisterSet enforceReturnValueRegisterState(RegisterSet &&ReturnValues) const;
+
+private:
+  llvm::SmallVector<model::Register::Values, 8> argumentOrder() const {
+    llvm::SmallVector<model::Register::Values, 8> Result;
+
+    const auto &GPRs = GeneralPurposeArgumentRegisters();
+    const model::Register::Values &RVL = ReturnValueLocationRegister();
+    constexpr model::Register::Values Invalid = model::Register::Invalid;
+    if (RVL != Invalid && !llvm::is_contained(GPRs, RVL))
+      Result.emplace_back(RVL);
+
+    // Under the position-based ABIs we can actually restore the original order
+    // of register arguments by simply interleaving different register kinds.
+    //
+    // Namely (Macros are omitted for brevity):
+    // ```cpp
+    // // original (compiled to MSVC x64, which is position-based)
+    // void original(float f, int i);
+    //
+    // // ArgumentsArePositionBased: false
+    // void function_0x1000_Code_x86_64(generic64_t argument_0,
+    //                                  float64_t argument_1);
+    //
+    // // ArgumentsArePositionBased: true
+    // void function_0x1000_Code_x86_64(float64_t argument_0,
+    //                                  generic64_t argument_1);
+    // ```
+    if (ArgumentsArePositionBased()) {
+      for (auto [G, V] : llvm::zip_longest(GPRs, FloatArgumentRegisters())) {
+        if (G.has_value()) {
+          revng_assert(!llvm::is_contained(Result, *G));
+          Result.emplace_back(*G);
+        }
+        if (V.has_value()) {
+          revng_assert(!llvm::is_contained(Result, *V));
+          Result.emplace_back(*V);
+        }
+      }
+
+    } else {
+      for (auto Register : GPRs) {
+        revng_assert(!llvm::is_contained(Result, Register));
+        Result.emplace_back(Register);
+      }
+      for (auto Register : FloatArgumentRegisters()) {
+        revng_assert(!llvm::is_contained(Result, Register));
+        Result.emplace_back(Register);
+      }
+    }
+
+    return Result;
+  }
+
+  llvm::SmallVector<model::Register::Values, 8> returnValueOrder() const {
+    llvm::SmallVector<model::Register::Values, 8> Result;
+
+    for (auto Register : GeneralPurposeReturnValueRegisters())
+      if (!llvm::is_contained(Result, Register))
+        Result.emplace_back(Register);
+    for (auto Register : FloatReturnValueRegisters())
+      if (!llvm::is_contained(Result, Register))
+        Result.emplace_back(Register);
+
+    return Result;
+  }
+
+  template<std::ranges::sized_range InputContainer,
+           std::ranges::sized_range OutputContainer>
+  void assertSortingWasSuccessful(llvm::StringRef RegisterType,
+                                  const InputContainer &Input,
+                                  const OutputContainer &Output) const {
+    if (Input.size() != Output.size()) {
+      std::string Error = "Unable to sort " + std::string(RegisterType)
+                          + " registers.\nMost likely some of the present "
+                            "registers are not allowed to be used under "
+                            "the current ABI ("
+                          + std::string(getName())
+                          + ").\nList of registers to be sorted: [ ";
+      if (Input.size() != 0) {
+        constexpr llvm::StringRef Separator = ", ";
+        for (auto Register : Input)
+          Error += model::Register::getName(Register).str() + Separator.str();
+        Error.resize(Error.size() - Separator.size());
+      }
+
+      Error += " ]\nSorted list: [ ";
+      if (Output.size() != 0) {
+        constexpr llvm::StringRef Separator = ", ";
+        for (auto Register : Output)
+          Error += model::Register::getName(Register).str() + Separator.str();
+        Error.resize(Error.size() - Separator.size());
+      }
+      Error += " ]\n";
+      revng_abort(Error.c_str());
+    }
+  }
+
+public:
+  template<std::ranges::sized_range Container>
+  llvm::SmallVector<model::Register::Values, 8>
+  sortArguments(const Container &Registers) const {
+    SortedVector<model::Register::Values> Lookup;
+    {
+      auto Inserter = Lookup.batch_insert();
+      for (auto &&Register : Registers)
+        Inserter.insert(Register);
+    }
+
+    llvm::SmallVector<model::Register::Values, 8> Result;
+    for (auto Register : argumentOrder())
+      if (Lookup.contains(Register))
+        Result.emplace_back(Register);
+
+    assertSortingWasSuccessful("argument", Registers, Result);
+    return Result;
+  }
+
+  template<std::ranges::sized_range Container>
+  llvm::SmallVector<model::Register::Values, 8>
+  sortReturnValues(const Container &Registers) const {
+    SortedVector<model::Register::Values> Lookup;
+    {
+      auto Inserter = Lookup.batch_insert();
+      for (auto &&Register : Registers)
+        Inserter.insert(Register);
+    }
+
+    llvm::SmallVector<model::Register::Values, 8> Result;
+    for (auto Register : returnValueOrder())
+      if (Lookup.contains(Register))
+        Result.emplace_back(Register);
+
+    assertSortingWasSuccessful("return value", Registers, Result);
+    return Result;
+  }
+
+  /// Takes care of extending (padding) the size of a stack argument.
+  ///
+  /// \note This only accounts for the post-padding (extension).
+  ///       Pre-padding (offset) needs to be taken care of separately.
+  ///
+  /// \param Size The size of the argument without the padding.
+  ///
+  /// \return The size of the argument with the padding.
+  uint64_t paddedSizeOnStack(uint64_t Size) const {
+    return ::paddedSizeOnStack(Size, MinimumStackArgumentSize());
+  }
+};
+
+} // namespace abi
+
+#include "revng/Model/ABI/Generated/Late/Definition.h"

@@ -1,0 +1,224 @@
+//
+// This file is distributed under the MIT License. See LICENSE.md for details.
+//
+
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SetVector.h"
+#include "llvm/Analysis/IVUsers.h"
+#include "llvm/Analysis/InstructionSimplify.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/LoopPass.h"
+#include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/Analysis/ScalarEvolutionExpressions.h"
+#include "llvm/IR/CFG.h"
+#include "llvm/IR/Instruction.h"
+#include "llvm/Transforms/Utils/Local.h"
+#include "llvm/Transforms/Utils/LoopUtils.h"
+#include "llvm/Transforms/Utils/ScalarEvolutionExpander.h"
+#include "llvm/Transforms/Utils/SimplifyIndVar.h"
+
+#include "revng/ADT/RecursiveCoroutine.h"
+#include "revng/Support/IRHelpers.h"
+
+using namespace llvm;
+
+static Logger Log{ "loop-rewrite-with-canonical-induction-variable" };
+
+class LoopRewriteIV {
+public:
+  LoopRewriteIV(LoopInfo &LI) : LI(LI) {}
+
+  // This transforms the loop's iv in the canonical form.
+  bool run(Loop &L, IVUsers *IU, ScalarEvolution *SE, DominatorTree *DT);
+
+private:
+  bool isIntWithPowerOfTwoByteSize(const SCEV *S) const;
+
+private:
+  LoopInfo &LI;
+};
+
+// Return true when S contains a non-power-of-two sized integer.
+bool LoopRewriteIV::isIntWithPowerOfTwoByteSize(const SCEV *S) const {
+  return SCEVExprContains(S, [](const SCEV *S) {
+    if (auto *IntTy = dyn_cast<llvm::IntegerType>(S->getType())) {
+      auto IntSize = IntTy->getIntegerBitWidth();
+      return IntSize != 1 && IntSize != 8 && IntSize != 16 && IntSize != 32
+             && IntSize != 64 && IntSize != 128;
+    }
+    return false;
+  });
+}
+
+bool LoopRewriteIV::run(Loop &L,
+                        IVUsers *IU,
+                        ScalarEvolution *SE,
+                        DominatorTree *DT) {
+  bool Changed = false;
+
+  for (auto &UI : *IU) {
+    // Compute the final addrec to expand into code.
+    const SCEV *AR = IU->getReplacementExpr(UI);
+
+    // Evaluate the expression out of the loop, if possible.
+    if (!L.contains(UI.getUser())) {
+      const SCEV *ExitVal = SE->getSCEVAtScope(AR, L.getParentLoop());
+      if (SE->isLoopInvariant(ExitVal, &L))
+        AR = ExitVal;
+    }
+
+    // This expression won't be acceptable for the backend.
+    if (isIntWithPowerOfTwoByteSize(AR)) {
+      revng_log(Log,
+                "The expression has non-power-of-two integer: "
+                  << dumpToString(AR));
+      continue;
+    }
+
+    revng_log(Log, "Safe expression: " << dumpToString(AR));
+
+    Value *Op = UI.getOperandValToReplace();
+    Type *UseTy = Op->getType();
+    Instruction *User = UI.getUser();
+
+    revng_log(Log, "Operand: " << dumpToString(Op));
+    revng_log(Log, "User Of the value to be replaced: " << dumpToString(User));
+
+    // Determine the insertion point for this user. By default, insert
+    // immediately before the user. The SCEVExpander class will automatically
+    // hoist loop invariants out of the loop. For PHI nodes, there may be
+    // multiple uses, so compute the nearest common dominator for the
+    // incoming blocks.
+    Instruction *InsertPt = getInsertPointForUses(User, Op, DT, &LI);
+
+    // Now expand it into actual Instructions and patch it into place.
+    const DataLayout &DL = L.getHeader()->getModule()->getDataLayout();
+    SCEVExpander Rewriter(*SE,
+                          DL,
+                          "loop-rewrite-with-canonical-induction-variable");
+
+    if (!Rewriter.isSafeToExpandAt(AR, InsertPt)) {
+      revng_log(Log, "Not safe expression: " << dumpToString(AR));
+      continue;
+    }
+
+    Value *NewVal = Rewriter.expandCodeFor(AR, UseTy, InsertPt);
+
+    revng_log(Log,
+              "INDVARS: Rewrote IV `" << dumpToString(AR) << "` "
+                                      << dumpToString(Op) << '\n'
+                                      << "   into = " << dumpToString(NewVal));
+
+    if (NewVal != Op) {
+      // Inform ScalarEvolution that this value is changing. The change doesn't
+      // affect its value, but it does potentially affect which use lists the
+      // value will be on after the replacement, which affects ScalarEvolution's
+      // ability to walk use lists and drop dangling pointers when a value is
+      // deleted.
+      SE->forgetValue(User);
+
+      // Patch the new value into place.
+      if (Op->hasName())
+        NewVal->takeName(Op);
+      if (Instruction *NewValI = dyn_cast<Instruction>(NewVal))
+        NewValI->setDebugLoc(User->getDebugLoc());
+      User->replaceUsesOfWith(Op, NewVal);
+      UI.setOperandValToReplace(NewVal);
+
+      Changed = true;
+
+      // NOTE: The old IV is a dead value, so it will be deleted with `-dce`.
+    }
+  }
+
+  return Changed;
+}
+
+struct LoopRewriteWithCanonicalIVPass : public LoopPass {
+public:
+  static char ID;
+
+  LoopRewriteWithCanonicalIVPass() : LoopPass(ID) {}
+
+  bool runOnLoop(Loop *L, LPPassManager &LPM) override {
+    auto &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
+    auto &SE = getAnalysis<ScalarEvolutionWrapperPass>().getSE();
+    auto &IU = getAnalysis<IVUsersWrapperPass>().getIU();
+    auto &DT = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
+
+    auto &TheTargetTransformInfo = getAnalysis<TargetTransformInfoWrapperPass>()
+                                     .getTTI(*L->getHeader()->getParent());
+
+    LoopRewriteIV LRIV(LI);
+
+    bool Changed = LRIV.run(*L, &IU, &SE, &DT);
+    if (not Changed)
+      return false;
+
+    revng_assert(DT.verify(DominatorTree::VerificationLevel::Full));
+
+    SmallVector<WeakTrackingVH, 16> Dead;
+    Changed |= simplifyLoopIVs(L, &SE, &DT, &LI, &TheTargetTransformInfo, Dead);
+
+    if (not Dead.empty()) {
+      // simplifyLoopIVs does not guarantee that all Dead instructions are also
+      // trivially dead, so we must use the permissive version.
+      Changed |= RecursivelyDeleteTriviallyDeadInstructionsPermissive(Dead);
+    }
+
+    // `SimplifyInstructionsInBlock` can't break LCSSA for `L`, because it
+    // only changes blocks inside `L`, never its exit blocks.
+    // A block in `L`, though, can be the exit blocks of another loop, nested
+    // inside `L`. This can cause a PHINode in that block to be folded away,
+    // breaking LCSAA for the inner loop.
+    // Here we collect the loops whose exit blocks were simplified, and we
+    // later rebuild LCSAA form for them. This avoid calling the recursive
+    // `formLCSAARecusrsively`, which may be expensive.
+    SmallSetVector<Loop *, 4> ToRebuild;
+    for (BasicBlock *BB : L->getBlocks()) {
+      if (not SimplifyInstructionsInBlock(BB))
+        continue;
+
+      Changed = true;
+
+      // `BB` is an exit of every a loop whenever one of it's predecessors
+      // belongs to a loop that doesn't contain B.
+      for (BasicBlock *Predecessor : predecessors(BB)) {
+        for (Loop *Exited = LI.getLoopFor(Predecessor);
+             Exited != nullptr and not Exited->contains(BB);
+             Exited = Exited->getParentLoop())
+          ToRebuild.insert(Exited);
+      }
+    }
+
+    // Sort innermost loops first, because `formLCSSA` expects all the
+    // subloops of the loop it runs on to be in LCSSA already.
+    SmallVector<Loop *, 4> Ordered(ToRebuild.takeVector());
+    llvm::stable_sort(Ordered, [](const Loop *LHS, const Loop *RHS) {
+      return LHS->getLoopDepth() > RHS->getLoopDepth();
+    });
+
+    for (Loop *Exited : Ordered)
+      Changed |= formLCSSA(*Exited, DT, &LI, &SE);
+
+    return Changed;
+  }
+
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
+    AU.setPreservesCFG();
+    AU.addRequired<DominatorTreeWrapperPass>();
+    AU.addRequired<LoopInfoWrapperPass>();
+    AU.addRequired<IVUsersWrapperPass>();
+    AU.addRequired<ScalarEvolutionWrapperPass>();
+    AU.addRequired<TargetTransformInfoWrapperPass>();
+    getLoopAnalysisUsage(AU);
+  }
+};
+
+char LoopRewriteWithCanonicalIVPass::ID = 0;
+using Register = RegisterPass<LoopRewriteWithCanonicalIVPass>;
+static Register X("loop-rewrite-with-canonical-induction-variable",
+                  "Pass that simplifies loop induction variables by rewriting "
+                  "them in a canonical form.",
+                  false,
+                  false);

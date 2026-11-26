@@ -1,0 +1,33 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+---
+- Name: __start
+  Blocks:
+    - Successors:
+        - Type: DirectBranch
+        - Type: DirectBranch
+    - Successors:
+        - Type: FunctionCall
+    - Successors:
+        - Kind: FunctionEdge
+          Type: DirectBranch
+        - Type: DirectBranch
+    - Successors:
+        # TODO: we don't recognize this since we cannot track the jump table since
+        #       we cannot prove the value of the register containing it is
+        #       preserved across the function call
+        - Destination: ":Invalid"
+          Type: LongJmp
+    - Successors:
+        - Destination: ":Invalid"
+          Type: Return
+    - Successors:
+        - Destination: ":Invalid"
+          Type: LongJmp
+- Name: function
+  Blocks:
+    - Successors:
+        - Destination: ":Invalid"
+          Type: Return

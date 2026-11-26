@@ -35,8 +35,15 @@ Modifications in Fathom relative to upstream x64dbg
                            decompiler (vendored in decompiler/third_party/ghidra,
                            one change: see FATHOM.md there) on the debuggee.
 - analysis tools         : novmp (NoVmp + VTIL, novmp/, changed for today's
-                           VTIL: see novmp/third_party/FATHOM.md), angr.* and
-                           miasm.* (analysis/, miasm vendored unmodified).
+                           VTIL and ported to x86: see
+                           novmp/third_party/FATHOM.md), angr.* and miasm.*
+                           (analysis/, miasm vendored unmodified), remill.lift
+                           (remill/, remill vendored, changed for Windows: see
+                           remill/third_party/FATHOM.md), revng.decompile
+                           (revng/: rev.ng vendored and ported to Windows, see
+                           revng/third_party/FATHOM.md; rev.ng's fork of QEMU
+                           changed: revng/patches/qemu.patch), binja and the
+                           Binary Ninja plugin (binja/).
 - plugin installer       : ScyllaHide / xAnalyzer / PE-sieve / OllyDumpEx, with
                            SHA-256 verification.
 - build / release fixes  : minidump viewer CMAKE_SYSTEM_VERSION, unity build.
@@ -74,6 +81,24 @@ licenses and copyrights, and are not relicensed by Fathom:
 - VTIL (novmp/third_party/VTIL-Core)       BSD-3-Clause, Copyright Can Boluk
 - Keystone (linked into NoVmp.exe)         GPL-2.0 (or its commercial license)
 - linux-pe (NoVmp.exe)                     MIT, Copyright Can Boluk
+- remill (remill/third_party/remill)       Apache-2.0, Copyright Trail of Bits;
+                                           modified
+- LLVM 17 (linked into remill-lift-17.exe) Apache-2.0 WITH LLVM-exception
+- XED (remill-lift-17.exe)                 Apache-2.0, Copyright Intel Corporation
+- glog, gflags (remill-lift-17.exe)        BSD-3-Clause, Copyright Google Inc.
+- sleigh (remill-lift-17.exe)              Apache-2.0 (Ghidra)
+- rev.ng (revng/third_party/revng)         MIT files, GPL-2.0 as a whole, Copyright
+                                           rev.ng Labs; modified
+- QEMU / libtcg (rev.ng's fork; in the     GPL-2.0, Copyright the QEMU contributors;
+  rev.ng archive)                          modified (revng/patches/qemu.patch)
+- LLVM 16 (rev.ng's fork; linked into the  Apache-2.0 WITH LLVM-exception
+  rev.ng archive's programs and module)
+- nanobind (rev.ng's fork)                 BSD-3-Clause, Copyright Wenzel Jakob
+- Python and the packages rev.ng uses      PSF License and their own licenses
+  (rev.ng archive)                         (in its lib\python3.14\site-packages)
+- glib, Capstone, MinGW runtime (rev.ng    LGPL-2.1+, BSD-3-Clause, their licenses
+  archive, libtcg's DLLs)
+- Binary Ninja                             commercial, Vector 35 (NOT redistributed)
 - miasm (analysis/miasm)                   GPL-2.0-or-later, Copyright CEA; unmodified
 - angr                                     BSD-2-Clause (installed with pip,
                                            NOT redistributed)

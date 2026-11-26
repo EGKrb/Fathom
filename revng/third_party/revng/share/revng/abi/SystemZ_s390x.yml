@@ -1,0 +1,97 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+ABI: SystemZ_s390x
+
+ArgumentsArePositionBased: true
+OnlyStartDoubleArgumentsFromAnEvenRegister: false
+ArgumentsCanBeSplitBetweenRegistersAndStack: false
+BigArgumentsUsePointersToCopy: false
+NoRegisterArgumentsCanComeAfterStackOnes: false
+AllowPackedTypesInRegisters: false
+CalleeIsResponsibleForStackCleanup: false
+PackStackArguments: false
+TreatAllAggregatesAsPacked: false
+
+FloatingPointArgumentStrategy: NextRegisterFromTheDedicatedSet
+FloatingPointReturnValueStrategy: NextRegisterFromTheDedicatedSet
+
+StackAlignment: 8
+MinimumStackArgumentSize: 8
+
+UnusedStackArgumentBytes: 160
+
+MaximumGPRsPerAggregateArgument: 1
+MaximumGPRsPerAggregateReturnValue: 0
+MaximumGPRsPerScalarArgument: 1
+MaximumGPRsPerScalarReturnValue: 1
+
+GeneralPurposeArgumentRegisters:
+  - r2_systemz
+  - r3_systemz
+  - r4_systemz
+  - r5_systemz
+  - r6_systemz
+GeneralPurposeReturnValueRegisters:
+  - r2_systemz
+FloatArgumentRegisters:
+  - f0_systemz
+  - f2_systemz
+  - f4_systemz
+  - f6_systemz
+
+# NOTE: the order is intentional: every even register is used first, then
+#       every odd one.
+# - v24_systemz
+# - v26_systemz
+# - v28_systemz
+# - v30_systemz
+# - v25_systemz
+# - v27_systemz
+# - v29_systemz
+# - v31_systemz
+FloatReturnValueRegisters:
+  - f0_systemz
+# - v24_systemz
+CalleeSavedRegisters:
+  - r8_systemz
+  - r9_systemz
+  - r10_systemz
+  - r11_systemz
+  - r12_systemz
+  - r13_systemz
+  - r15_systemz
+  - f8_systemz
+  - f9_systemz
+  - f10_systemz
+  - f11_systemz
+  - f12_systemz
+  - f13_systemz
+
+ReturnValueLocationRegister: r2_systemz
+ReturnValueLocationIsReturned: true
+
+ScalarTypes:
+  - Kind: Integer
+    Size: 1
+  - Kind: Integer
+    Size: 2
+  - Kind: Integer
+    Size: 4
+  - Kind: Integer
+    Size: 8
+  - Kind: Integer
+    Size: 16
+    AlignedAt: 8
+  - Kind: FloatingPoint
+    Size: 4 # IEEE Binary32
+  - Kind: FloatingPoint
+    Size: 8 # IEEE Binary16
+PrimitiveAliases:
+  - Name: size_t
+    Kind: Unsigned
+    Size: 8
+  - Name: ptrdiff_t
+    Kind: Signed
+    Size: 8

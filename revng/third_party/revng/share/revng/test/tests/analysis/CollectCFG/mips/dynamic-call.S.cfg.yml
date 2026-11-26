@@ -1,0 +1,19 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+---
+- Name: __start
+  Entry: "1"
+  Blocks:
+    - ID: "1"
+      End: "2"
+      Successors:
+        - Destination: ":Invalid"
+          Type: FunctionCall
+          DynamicFunction: strlen
+    - ID: "2"
+      End: "3"
+      Successors:
+        - Destination: ":Invalid"
+          Type: Return

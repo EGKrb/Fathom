@@ -1,0 +1,639 @@
+//
+// This file is distributed under the MIT License. See LICENSE.md for details.
+//
+
+#include <queue>
+#include <type_traits>
+
+#include "llvm/BinaryFormat/ELF.h"
+#include "llvm/Support/Casting.h"
+#include "llvm/Support/Regex.h"
+#include "llvm/Support/Signals.h"
+#include "llvm/Support/raw_os_ostream.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include "revng/ADT/Concepts.h"
+#include "revng/Model/ABI/Definition.h"
+#include "revng/Model/Binary.h"
+#include "revng/Model/BinaryIdentifier.h"
+#include "revng/Model/PrimitiveType.h"
+#include "revng/Model/TypeSystemPrinter.h"
+#include "revng/Model/VerifyHelper.h"
+#include "revng/Support/CommandLine.h"
+
+#include "NamespaceBuilder.h"
+
+namespace {
+
+// TODO: all this logic should be moved to lib/TupleTree
+Logger FieldAccessedLogger("field-accessed");
+
+constexpr const char *StructNameHelpText = "regex that will make the program "
+                                           "assert when a model struct which "
+                                           "name matches this option is "
+                                           "accessed. NOTE: enable "
+                                           "field-accessed logger, optionally "
+                                           "break on onFieldAccess from gdb.";
+llvm::cl::opt<std::string> StructNameRegex("tracking-debug-struct-name",
+                                           llvm::cl::desc(StructNameHelpText),
+                                           llvm::cl::init(""),
+                                           llvm::cl::cat(MainCategory));
+constexpr const char *FieldNameHelpText = "regex that will "
+                                          "make the "
+                                          "program assert when "
+                                          "a field "
+                                          "of a model struct "
+                                          "which name "
+                                          "matches this "
+                                          "option accessed. NOTE: enable "
+                                          "field-accessed logger, optionally "
+                                          "break on onFieldAccess from gdb.";
+
+llvm::cl::opt<std::string> FieldNameRegex("tracking-debug-field-name",
+                                          llvm::cl::desc(FieldNameHelpText),
+                                          llvm::cl::init(""),
+                                          llvm::cl::cat(MainCategory));
+
+} // namespace
+
+/// This is disabled by default, so it's fine to use something like this
+/// internally to make debugging easier.
+void onFieldAccess(llvm::StringRef FieldName, llvm::StringRef StructName) {
+  if (FieldAccessedLogger.isEnabled()) {
+    FieldAccessedLogger << (StructName + "::" + FieldName + " accessed").str();
+    {
+      auto LLVMStream = FieldAccessedLogger.getAsLLVMStream();
+      llvm::sys::PrintStackTrace(*LLVMStream);
+    }
+
+    FieldAccessedLogger << DoLog;
+  }
+}
+
+void fieldAccessed(llvm::StringRef FieldName, llvm::StringRef StructName) {
+  if (StructNameRegex == "" and FieldNameRegex == "")
+    return;
+
+  llvm::Regex Regex(StructNameRegex);
+  if (StructNameRegex != "" and not Regex.match(StructName))
+    return;
+
+  llvm::Regex Regex2(FieldNameRegex);
+  if (FieldNameRegex != "" and not Regex2.match(FieldName))
+    return;
+
+  onFieldAccess(FieldName, StructName);
+}
+
+std::pair<model::TypeDefinition &, model::UpcastableType>
+model::Binary::recordNewType(model::UpcastableTypeDefinition &&T) {
+  revng_assert(!T.isEmpty());
+
+  // Assign progressive ID
+  if (T->ID() != uint64_t(-1)) {
+    std::string Error = "Types must not have an ID before they are a part of "
+                        "a binary.\n"
+                        + ::toString(T);
+    revng_abort(Error.c_str());
+  }
+
+  T->ID() = getAvailableTypeID();
+
+  auto &&[It, Success] = TypeDefinitions().insert(T);
+  revng_assert(Success);
+
+  return { **It, makeType((*It)->key()) };
+}
+
+uint64_t model::Binary::getAvailableTypeID() const {
+  if (TypeDefinitions().empty())
+    return 0;
+
+  return TypeDefinitions().rbegin()->get()->ID() + 1;
+}
+
+model::TypeDefinitionReference
+model::Binary::getTypeDefinitionReference(const model::TypeDefinition::Key
+                                            &Key) {
+  using Fields = TupleLikeTraits<model::Binary>::Fields;
+  TupleTreePath BinaryPath;
+  BinaryPath.push_back(static_cast<size_t>(Fields::TypeDefinitions));
+  BinaryPath.push_back(Key);
+  return model::TypeDefinitionReference{ this, BinaryPath };
+}
+
+model::TypeDefinitionReference
+model::Binary::getTypeDefinitionReference(const model::TypeDefinition::Key &Key)
+  const {
+  using Fields = TupleLikeTraits<model::Binary>::Fields;
+  TupleTreePath BinaryPath;
+  BinaryPath.push_back(static_cast<size_t>(Fields::TypeDefinitions));
+  BinaryPath.push_back(Key);
+  return model::TypeDefinitionReference{ this, BinaryPath };
+}
+
+model::BinaryIdentifierReference
+model::Binary::getBinaryIdentifierReference(const model::BinaryIdentifier::Key
+                                              &Key) {
+  using Fields = TupleLikeTraits<model::Binary>::Fields;
+  TupleTreePath BinaryPath;
+  BinaryPath.push_back(static_cast<size_t>(Fields::Binaries));
+  BinaryPath.push_back(std::get<0>(Key));
+  return model::BinaryIdentifierReference{ this, BinaryPath };
+}
+
+model::BinaryIdentifierReference
+model::Binary::getBinaryIdentifierReference(const model::BinaryIdentifier::Key
+                                              &Key) const {
+  using Fields = TupleLikeTraits<model::Binary>::Fields;
+  TupleTreePath BinaryPath;
+  BinaryPath.push_back(static_cast<size_t>(Fields::Binaries));
+  BinaryPath.push_back(std::get<0>(Key));
+  return model::BinaryIdentifierReference{ this, BinaryPath };
+}
+
+model::ABI::Values model::Binary::targetABI() const {
+  model::ABI::Values ABI = TargetABI();
+
+  if (ABI == model::ABI::Invalid) {
+    ABI = DefaultABI();
+
+    // TODO: We should do something smarter here:
+    //       * Pick a better fallback (maybe other model properties), and/or
+    //       * after exhausting all fallbacks, return invalid and additionally
+    //         check the availability of a valid ABI in `checkPrecondition`.
+    if (ABI == model::ABI::Invalid)
+      ABI = model::ABI::SystemV_x86_64;
+  }
+
+  return ABI;
+}
+
+CDataModel model::Binary::targetDataModel() const {
+  return abi::Definition::get(targetABI()).getDataModel();
+}
+
+namespace model {
+
+MetaAddressRangeSet Binary::executableRanges() const {
+  MetaAddressRangeSet ExecutableRanges;
+  struct Entry {
+    Entry(MetaAddress Start,
+          MetaAddress End,
+          const model::StructDefinition &Type) :
+      Start(Start), End(End), Type(Type) {}
+    MetaAddress Start;
+    MetaAddress End;
+    const model::StructDefinition &Type;
+  };
+  std::queue<Entry> Queue;
+
+  for (const model::Segment &Segment : Segments()) {
+    if (Segment.IsExecutable()) {
+      if (const auto *SegmentType = Segment.type()) {
+        Queue.emplace(Segment.StartAddress(),
+                      Segment.endDataAddress(),
+                      *SegmentType);
+      } else {
+        ExecutableRanges.add(Segment.StartAddress(), Segment.endDataAddress());
+      }
+    }
+  }
+
+  while (not Queue.empty()) {
+    auto QueueEntry = Queue.front();
+    Queue.pop();
+
+    // This function record an entry in ExecutableRanges, keeping into account
+    // what data is actually on disk. In practice, we avoid marking executable
+    // .bss.
+    auto Register = [&QueueEntry, &ExecutableRanges](const MetaAddress &Start,
+                                                     const MetaAddress &End) {
+      revng_assert(Start >= QueueEntry.Start);
+
+      if (Start >= QueueEntry.End) {
+        // Ignoring this range: it starts after the end of the data available on
+        // disk
+        return;
+      }
+
+      if (End > QueueEntry.End) {
+        // The range we're trying to add ends *after* the data available on
+        // disk. Limit the range accordingly.
+        ExecutableRanges.add(Start, QueueEntry.End);
+      } else {
+        ExecutableRanges.add(Start, End);
+      }
+    };
+
+    MetaAddress PaddingStart = QueueEntry.Start;
+    MetaAddress PaddingEnd;
+    model::VerifyHelper Helper;
+
+    revng_assert(QueueEntry.Type.CanContainCode());
+    for (const model::StructField &Field : QueueEntry.Type.Fields()) {
+      // Record the start address of field
+      MetaAddress FieldStart = QueueEntry.Start + Field.Offset();
+
+      // Update the end of padding
+      PaddingEnd = FieldStart;
+
+      // Register the padding as an executable range
+      if (PaddingStart != PaddingEnd)
+        Register(PaddingStart, PaddingEnd);
+
+      // Enqueue the field type for processing
+      //
+      // Note: this only considers struct fields, so if any other type is in
+      //       the way, the traversal stops.
+      if (const model::StructDefinition *Struct = Field.Type()->getStruct())
+        if (Struct->CanContainCode())
+          Queue.emplace(FieldStart, QueueEntry.End, *Struct);
+
+      // Set the next padding start
+      auto FieldSize = *rc_eval(Field.Type()->size(Helper));
+      PaddingStart = FieldStart + FieldSize;
+    }
+
+    // Record the trailing padding, if any
+    PaddingEnd = QueueEntry.Start + QueueEntry.Type.Size();
+    if (PaddingStart != PaddingEnd)
+      Register(PaddingStart, PaddingEnd);
+  }
+
+  return ExecutableRanges;
+}
+
+const model::AddressSpace &
+Binary::getAddressSpaceFor(const MetaAddress &Address) const {
+  static const model::AddressSpace Default;
+  if (const auto *Result = AddressSpaces().tryGet(Address.addressSpace()))
+    return *Result;
+  return Default;
+}
+
+namespace RelocationType {
+
+std::pair<Values, uint64_t>
+fromELFRelocation(model::Architecture::Values Architecture,
+                  uint32_t ELFRelocation) {
+  using namespace llvm::ELF;
+  switch (Architecture) {
+  case model::Architecture::x86:
+    switch (ELFRelocation) {
+    case R_386_RELATIVE:
+    case R_386_32:
+      return { Absolute, 4 };
+
+    case R_386_JUMP_SLOT:
+    case R_386_GLOB_DAT:
+      return { Absolute, 4 };
+
+    case R_386_COPY:
+      // TODO: use
+    default:
+      return { Invalid, 0 };
+    }
+
+  case model::Architecture::x86_64:
+    switch (ELFRelocation) {
+    case R_X86_64_RELATIVE:
+      return { Absolute, 8 };
+
+    case R_X86_64_JUMP_SLOT:
+    case R_X86_64_GLOB_DAT:
+    case R_X86_64_64:
+      return { Absolute, 8 };
+
+    case R_X86_64_32:
+      return { Absolute, 4 };
+
+    case R_X86_64_COPY:
+      // TODO: use
+    default:
+      return { Invalid, 0 };
+    }
+
+  case model::Architecture::arm:
+    switch (ELFRelocation) {
+    case R_ARM_RELATIVE:
+      return { Absolute, 4 };
+
+    case R_ARM_JUMP_SLOT:
+    case R_ARM_GLOB_DAT:
+    case R_ARM_ABS32:
+      return { Absolute, 4 };
+
+    case R_ARM_COPY:
+      // TODO: use
+    default:
+      return { Invalid, 0 };
+    }
+
+  case model::Architecture::aarch64:
+    switch (ELFRelocation) {
+    case R_AARCH64_RELATIVE:
+      return { Absolute, 8 };
+
+    case R_AARCH64_JUMP_SLOT:
+    case R_AARCH64_GLOB_DAT:
+    case R_AARCH64_ABS64:
+      return { Absolute, 8 };
+
+    default:
+      return { Invalid, 0 };
+    }
+
+  case model::Architecture::mips:
+  case model::Architecture::mipsel:
+    switch (ELFRelocation) {
+    case R_MIPS_REL32:
+      return { Absolute, 4 };
+
+    case R_MIPS_JUMP_SLOT:
+    case R_MIPS_GLOB_DAT:
+      return { Absolute, 4 };
+
+    case R_MIPS_COPY:
+      // TODO: use
+    default:
+      return { Invalid, 0 };
+    }
+
+  case model::Architecture::systemz:
+    switch (ELFRelocation) {
+    case R_390_RELATIVE:
+      return { Absolute, 8 };
+
+    case R_390_JMP_SLOT:
+    case R_390_GLOB_DAT:
+    case R_390_64:
+      return { Absolute, 8 };
+
+    case R_390_COPY:
+      // TODO: use
+    default:
+      return { Invalid, 0 };
+    }
+
+  default:
+    revng_abort();
+  }
+}
+
+bool isELFRelocationBaseRelative(model::Architecture::Values Architecture,
+                                 uint32_t ELFRelocation,
+                                 bool HasSymbol) {
+  using namespace llvm::ELF;
+  switch (Architecture) {
+  case model::Architecture::x86:
+    switch (ELFRelocation) {
+    case R_386_RELATIVE:
+      return true;
+
+    case R_386_32:
+    case R_386_JUMP_SLOT:
+    case R_386_GLOB_DAT:
+      return false;
+
+    case R_386_COPY:
+      // TODO: use
+
+    default:
+      return Invalid;
+    }
+
+  case model::Architecture::x86_64:
+    switch (ELFRelocation) {
+    case R_X86_64_RELATIVE:
+      return true;
+
+    case R_X86_64_JUMP_SLOT:
+    case R_X86_64_GLOB_DAT:
+    case R_X86_64_64:
+    case R_X86_64_32:
+      return false;
+
+    case R_X86_64_COPY:
+      // TODO: use
+
+    default:
+      return Invalid;
+    }
+
+  case model::Architecture::arm:
+    switch (ELFRelocation) {
+    case R_ARM_RELATIVE:
+      return true;
+
+    case R_ARM_JUMP_SLOT:
+    case R_ARM_GLOB_DAT:
+    case R_ARM_ABS32:
+      return false;
+
+    case R_ARM_COPY:
+      // TODO: use
+    default:
+      return Invalid;
+    }
+
+  case model::Architecture::aarch64:
+    return ELFRelocation == R_AARCH64_RELATIVE;
+
+  case model::Architecture::mips:
+  case model::Architecture::mipsel:
+    switch (ELFRelocation) {
+    case R_MIPS_REL32:
+      return not HasSymbol;
+
+    case R_MIPS_JUMP_SLOT:
+    case R_MIPS_GLOB_DAT:
+      return false;
+
+    case R_MIPS_COPY:
+      // TODO: use
+    default:
+      return Invalid;
+    }
+
+  case model::Architecture::systemz:
+    switch (ELFRelocation) {
+    case R_390_RELATIVE:
+      return true;
+
+    case R_390_JMP_SLOT:
+    case R_390_GLOB_DAT:
+    case R_390_64:
+      return false;
+
+    case R_390_COPY:
+      // TODO: use
+    default:
+      return Invalid;
+    }
+
+  default:
+    revng_abort();
+  }
+}
+
+std::pair<Values, uint64_t>
+formCOFFRelocation(model::Architecture::Values Architecture) {
+  switch (Architecture) {
+  case model::Architecture::x86:
+  case model::Architecture::arm:
+  case model::Architecture::mips:
+  case model::Architecture::mipsel:
+    return { Absolute, 4 };
+
+  case model::Architecture::x86_64:
+  case model::Architecture::aarch64:
+  case model::Architecture::systemz:
+    return { Absolute, 8 };
+  default:
+    revng_abort();
+  }
+}
+
+} // namespace RelocationType
+} // namespace model
+
+std::set<uint64_t> model::Binary::collectAllTypeSizes() const {
+  std::set<uint64_t> ByteSizes = {};
+  for (uint64_t ValidPrimitive : model::PrimitiveType::validSizes())
+    ByteSizes.emplace(ValidPrimitive);
+
+  VerifyHelper SizeCache;
+  for (const model::UpcastableTypeDefinition &Type : this->TypeDefinitions()) {
+    // This takes care of all the type definitions, meaning we don't have to
+    // look at defined types anymore.
+    if (std::optional<uint64_t> MaybeSize = Type->size(SizeCache))
+      ByteSizes.insert(MaybeSize.value());
+
+    for (const model::Type *Edge : Type->edges()) {
+      // Since primitives, pointers and defined types are already taken care of,
+      // we are only interested in arrays here.
+
+      // IMPORTANT: do not forget to update this after new type kinds are added!
+
+      while (!llvm::isa<model::PrimitiveType>(Edge)
+             && !llvm::isa<model::DefinedType>(Edge)) {
+        if (const auto *Pointer = llvm::dyn_cast<model::PointerType>(Edge)) {
+          // Keep going deeper on a pointer in case it's a pointer to an array.
+          Edge = Pointer->PointeeType().get();
+
+        } else if (const auto *Array = llvm::dyn_cast<model::ArrayType>(Edge)) {
+          if (std::optional<uint64_t> MaybeSize = Edge->trySize(SizeCache))
+            ByteSizes.insert(MaybeSize.value());
+
+          // Keep going deeper on an array in case it's a nested one.
+          Edge = Array->ElementType().get();
+
+        } else {
+          revng_abort("Unsupported type kind!");
+        }
+      }
+    }
+
+    if (const auto *RFT = Type->getRawFunction()) {
+      uint64_t ReturnTypeSize = 0;
+      for (const auto &RV : RFT->ReturnValues()) {
+        std::optional<uint64_t> MaybeSize = RV.Type()->trySize(SizeCache);
+        revng_assert(MaybeSize.has_value());
+        ReturnTypeSize += MaybeSize.value();
+      }
+
+      if (ReturnTypeSize)
+        ByteSizes.insert(ReturnTypeSize);
+    }
+  }
+
+  return ByteSizes;
+}
+
+void model::Binary::dumpTypeGraph(const char *Path) const {
+  DisableTracking Guard(*this);
+
+  std::error_code EC;
+  llvm::raw_fd_ostream Out(Path, EC);
+  if (EC)
+    revng_abort(EC.message().c_str());
+
+  TypeSystemPrinter TSPrinter(Out, *this);
+  TSPrinter.print();
+}
+
+void model::Function::dumpTypeGraph(const char *Path,
+                                    const model::Binary &Binary) const {
+  DisableTracking Guard(*this);
+  std::error_code EC;
+  llvm::raw_fd_ostream Out(Path, EC);
+  if (EC)
+    revng_abort(EC.message().c_str());
+
+  TypeSystemPrinter TSPrinter(Out, Binary);
+  TSPrinter.print(*this);
+}
+
+void model::TypeDefinition::dumpTypeGraph(const char *Path,
+                                          const model::Binary &Binary) const {
+  std::error_code EC;
+  llvm::raw_fd_ostream Out(Path, EC);
+  if (EC)
+    revng_abort(EC.message().c_str());
+
+  TypeSystemPrinter TSPrinter(Out, Binary);
+  TSPrinter.print(*this);
+}
+
+llvm::StringRef model::Architecture::getPCCSVName(Values V) {
+  switch (V) {
+  case model::Architecture::x86_64:
+    return "_rip";
+
+  case model::Architecture::x86:
+    return "_eip";
+
+  case model::Architecture::systemz:
+    return "_psw_addr";
+
+  case model::Architecture::arm:
+  case model::Architecture::aarch64:
+    return "_pc";
+
+  case model::Architecture::mips:
+  case model::Architecture::mipsel:
+    return "_PC";
+
+  default:
+    revng_abort();
+  }
+}
+
+template<ConstOrNot<model::Binary> BinaryType>
+static std::pair<ConstIf<std::is_const_v<BinaryType>, model::Segment> *,
+                 uint64_t>
+getSegmentForImpl(BinaryType &Binary, const MetaAddress &Address) {
+  revng_assert(Address.isValid());
+  revng_assert(Address.isGeneric());
+
+  for (auto &TheSegment : Binary.Segments()) {
+    if (TheSegment.contains(Address)) {
+      auto MaybeOffset = Address - TheSegment.StartAddress();
+      if (MaybeOffset.has_value())
+        return { &TheSegment, MaybeOffset.value() };
+    }
+  }
+
+  return { nullptr, 0 };
+}
+
+std::pair<const model::Segment *, uint64_t>
+model::Binary::getSegmentFor(const MetaAddress &Address) const {
+  return getSegmentForImpl(*this, Address);
+}
+
+std::pair<model::Segment *, uint64_t>
+model::Binary::getSegmentFor(const MetaAddress &Address) {
+  return getSegmentForImpl(*this, Address);
+}

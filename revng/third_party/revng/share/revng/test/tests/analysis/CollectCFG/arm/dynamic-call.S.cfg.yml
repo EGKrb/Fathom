@@ -1,0 +1,23 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+---
+- Blocks:
+    - Successors:
+        - Destination: ":Invalid"
+          Type: FunctionCall
+          DynamicFunction: strlen
+          IsTailCall: true
+- Name: _start
+  Blocks:
+    - Successors:
+        - Type: FunctionCall
+    - Successors:
+        - Type: Return
+- Name: use_plt
+  Blocks:
+    - Successors:
+        - Type: FunctionCall
+    - Successors:
+        - Type: Return

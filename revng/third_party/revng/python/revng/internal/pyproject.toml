@@ -1,0 +1,49 @@
+# This file is distributed under the MIT License. See LICENSE.md for details.
+
+[project]
+name = "revng_internal"
+description = "Internal revng modules"
+dynamic = ["version"]
+
+dependencies = [
+  # Requirements for revng_merge_dynamic
+  "pyelftools",
+  # Used in `revng.internal.support`
+  "xdg",
+  # CLI: revng model fetch-debuginfo
+  "httpx2[http2]",
+  "httpx-retries",
+  "pefile",
+  # CLI: revng model import idb
+  "python-idb",
+  # CLI: revng model compare
+  "networkx",
+  "grandiso",
+  # General dependencies
+  "revng",
+  "PyYAML",
+  "Jinja2",
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-data]
+revng = [
+  "internal/pipeline.yml",
+  "internal/py.typed",
+  "internal/_pipebox.so",
+  "internal/daemon/schema.graphql",
+  "internal/cli/_commands/generate_migrations/migration.py.tpl",
+  "internal/cli/_commands/llm_rename/prompt.tpl",
+  "internal/cli/_commands/project_agent/prompt.tpl",
+]
+
+[tool.setuptools]
+script-files = [
+  "scripts/revng",
+]
+
+[tool.setuptools.dynamic]
+version = {attr = "revng.internal.__version__"}
