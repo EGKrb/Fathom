@@ -8,6 +8,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-11-26
+
+### Added
+- Triton plugin (`Triton.dp64` / `Triton.dp32`, [`triton/`](triton/README.md)):
+  symbolic execution and taint analysis with
+  [Triton](https://github.com/JonathanSalwan/Triton) and Z3, through the
+  `sym.*` and `taint.*` commands, on the debuggee's current state (Triton
+  executes, the debuggee does not move) or on a recorded trace (`.ftt`,
+  `.trace64` / `.trace32`, replayed with its recorded values). Symbolic
+  registers and memory, `sym.run` to an address or to the return of the
+  function, expressions simplified by Z3 or in SMT-LIB, synthesis of obfuscated
+  expressions, backward slices, symbolic branches flipped (`sym.flip`), an
+  address reached (`sym.reach`) or a value solved (`sym.solve`), the solution
+  written into the debuggee (`sym.apply`), tainted / symbolic instructions
+  listed and commented in the disassembly. Triton is vendored unmodified,
+  Capstone 5.0.7 and Z3 4.16.0 are fetched with pinned hashes by
+  `triton\build.ps1`; `libz3.dll` ships next to the plugin.
+- Virtualized code in traces, the method of VMHunt (Xu et al., CCS 2018)
+  reimplemented in the Triton plugin: `vm.detect` finds the virtualized
+  snippets of a recorded trace (context save, dispatcher and handlers, context
+  restore), `vm.simplify n` replays one with symbolic registers and prints what
+  it computes, simplified by Z3 and synthesized by Triton.
+- Decompiler plugin (`Decompiler.dp64` / `.dp32`, [`decompiler/`](decompiler/README.md)):
+  `decompile [address[, file]]` with Ghidra's native decompiler, on the code
+  in the process memory; read-only memory constant (calls through the import
+  table resolved), functions named after x64dbg's symbols, string literals
+  commented; `decompile.raw` (p-code). Ghidra's decompiler, sleigh compiler and
+  x86 specifications are vendored and built (`decompiler\build.ps1`).
+- `novmp` (ExtraCmds, [`novmp/`](novmp/README.md)): VMProtect x64 3.0 - 3.5
+  devirtualization with NoVmp and VTIL, on the module image read from memory;
+  `vtildump` prints the lifted routines.
+- `angr.symbolic`, `angr.explore`, `angr.apply` (ExtraCmds,
+  [`analysis/`](analysis/README.md)): angr's path exploration from the current
+  thread's state (a minidump of the process), the input found written into
+  the debuggee. `miasm.ir`, `miasm.symb`: miasm's IR and symbolic execution of
+  a function of the debuggee (miasm vendored). `analysis.setup` installs the
+  Python packages.
+- Tests: `triton/tests/test_triton.py` (headless, x64 and x32, with a small
+  virtual machine on x32), `decompiler/tests/test_decompiler.py`,
+  `extracmds/tests/test_tools.py`.
+
 ## [1.9.0] - 2026-11-25
 
 ### Added
@@ -438,6 +479,7 @@ First release under the Fathom name.
 Fathom is a modified distribution of x64dbg; see [NOTICE](NOTICE) and
 [CONTRIBUTING](CONTRIBUTING.md).
 
+[1.10.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.10.0
 [1.9.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.9.0
 [1.8.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.8.0
 [1.7.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.7.0

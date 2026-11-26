@@ -26,6 +26,17 @@ Modifications in Fathom relative to upstream x64dbg
                            the debuggee run from a minidump in dumpulator
                            (vendored and modified, see emulator/README.md), with
                            emulated traces in x64dbg's trace format.
+- Triton plugin          : the sym.* / taint.* commands (triton/): symbolic
+                           execution and taint analysis with Triton (vendored
+                           unmodified in triton/third_party/Triton) on the
+                           debuggee or on a recorded trace, solved with Z3;
+                           vm.* (the method of VMHunt, reimplemented).
+- Decompiler plugin      : the decompile command (decompiler/): Ghidra's
+                           decompiler (vendored in decompiler/third_party/ghidra,
+                           one change: see FATHOM.md there) on the debuggee.
+- analysis tools         : novmp (NoVmp + VTIL, novmp/, changed for today's
+                           VTIL: see novmp/third_party/FATHOM.md), angr.* and
+                           miasm.* (analysis/, miasm vendored unmodified).
 - plugin installer       : ScyllaHide / xAnalyzer / PE-sieve / OllyDumpEx, with
                            SHA-256 verification.
 - build / release fixes  : minidump viewer CMAKE_SYSTEM_VERSION, unity build.
@@ -54,5 +65,19 @@ licenses and copyrights, and are not relicensed by Fathom:
 - minidump (emulator/minidump)             MIT, Copyright Tamas Jos (skelsec)
 - Unicorn, Capstone, pefile                GPL-2.0 / BSD / MIT (installed with pip,
                                            NOT redistributed)
+- Triton (triton/third_party/Triton)       Apache-2.0, Copyright Jonathan Salwan and
+                                           Quarkslab; unmodified
+- Z3 (libz3.dll of the Triton plugin)      MIT, Copyright Microsoft Corporation
+- Capstone (linked into the Triton plugin) BSD-3-Clause, Copyright Nguyen Anh Quynh
+- Ghidra (decompiler/third_party/ghidra)  Apache-2.0, see its NOTICE; modified
+- NoVmp (novmp/third_party/NoVmp)          GPL-3.0, Copyright Can Boluk; modified
+- VTIL (novmp/third_party/VTIL-Core)       BSD-3-Clause, Copyright Can Boluk
+- Keystone (linked into NoVmp.exe)         GPL-2.0 (or its commercial license)
+- linux-pe (NoVmp.exe)                     MIT, Copyright Can Boluk
+- miasm (analysis/miasm)                   GPL-2.0-or-later, Copyright CEA; unmodified
+- angr                                     BSD-2-Clause (installed with pip,
+                                           NOT redistributed)
 
-See plugins/THIRD-PARTY.md, hvkdfusion/LICENSE and emulator/LICENSE.* for details.
+See plugins/THIRD-PARTY.md, hvkdfusion/LICENSE, emulator/LICENSE.* and
+triton/third_party/Triton/LICENSE.txt for details; a release has the licenses of
+Triton, Z3 and Capstone in licenses\.

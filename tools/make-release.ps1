@@ -7,6 +7,9 @@ Prerequisites (see README.md, "Compiler"):
   - bin\x64 and bin\x32 built (cmake --build build64 / build32)
   - pybridge\build-x64\pybridge.dp64 and pybridge\build-x32\pybridge.dp32 built
   - extracmds\build-x64\ExtraCmds.dp64 and extracmds\build-x32\ExtraCmds.dp32 built
+  - triton\build-x64\Triton.dp64 and triton\build-x32\Triton.dp32 built (triton\build.ps1)
+  - decompiler\build-x64\Decompiler.dp64 and decompiler\build-x32\Decompiler.dp32 built (decompiler\build.ps1)
+  - novmp\build\NoVmp.exe and vtildump.exe built (novmp\build.ps1)
   - build-cross-x64\minidump.exe built (tools\build-minidump-viewer.ps1)
 
 Steps:
@@ -41,14 +44,17 @@ $required = @(
     'bin\x64\x64dbg.exe', 'bin\x64\headless.exe', 'bin\x32\x32dbg.exe', 'bin\x32\headless.exe', 'bin\Fathom.exe',
     'pybridge\build-x64\pybridge.dp64', 'pybridge\build-x32\pybridge.dp32',
     'extracmds\build-x64\ExtraCmds.dp64', 'extracmds\build-x32\ExtraCmds.dp32',
+    'triton\build-x64\Triton.dp64', 'triton\build-x32\Triton.dp32',
+    'decompiler\build-x64\Decompiler.dp64', 'decompiler\build-x32\Decompiler.dp32',
+    'novmp\build\NoVmp.exe', 'novmp\build\vtildump.exe',
     'build-cross-x64\minidump.exe'
 )
 foreach ($file in $required) {
     if (-not (Test-Path (Join-Path $root $file))) { throw "missing $file, build it first" }
 }
 $commit = (git -C $root rev-parse HEAD).Trim()
-if (git -C $root status --porcelain --untracked-files=no -- src pybridge/src) {
-    Write-Warning "uncommitted changes in src or pybridge\src: the binaries may not match commit $commit"
+if (git -C $root status --porcelain --untracked-files=no -- src pybridge/src triton/src decompiler/src extracmds/src) {
+    Write-Warning "uncommitted changes in src or a plugin's src: the binaries may not match commit $commit"
 }
 
 # 1. Translations (same source as the official CI)
@@ -74,6 +80,15 @@ Copy-Item (Join-Path $root 'pybridge\build-x64\pybridge.dp64') (Join-Path $main 
 Copy-Item (Join-Path $root 'pybridge\build-x32\pybridge.dp32') (Join-Path $main 'x32\plugins')
 Copy-Item (Join-Path $root 'extracmds\build-x64\ExtraCmds.dp64') (Join-Path $main 'x64\plugins')
 Copy-Item (Join-Path $root 'extracmds\build-x32\ExtraCmds.dp32') (Join-Path $main 'x32\plugins')
+# Triton (symbolic execution, taint analysis: sym.* commands) and Z3, which it loads from its own folder
+Copy-Item (Join-Path $root 'triton\build-x64\Triton.dp64'), (Join-Path $root 'triton\build-x64\libz3.dll') (Join-Path $main 'x64\plugins')
+Copy-Item (Join-Path $root 'triton\build-x32\Triton.dp32'), (Join-Path $root 'triton\build-x32\libz3.dll') (Join-Path $main 'x32\plugins')
+# Decompiler (Ghidra's decompiler: decompile command) and its sleigh specifications, in plugins\decompiler
+foreach ($arch in 'x64', 'x32') {
+    $ext = if ($arch -eq 'x64') { 'dp64' } else { 'dp32' }
+    Copy-Item (Join-Path $root "decompiler\build-$arch\Decompiler.$ext") (Join-Path $main "$arch\plugins")
+    Copy-Item -Recurse -Force (Join-Path $root "decompiler\build-$arch\decompiler") (Join-Path $main "$arch\plugins")
+}
 # Minidump viewer (tools\build-minidump-viewer.ps1): uses the Qt DLLs of x64dbg in x64\
 Copy-Item (Join-Path $root 'build-cross-x64\minidump.exe') (Join-Path $main 'x64')
 Copy-Item (Join-Path $root 'plugins\install-plugins.ps1') $main
@@ -110,6 +125,19 @@ foreach ($arch in 'x32', 'x64') {
     Copy-Item $hostExe (Join-Path $hosts "emulator_host_$arch.exe")
 }
 
+# NoVmp (novmp command of ExtraCmds: VMProtect devirtualization) and vtildump
+$novmp = Join-Path $main 'novmp'
+New-Item -ItemType Directory -Force $novmp | Out-Null
+Copy-Item (Join-Path $root 'novmp\build\NoVmp.exe'), (Join-Path $root 'novmp\build\vtildump.exe'), (Join-Path $root 'novmp\README.md') $novmp
+
+# angr / miasm (angr.* and miasm.* commands of ExtraCmds): scripts and miasm
+$analysis = Join-Path $main 'analysis'
+New-Item -ItemType Directory -Force $analysis | Out-Null
+foreach ($item in 'fathom_angr.py', 'fathom_miasm.py', 'requirements.txt', 'README.md', 'LICENSE.miasm', 'miasm') {
+    Copy-Item -Recurse (Join-Path $root "analysis\$item") $analysis
+}
+Get-ChildItem -Recurse -Directory $analysis -Filter '__pycache__' | Remove-Item -Recurse -Force
+
 # Licenses
 $licenses = Join-Path $main 'licenses'
 New-Item -ItemType Directory -Force $licenses | Out-Null
@@ -119,6 +147,21 @@ Invoke-Download 'https://raw.githubusercontent.com/ThunderCls/xAnalyzer/master/L
 Copy-Item (Join-Path $root 'plugins\THIRD-PARTY.md') $licenses
 Copy-Item (Join-Path $root 'emulator\LICENSE.dumpulator') (Join-Path $licenses 'dumpulator-LICENSE.txt')
 Copy-Item (Join-Path $root 'emulator\LICENSE.minidump') (Join-Path $licenses 'dumpulator-minidump-LICENSE.txt')
+# Triton plugin: Triton (Apache-2.0), Z3 (MIT) and Capstone (BSD), as built by triton\build.ps1
+Copy-Item (Join-Path $root 'triton\third_party\Triton\LICENSE.txt') (Join-Path $licenses 'Triton-LICENSE.txt')
+Copy-Item (Join-Path $root 'triton\build-x64\_deps\z3-src\LICENSE.txt') (Join-Path $licenses 'Z3-LICENSE.txt')
+Copy-Item (Join-Path $root 'triton\build-x64\_deps\capstone-src\LICENSE.TXT') (Join-Path $licenses 'Capstone-LICENSE.txt')
+# Decompiler plugin: Ghidra (Apache-2.0, with its NOTICE)
+Copy-Item (Join-Path $root 'decompiler\third_party\ghidra\LICENSE') (Join-Path $licenses 'Ghidra-LICENSE.txt')
+Copy-Item (Join-Path $root 'decompiler\third_party\ghidra\NOTICE') (Join-Path $licenses 'Ghidra-NOTICE.txt')
+# NoVmp (GPL-3.0), VTIL (BSD-3-Clause), and what NoVmp.exe links: Keystone (GPL-2.0), Capstone, linux-pe (MIT)
+Copy-Item (Join-Path $root 'novmp\third_party\NoVmp\LICENSE') (Join-Path $licenses 'NoVmp-LICENSE.txt')
+Copy-Item (Join-Path $root 'novmp\third_party\VTIL-Core\LICENSE.md') (Join-Path $licenses 'VTIL-LICENSE.txt')
+Copy-Item (Join-Path $root 'novmp\build\_deps\keystone-src\COPYING') (Join-Path $licenses 'Keystone-LICENSE.txt')
+Copy-Item (Join-Path $root 'novmp\build\_deps\capstone-src\LICENSE.TXT') (Join-Path $licenses 'Capstone-NoVmp-LICENSE.txt')
+Copy-Item (Join-Path $root 'novmp\build\_deps\linuxpe-src\LICENSE.md') (Join-Path $licenses 'linux-pe-LICENSE.txt') -ErrorAction SilentlyContinue
+# miasm (GPL-2.0-or-later)
+Copy-Item (Join-Path $root 'analysis\LICENSE.miasm') (Join-Path $licenses 'miasm-LICENSE.txt')
 # Libraries linked into minidump.exe
 $viewerLicenses = @{ 'json' = 'LICENSE.MIT'; 'cpp-httplib' = 'LICENSE'; 'linux-pe' = 'LICENSE.md'; 'udmp-parser' = 'LICENSE' }
 foreach ($name in $viewerLicenses.Keys) {

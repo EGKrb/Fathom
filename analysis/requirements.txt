@@ -1,0 +1,6 @@
+# Python packages of the angr.* and miasm.* commands of ExtraCmds (analysis.setup installs them)
+# miasm itself is vendored in analysis/miasm: its dependencies
+future
+pyparsing==3.3.2
+# angr: path exploration from the state of the debuggee (large: a few hundred MB)
+angr>=9.2

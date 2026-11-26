@@ -11,6 +11,8 @@
 - **`TraceExport`** : conversion des traces d'exécution en **JSON** ou **CSV** lisibles par n'importe quel outil, en traces texte **Tenet** / **Frinet** pour les explorer dans IDA Pro, ou au format **`.ftt`** indexé et compressé, avec une chronologie par thread et des instantanés mémoire ;
 - un onglet **Time Travel** et les commandes `tt.*` : naviguer dans une trace **en arrière comme en avant** sans quitter le débogueur — n'importe quel thread à n'importe quel instant, registres, mémoire reconstruite à cet instant, qui a écrit à cette adresse ;
 - un **émulateur** (commandes `emu.*`, [dumpulator](https://github.com/mrexodia/dumpulator)) : **appeler une fonction du processus débogué, ou faire avancer son thread, dans un émulateur** où les appels système et les exceptions de Windows sont implémentés en Python, à partir d'une copie de son état : le processus ne bouge pas, et le code émulé peut être enregistré pour l'onglet Time Travel ;
+- l'**exécution symbolique** avec [Triton](https://github.com/JonathanSalwan/Triton) (`sym.*`, `taint.*`) : sur le débogué ou sur une trace enregistrée, **résoudre l'entrée qui passe une vérification** et l'écrire dans le processus, inverser un branchement, simplifier des expressions obscurcies, suivre des données teintées ;
+- le **décompilateur de Ghidra** dans le débogueur (`decompile`), la **dévirtualisation de VMProtect** (`novmp`, NoVmp + VTIL), le code virtualisé trouvé et simplifié dans les traces (`vm.*`, la méthode de VMHunt), et **angr** / **miasm** sur l'état du débogué (`angr.*`, `miasm.*`) ;
 - **pybridge** : pilotage complet d'x64dbg **depuis Python** (breakpoints, pas à pas, registres, mémoire, traces) ;
 - des **modèles de scripts** prêts à l'emploi pour **`headless.exe`** (x64dbg sans interface) ;
 - un **visualiseur de dumps mémoire** (`.dmp`) et des commandes pratiques : **`.init`** (exécutable ou dump), **`.save`**, **`scylla_hide.enable` / `.disable` / `.status`** ;
@@ -35,14 +37,16 @@ Récupérez **`Fathom_<version>.zip`** depuis la [dernière release](https://git
 4. [TraceExport : exporter les traces](#traceexport--exporter-les-traces)
 5. [Time Travel : explorer une trace à reculons](#time-travel--explorer-une-trace-à-reculons)
 6. [Émulateur : exécuter le code du débogué sans l'exécuter](#émulateur--exécuter-le-code-du-débogué-sans-lexécuter)
-7. [pybridge : piloter x64dbg depuis Python](#pybridge--piloter-x64dbg-depuis-python)
-8. [Modèles pour headless.exe](#modèles-pour-headlessexe)
-9. [Commandes ajoutées et dumps mémoire](#commandes-ajoutées-et-dumps-mémoire)
-10. [HvKdFusion : débogage noyau et forensics mémoire Hyper-V](#hvkdfusion--débogage-noyau-et-forensics-mémoire-hyper-v)
-11. [Plugins inclus](#plugins-inclus)
-12. [Compiler soi-même](#compiler-soi-même)
-13. [Organisation du dépôt](#organisation-du-dépôt)
-14. [Licences et crédits](#licences-et-crédits)
+7. [Exécution symbolique : Triton](#exécution-symbolique--triton)
+8. [Décompilateur, dévirtualisation, angr, miasm](#décompilateur-dévirtualisation-angr-miasm)
+9. [pybridge : piloter x64dbg depuis Python](#pybridge--piloter-x64dbg-depuis-python)
+10. [Modèles pour headless.exe](#modèles-pour-headlessexe)
+11. [Commandes ajoutées et dumps mémoire](#commandes-ajoutées-et-dumps-mémoire)
+12. [HvKdFusion : débogage noyau et forensics mémoire Hyper-V](#hvkdfusion--débogage-noyau-et-forensics-mémoire-hyper-v)
+13. [Plugins inclus](#plugins-inclus)
+14. [Compiler soi-même](#compiler-soi-même)
+15. [Organisation du dépôt](#organisation-du-dépôt)
+16. [Licences et crédits](#licences-et-crédits)
 
 ---
 
@@ -66,12 +70,14 @@ Contenu de l'archive :
 ```
 release\
   Fathom.exe                 lanceur
-  x64\  x32\                 débogueur 64 / 32 bits, headless.exe, plugins\
+  x64\  x32\                 débogueur 64 / 32 bits, headless.exe, plugins\ (Triton.dp64 avec libz3.dll...)
   x64\minidump.exe           visualiseur de dumps mémoire (.dmp)
   translations\              interface traduite (dont le français : Options > Langue)
   themes\                    thème sombre
   pybridge\                  client Python, exemples, modèles headless
   emulator\                  émulateur des commandes emu.* (dumpulator, Python)
+  novmp\                     NoVmp.exe et vtildump.exe (commande novmp : dévirtualisation de VMProtect)
+  analysis\                  scripts angr et miasm (commandes angr.*, miasm.*), miasm
   install-plugins.ps1        installe/met à jour ScyllaHide, xAnalyzer, OllyDumpEx
   licenses\                  licences d'x64dbg et des plugins
   LISEZMOI.md                démarrage rapide
@@ -91,11 +97,13 @@ Un second fichier, `Fathom_<version>_symbols.zip`, contient les symboles de déb
 | Export des traces | binaire `.trace64` lisible uniquement par x64dbg ; export CSV possible seulement dans l'interface | commande `TraceExport` → JSON, CSV, Tenet, Frinet ou `.ftt`, registres étendus, chronologies par thread, aussi en script et dans `headless.exe` |
 | Time travel | vue des traces (liste des instructions, vers l'avant) | onglet Time Travel et commandes `tt.*` : n'importe quel thread à n'importe quel instant, mémoire reconstruite, exécution / écriture précédente |
 | Émulation | — | commandes `emu.*` : une fonction du débogué appelée, ou son thread poursuivi, dans un émulateur qui implémente les appels système de Windows (dumpulator), à partir d'un minidump de son état ; traces émulées dans Time Travel |
+| Exécution symbolique | — | plugin Triton (`sym.*`, `taint.*`) : exécution symbolique et analyse de teinte sur l'état du débogué ou une trace enregistrée, résolution Z3 écrite dans le débogué, synthèse d'expressions |
+| Décompilation, désobscurcissement | — | décompilateur de Ghidra sur la mémoire du processus (`decompile`), dévirtualisation de VMProtect (`novmp`), machines virtuelles dans les traces (`vm.*`), angr et miasm sur le débogué (`angr.*`, `miasm.*`) |
 | Automatisation | langage de script x64dbg, SDK C/C++ | + client Python (pybridge) + modèles headless avec lanceur |
 | Dumps mémoire (`.dmp`) | création seulement (`minidump`) | + visualiseur de dumps (`minidump.exe`), ouvert par `.init fichier.dmp` ; les dumps noyau et images mémoire brutes s'ouvrent dans wineye |
 | Noyau / machine entière | — (mode utilisateur seulement) | HvKdFusion : lecture/écriture/dump de la mémoire d'une VM Hyper-V, WinDbg/kd sur une VM, montage MemProcFS, REPL wineye (`hvkd`, `wineye`) |
-| Commandes | — | `.init`, `.save`, `scylla_hide.enable` / `.disable` / `.status`, `hvkd`, `hvkd.log`, `hvkd.check`, `wineye`, `tt.*`, `emu.*` (plugin ExtraCmds) |
-| Plugins | aucun | ScyllaHide et xAnalyzer inclus, pybridge et ExtraCmds inclus, OllyDumpEx via `install-plugins.ps1` |
+| Commandes | — | `.init`, `.save`, `scylla_hide.enable` / `.disable` / `.status`, `hvkd`, `hvkd.log`, `hvkd.check`, `wineye`, `tt.*`, `emu.*`, `novmp`, `angr.*`, `miasm.*` (plugin ExtraCmds), `sym.*`, `taint.*`, `vm.*` (plugin Triton), `decompile` (plugin Decompiler) |
+| Plugins | aucun | ScyllaHide et xAnalyzer inclus, pybridge, ExtraCmds, Triton et Decompiler inclus, OllyDumpEx via `install-plugins.ps1` |
 | Compilation | — | correctif d'un `using namespace std` qui cassait le *unity build* (`patternfind.cpp`) |
 
 Le cœur du débogueur n'est pas modifié : tout ce qui fonctionne dans x64dbg fonctionne ici à l'identique.
@@ -357,6 +365,58 @@ Test automatique : [`extracmds/tests/test_emulator.py`](extracmds/tests/test_emu
 
 ---
 
+## Exécution symbolique : Triton
+
+Le **plugin Triton** ([`triton/`](triton/README.md)) apporte dans Fathom [Triton](https://github.com/JonathanSalwan/Triton), la bibliothèque d'analyse binaire dynamique de Jonathan Salwan et Quarkslab : **exécution symbolique**, **analyse de teinte** (taint) et **résolution SMT** avec Z3, par les commandes `sym.*` et `taint.*`, sur deux sources :
+
+- **le débogué** (`sym.start`) : Triton part de l'état du thread courant, lit la mémoire du processus quand il en a besoin et exécute le code lui-même : le débogué **ne bouge pas** ;
+- **une trace enregistrée** (`sym.trace`, `.ftt` ou `.trace64` / `.trace32`) : chaque instruction enregistrée est rejouée avec les valeurs de la trace, ce qui permet d'analyser après coup une exécution réelle (appels d'API et autres threads compris).
+
+À quoi ça sert : trouver **l'entrée qui passe une vérification** (numéro de série, mot de passe, valeur magique) et l'écrire dans le débogué, prendre **l'autre côté d'un branchement**, voir **d'où vient une valeur**, **simplifier une arithmétique obscurcie** (MBA), **suivre une entrée** dans le code.
+
+```
+sym.start                       // à l'entrée de check(serial) : une session Triton sur l'état courant
+sym.mem rcx, 8, serial          // les 8 octets du numéro de série deviennent des variables serial_0..serial_7
+sym.run                         // Triton exécute check() jusqu'à son retour (le débogué reste ici)
+sym.solve eax, 1                // Z3 : le numéro pour lequel check() renvoie 1 (octets et texte dans le journal)
+sym.apply                       // écrit dans le débogué : check() exécutée nativement renvoie maintenant 1
+sym.branches                    // les branchements qui dépendaient du numéro ; sym.flip n prend l'autre côté
+sym.synth eax                   // (x ^ y) + 2 * (x & y)  ->  (y + x) & 0xffffffff
+```
+
+| Commande | Effet |
+|---|---|
+| `sym.start` / `sym.trace fichier[, seq[, thread]]` / `sym.stop` / `sym.info` | une session sur le thread courant du débogué / sur une trace à partir de l'instruction `seq` / fin / état |
+| `sym.reg reg[, nom]`, `sym.mem adresse, taille[, nom]`, `sym.memvar adresse, taille[, nom]` | rend symbolique un registre, des octets (une variable chacun) ou un entier de 1 à 8 octets |
+| `taint.reg`, `taint.mem`, `untaint.*`, `sym.concrete` | teinte / déteint, retire les données symboliques |
+| `sym.step [nombre]`, `sym.run [fin[, nombre]]` | exécute ; sans `fin`, jusqu'au retour de la fonction courante (débogué) ou à la fin de la trace du thread |
+| `sym.expr`, `sym.smt`, `sym.synth`, `sym.slice` `reg \| adresse[, taille]` | l'expression (simplifiée par Z3), en SMT-LIB, synthétisée, les instructions dont elle provient |
+| `sym.vars`, `sym.branches`, `sym.list [nombre]`, `sym.mark` / `sym.unmark` | variables symboliques, branchements symboliques, instructions sur des données symboliques / teintées (commentées dans le désassemblage) |
+| `sym.solve cible, valeur[, taille]`, `sym.flip n`, `sym.reach adresse`, `sym.apply` | l'entrée pour une valeur / l'autre côté d'un branchement / une adresse ; l'écrit dans le débogué |
+
+Les arguments sont évalués dans l'état de la session (les registres après `sym.run` ou à la position de la trace). Triton s'arrête aux appels système (il n'exécute pas le noyau : pour un programme entier, l'émulateur est l'outil) et suit un seul thread. Z3 4.16 est livré en `libz3.dll` à côté du plugin ; Triton, Capstone 5.0.7 et Z3 sont compilés et épinglés par [`triton/build.ps1`](triton/build.ps1). Documentation complète (en anglais) : [`triton/README.md`](triton/README.md).
+
+Le plugin trouve et simplifie aussi le **code virtualisé** dans les traces (`vm.detect`, `vm.simplify` : la méthode de VMHunt), voir la section suivante.
+
+Test automatique : [`triton/tests/test_triton.py`](triton/tests/test_triton.py) (headless, x64 et x32, 20 assertions : un numéro de série résolu, appliqué et accepté nativement, un branchement inversé, une expression MBA synthétisée en `x + y`, la teinte, une trace enregistrée rejouée et son numéro résolu).
+
+## Décompilateur, dévirtualisation, angr, miasm
+
+D'autres analyses du débogué **tel qu'il est maintenant** (dépaqueté, déchiffré, modifié), depuis le débogueur :
+
+- **Le décompilateur de Ghidra** ([`decompiler/`](decompiler/README.md), `Decompiler.dp64` / `.dp32`) : `decompile [adresse[, fichier]]` transforme la fonction en C avec le décompilateur natif de [Ghidra](https://github.com/NationalSecurityAgency/ghidra). Le code est lu dans la mémoire du processus, la mémoire en lecture seule est constante (les appels par la table d'imports vont à leur cible), les fonctions portent les noms des symboles et étiquettes d'x64dbg, et les chaînes littérales sont commentées en fin de ligne. `decompile.raw` affiche le p-code de Ghidra. Rien à installer : le décompilateur et les spécifications sleigh de Ghidra sont intégrés.
+- **Dévirtualisation de VMProtect** ([`novmp/`](novmp/README.md)) : `novmp [module]` lit l'image du module en mémoire et la donne à [NoVmp](https://github.com/can1357/NoVmp), qui remonte les machines virtuelles de VMProtect x64 3.0 – 3.5 en [VTIL](https://github.com/vtil-project/VTIL-Core) optimisé (`vtildump` les affiche dans le journal).
+- **Code virtualisé dans une trace** (la méthode de [VMHunt](https://github.com/s3team/VMHunt), dans le plugin Triton) : `vm.detect` trouve les portions virtualisées d'une trace enregistrée (sauvegarde du contexte, répartiteur, gestionnaires, restauration), `vm.simplify n` en rejoue une avec des registres symboliques et affiche ce qu'elle calcule, simplifié et synthétisé : sur la machine virtuelle du test, `(eax_in ^ 0x5a) + ebx_in * 3`.
+- **angr** ([`analysis/`](analysis/README.md)) : `angr.symbolic adresse, taille`, puis `angr.explore cible[, à éviter ...]` explore tous les chemins depuis l'état du thread courant (un minidump du processus chargé dans [angr](https://github.com/angr/angr)) et résout l'entrée qui atteint la cible ; `angr.apply` l'écrit dans le débogué.
+- **miasm** ([`analysis/`](analysis/README.md)) : `miasm.ir [adresse]` traduit une fonction dans l'IR de [miasm](https://github.com/cea-sec/miasm), `miasm.symb [adresse[, fin]]` l'exécute symboliquement et affiche ce qu'elle calcule, simplifié (`(x ^ y) + 2 * (x & y)` : `RAX = (RCX & RDX) * 2 + (RCX ^ RDX)`).
+
+angr et miasm demandent Python 3.10+ avec leurs paquets : `analysis.setup` les installe (miasm lui-même est intégré).
+
+Tests automatiques (headless, x64 et x32) : [`decompiler/tests/test_decompiler.py`](decompiler/tests/test_decompiler.py) (une boucle, un switch et ses chaînes, des appels d'API par la table d'imports), [`extracmds/tests/test_tools.py`](extracmds/tests/test_tools.py) (miasm, angr qui résout un numéro de série accepté nativement, NoVmp sur un module lu en mémoire, une routine VMProtect affichée par `vtildump`), et la partie `vm.*` de [`triton/tests/test_triton.py`](triton/tests/test_triton.py).
+
+**Non intégrés sous forme de code**, et pourquoi : [remill](https://github.com/lifting-bits/remill) demande une compilation complète de LLVM (l'utiliser sur les dumps que Fathom écrit : `.save`, `minidump`, les images que `novmp` lit en mémoire) ; [rev.ng](https://github.com/revng/revng) ne tourne que sous Linux (WSL, sur les mêmes fichiers) ; l'[API de Binary Ninja](https://github.com/Vector35/binaryninja-api) demande Binary Ninja (commercial), dont les plugins peuvent lire les traces JSON de Fathom (`TraceExport`). [Z3](https://github.com/Z3Prover/z3) est le solveur du plugin Triton (la version officielle 4.16, celle que Triton épingle), et Capstone y est en version 5 (Triton l'exige ; `capstone-next` est la version 6).
+
+---
 
 ## pybridge : piloter x64dbg depuis Python
 
@@ -611,7 +671,10 @@ cmake --build build32
 Les exécutables sont produits dans `bin\x64` et `bin\x32` (Qt et les dépendances sont copiés automatiquement).
 
 ```bat
-:: Plugins pybridge et ExtraCmds (même terminal que l'architecture voulue ; build-x32 en 32 bits)
+:: Plugins pybridge et ExtraCmds (même terminal que l'architecture voulue ; build-x32 en 32 bits) ;
+:: le plugin Triton : powershell -File triton\build.ps1 -Sdk <dossier pluginsdk> (les deux architectures)
+:: le plugin Decompiler : powershell -File decompiler\build.ps1 -Sdk <dossier pluginsdk>
+:: NoVmp et vtildump (64 bits) : powershell -File novmp\build.ps1
 cd pybridge
 cmake -B build-x64 -G Ninja -DCMAKE_BUILD_TYPE=Release -DX64DBG_SDK=<dossier pluginsdk>
 cmake --build build-x64
@@ -666,6 +729,15 @@ extracmds/src/extracmds.cpp          plugin ExtraCmds (.init, .save, scylla_hide
 extracmds/src/hvkdpanel.h, .cpp      onglet GUI HvKdFusion (Qt, 64 bits)
 extracmds/src/emucmds.cpp            commandes emu.* (émulateur)
 extracmds/tests/                     tests de Time Travel et de l'émulateur (headless)
+triton/                              plugin Triton (sym.*, taint.* : exécution symbolique, teinte)
+  src/                               commandes, session sur le débogué ou une trace .ftt
+  third_party/Triton/                Triton (Apache-2.0), intégré sans modification (FATHOM.md)
+  build.ps1, tests/                  compilation (Z3, Capstone épinglés), test headless
+decompiler/                          plugin Decompiler (decompile : le décompilateur de Ghidra sur le débogué)
+  third_party/ghidra/                décompilateur, zlib et spécifications sleigh x86 de Ghidra (Apache-2.0, FATHOM.md)
+novmp/                               NoVmp + VTIL (dévirtualisation de VMProtect), vtildump, build.ps1
+analysis/                            scripts angr / miasm des commandes angr.* et miasm.*, miasm (GPL-2.0+)
+extracmds/src/toolcmds.cpp           commandes novmp, angr.*, miasm.*, analysis.setup
 emulator/                            émulateur (dumpulator, Python)
   fathom_emu.py                      ligne de commande des commandes emu.*, écriture des traces x64dbg
   dumpulator/, minidump/             dumpulator (BSL-1.0) et son lecteur de minidumps (MIT), modifications dans README.md
@@ -695,6 +767,10 @@ README.x64dbg.md                     README officiel d'x64dbg
 - **xAnalyzer** : MIT — <https://github.com/ThunderCls/xAnalyzer>, par ThunderCls.
 - **OllyDumpEx** : freeware de Low Priority — <https://low-priority.appspot.com/ollydumpex/>, non redistribué.
 - **HvKdFusion** : GPL-3.0-or-later — <https://github.com/EGKrb/HvKdFusion>. Les composants qu'il pilote ne sont pas redistribués : LiveCloudKd (GPL-3.0), MemProcFS et LeechCore (AGPL-3.0), Dokany (LGPL/MIT), ntoseye, WinDbg (licence Microsoft).
+- **Plugin Decompiler** : Ghidra, Apache-2.0 — <https://github.com/NationalSecurityAgency/ghidra> (le décompilateur, son zlib et les spécifications x86, intégrés dans `decompiler/third_party/ghidra`).
+- **NoVmp** : GPL-3.0 — <https://github.com/can1357/NoVmp>, de Can Bölük ; **VTIL** : BSD-3-Clause — <https://github.com/vtil-project/VTIL-Core> ; liés dans `NoVmp.exe` : Capstone (BSD), Keystone (GPL-2.0), linux-pe (MIT).
+- **miasm** : GPL-2.0-or-later — <https://github.com/cea-sec/miasm> (intégré dans `analysis/miasm`) ; **angr** : BSD-2-Clause — <https://github.com/angr/angr> (installé par pip, non redistribué). La méthode de `vm.*` : VMHunt (Xu et al., CCS 2018), réimplémentée.
+- **Plugin Triton** : Triton, Apache-2.0 — <https://github.com/JonathanSalwan/Triton>, de Jonathan Salwan et Quarkslab (intégré sans modification dans `triton/third_party/Triton`) ; Z3, MIT — <https://github.com/Z3Prover/z3> (Microsoft ; `libz3.dll` inclus) ; Capstone, BSD-3-Clause — <https://github.com/capstone-engine/capstone> (lié au plugin).
 - **dumpulator** : Boost Software License 1.0 — <https://github.com/mrexodia/dumpulator>, de Duncan Ogilvie (mrexodia) ; son lecteur `minidump` : MIT, de Tamas Jos (skelsec). Nécessite Unicorn (GPL-2.0, installé par pip), Capstone (BSD) et pefile (MIT), non inclus.
 - **Visualiseur de dumps** : code d'x64dbg (GPL-3.0) ; bibliothèques [udmp-parser](https://github.com/0vercl0k/udmp-parser) (MIT), [cpp-httplib](https://github.com/yhirose/cpp-httplib) (MIT), [linux-pe](https://github.com/can1357/linux-pe) (BSD), [nlohmann/json](https://github.com/nlohmann/json) (MIT), Qt 5.12 (LGPL-3.0, DLL partagées avec x64dbg).
 

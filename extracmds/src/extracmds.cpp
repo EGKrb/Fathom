@@ -29,6 +29,7 @@
 
 #include "common.h"
 #include "emucmds.h"
+#include "toolcmds.h"
 #include "hvkdpanel.h"
 #include "ttmodel.h"
 #include "ttpanel.h"
@@ -755,6 +756,7 @@ extern "C" __declspec(dllexport) bool pluginit(PLUG_INITSTRUCT* initStruct)
     _plugin_registercommand(gPluginHandle, "tt.writenext", CbTtWriteNext, false);
     _plugin_registercommand(gPluginHandle, "tt.show", CbTtShow, false);
     EmuRegister(gPluginHandle);
+    ToolsRegister(gPluginHandle);
     return true;
 }
 

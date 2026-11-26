@@ -17,7 +17,7 @@ else()
     set(PLUGIN_EXT .dp32)
 endif()
 
-add_library(extracmds SHARED src/extracmds.cpp src/emucmds.cpp src/ttmodel.cpp)
+add_library(extracmds SHARED src/extracmds.cpp src/emucmds.cpp src/toolcmds.cpp src/ttmodel.cpp)
 target_compile_features(extracmds PRIVATE cxx_std_17)
 target_include_directories(extracmds PRIVATE "${X64DBG_SDK}")
 # Time Travel: the .ftt reader of x64dbg (src/dbg/ftt) and its LZ4 (lz4.dll ships with x64dbg)

@@ -127,6 +127,8 @@ namespace extracmds
     // Run "python -X utf8 <folder>\<script> <arguments>" without a window and write its output to the
     // log line by line, as it comes. Standard input is NUL, so an interactive script stops at its
     // first prompt instead of blocking x64dbg. Returns true when the script exits with code 0.
+    inline bool RunToLog(std::wstring commandLine, const std::wstring & folder, const std::wstring & name);
+
     inline bool RunPythonToLog(const std::wstring & folder, const std::wstring & script, const std::wstring & arguments)
     {
         auto python = FindPython();
@@ -135,7 +137,14 @@ namespace extracmds
             _plugin_logputs(EXTRACMDS_LOG_PREFIX "Python not found on the PATH (python.exe or py.exe)");
             return false;
         }
-        std::wstring commandLine = QuoteArgument(python) + L" -X utf8 " + QuoteArgument(folder + L"\\" + script) + L" " + arguments;
+        return RunToLog(QuoteArgument(python) + L" -X utf8 " + QuoteArgument(folder + L"\\" + script) + L" " + arguments, folder, script);
+    }
+
+    // Run a command line in folder without a window and write its output to the log line by line, as it
+    // comes (standard input: NUL). Returns true when it exits with code 0.
+    inline bool RunToLog(std::wstring commandLine, const std::wstring & folder, const std::wstring & name)
+    {
+        const std::wstring script = name;
         SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
         HANDLE readPipe = nullptr, writePipe = nullptr;
         if(!CreatePipe(&readPipe, &writePipe, &sa, 0))
@@ -158,7 +167,7 @@ namespace extracmds
         if(!started)
         {
             CloseHandle(readPipe);
-            _plugin_logprintf(EXTRACMDS_LOG_PREFIX "cannot start Python (error %u)\n", error);
+            _plugin_logprintf(EXTRACMDS_LOG_PREFIX "cannot start %s (error %u)\n", Utf16ToUtf8(script).c_str(), error);
             return false;
         }
         auto logLine = [](std::string line)
