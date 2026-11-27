@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [1.11.1] - 2026-11-27
+
+### Fixed
+- **TitanEngine, every thread stepped** (`TraceSetThreads all`): the debug loop kept the continue code of the
+  previous event. After an exception deferred with `DBG_REPLY_LATER` (another thread in a single-step), the next
+  `CREATE_THREAD` (or `LOAD_DLL`, `EXIT_THREAD`...) was replied `DBG_REPLY_LATER` too: Windows delivered the same
+  thread creation again and again (the thread added to the list each time) and the trace could hang. Every event
+  now starts with `DBG_CONTINUE`. This was the intermittent timeout of the `trace_all_threads` test (x32,
+  TitanEngine).
+
 ### Changed
 - **NoVmp and VMProtect versions**: a VM entry of VMProtect 3.6 – 3.11 (context saved by a mix of `push` and
   `mov [esp + off]`, no relocation load in the push block, self-reference by `lea`) is detected and reported
@@ -536,6 +546,7 @@ First release under the Fathom name.
 Fathom is a modified distribution of x64dbg; see [NOTICE](NOTICE) and
 [CONTRIBUTING](CONTRIBUTING.md).
 
+[1.11.1]: https://github.com/EGKrb/Fathom/releases/tag/v1.11.1
 [1.11.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.11.0
 [1.10.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.10.0
 [1.9.0]: https://github.com/EGKrb/Fathom/releases/tag/v1.9.0
