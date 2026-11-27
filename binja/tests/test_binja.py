@@ -19,10 +19,11 @@ import tempfile
 import types
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "binja"))
-sys.path.insert(0, str(ROOT / "binja" / "fathom_binja"))  # sync.py alone: the package needs binaryninja
-sys.path.insert(0, str(ROOT / "pybridge" / "python"))
+PLUGIN = Path(__file__).resolve().parents[1]  # binja\ in Fathom, the root of the fathom-binja repository
+sys.path.insert(0, str(PLUGIN))
+sys.path.insert(0, str(PLUGIN / "fathom_binja"))  # sync.py alone: the package needs binaryninja
+# pybridge's Python client: FATHOM_PYBRIDGE, else pybridge\python next to binja\ (Fathom's repository)
+sys.path.insert(0, os.environ.get("FATHOM_PYBRIDGE") or str(PLUGIN.parent / "pybridge" / "python"))
 
 import sync  # noqa: E402
 from x64dbg_bridge import Debugger  # noqa: E402

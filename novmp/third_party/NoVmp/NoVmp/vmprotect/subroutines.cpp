@@ -1,3 +1,5 @@
+#include <cstdlib>
+#include <cstdio>
 // Copyright (C) 2020 Can Boluk
 // 
 // This program is free software: you can redistribute it and/or modify
@@ -356,24 +358,76 @@ namespace vmp
 		{ vstate->img->get_real_image_base() + is[ 0 ].address + is[ 0 ].bytes.size() + 5, vmp::native_bits }
 		};
 
-		for ( int i = 0;; i++ )
+		// Fathom: dump the deobfuscated VMENTER stream to understand a VMProtect version
+		// whose context save sequence differs (NOVMP_DEBUG_VMENTER=1)
+		const bool dbg_vmenter = std::getenv( "NOVMP_DEBUG_VMENTER" ) != nullptr;
+		if ( dbg_vmenter )
 		{
-			// If PUSH R64
+			std::printf( "[vmenter %08x] deobfuscated stream (%zu):\n", rva_ep, is.stream.size() );
+			for ( size_t j = 0; j < is.stream.size() && j < 96; j++ )
+				std::printf( "  [%2zu] %s\n", j, is[ j ].to_string().c_str() );
+		}
+
+		// Fathom: VMProtect 3.0 - 3.5 saves the whole context with a clean run of PUSH r / PUSHF,
+		// terminated by the load of the relocation delta (MOV r32, imm32 / MOVABS r64, imm64), giving
+		// a fixed stack of (8 or 16) + 2 slots. From 3.6 on (3.6 - 3.11) the context is saved by a mix
+		// of PUSH r and MOV [RSP + off], r (so not all registers are pushed), the relocation delta is
+		// no longer loaded there, and the self-reference is a LEA of an absolute address instead of a
+		// MOV r, imm: the push run no longer describes the context. Detect that and report it, instead
+		// of asserting deep in the lifter on a wrong stack. (See Fathom's novmp/README.md.)
+		const bool is_context_store = [ & ]
+		{
+			for ( auto& [ _, ins ] : is.stream )
+				if ( ins.is( X86_INS_MOV, { X86_OP_MEM, X86_OP_REG } ) &&
+					 ins.operands[ 0 ].mem.base == vmp::REG_NSP &&
+					 ins.operands[ 0 ].mem.index == X86_REG_INVALID )
+					return true;
+			return false;
+		}();
+
+		// On x86 the reloc load is a bare "mov r32, imm32", which also matches a junk zeroing such as
+		// "mov edi, 0": require the immediate to be an address inside the image (its real or its
+		// preferred base). On x64 the reloc load is "movabs r64, imm64", unambiguous, kept as-is.
+		const uint64_t image_size = vstate->img->get_nt_headers()->optional_header.size_image;
+		const uint64_t real_base = vstate->img->get_real_image_base();
+		const uint64_t preferred_base = vstate->img->get_mapped_image_base();
+		auto is_image_address = [ & ] ( uint64_t value )
+		{
+			return ( value >= real_base && value < real_base + image_size ) ||
+				   ( value >= preferred_base && value < preferred_base + image_size );
+		};
+
+		int i_reloc = -1;
+		for ( int i = 0; i < ( int ) is.stream.size(); i++ )
+		{
+			// If PUSH R
 			if ( is[ i ].is( X86_INS_PUSH, { X86_OP_REG } ) )
 				stack.push_back( is[ i ].operands[ 0 ].reg );
-			// If PUSHFQ
+			// If PUSHF
 			if ( is[ i ].is( vmp::INS_PUSHF, {} ) )
 				stack.push_back( vtil::REG_FLAGS );
 
-			// End of pushed registers, reset stream
-			if ( vmp::is_reloc_load( is[ i ] ) )
+			// End of pushed registers: the relocation delta load (on x86, an immediate inside the image)
+			if ( vmp::is_reloc_load( is[ i ] ) &&
+				 ( !vmp::native_x86 || is_image_address( ( uint64_t ) is[ i ].operands[ 1 ].imm ) ) )
 			{
 				reg_reloc_delta = is[ i ].operands[ 0 ].reg;
+				i_reloc = i;
 				is.erase( i - 1 );
 				break;
 			}
 		}
-		fassert( stack.size() == ( ( vmp::native_x86 ? 8 : 16 ) + 2 ) );
+
+		if ( i_reloc == -1 || stack.size() != ( ( vmp::native_x86 ? 8u : 16u ) + 2u ) )
+		{
+			vtil::logger::error( is_context_store
+				   ? "VMProtect 3.6 - 3.11 VM entry (context saved by a mix of push and mov, "
+					 "self-reference by lea): NoVmp supports VMProtect 3.0 - 3.5. Run with "
+					 "NOVMP_DEBUG_VMENTER=1 to dump the VM entry."
+				   : "Unexpected VM entry layout (%u context slots, expected %u). Run with "
+					 "NOVMP_DEBUG_VMENTER=1 to dump the VM entry.",
+				   ( unsigned ) stack.size(), ( vmp::native_x86 ? 8u : 16u ) + 2u );
+		}
 
 		// Resolve the stack composition
 		//

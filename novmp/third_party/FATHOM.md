@@ -31,3 +31,11 @@ architecture is x86):
 
 VTIL, for x86: `VTIL-Architecture/routine/basic_block.cpp` assembles `vemit` with the x86 assembler when the
 routine's architecture is x86 (it only handled amd64).
+
+**VMProtect version handling** (`NoVmp/vmprotect/subroutines.cpp`, `parse_vmenter`):
+
+- on x86 the relocation load is `mov r32, imm32`, which also matches a junk `mov edi, 0`; it now requires the
+  immediate to be an address inside the image (its real or preferred base). x64's `movabs` is unchanged;
+- VMProtect 3.6 – 3.11 save the context at the VM entry by a mix of `push r` and `mov [rsp + off], r` and have no
+  such reloc load in the push block: that is detected and reported (`vtil::logger::error`, caught per VM) instead
+  of asserting on a wrong context. `NOVMP_DEBUG_VMENTER=1` dumps the deobfuscated VM-entry stream.

@@ -8,6 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- **NoVmp and VMProtect versions**: a VM entry of VMProtect 3.6 – 3.11 (context saved by a mix of `push` and
+  `mov [esp + off]`, no relocation load in the push block, self-reference by `lea`) is detected and reported
+  clearly, per VM, instead of asserting deep in the lifter; `NOVMP_DEBUG_VMENTER=1` dumps the deobfuscated
+  VM-entry stream. Fix for x86: the relocation load (`mov r32, imm32`) must be an address of the image, a junk
+  `mov edi, 0` was taken for it.
+- `analysis/requirements.txt` has `minidump` (the scripts work without the emulator next to them);
+  `binja/tests/test_binja.py` finds pybridge through `FATHOM_PYBRIDGE`.
+
+### Added
+- `novmp/tests/vmp_target.c` and `protect_vmp_target.ps1`: a test program virtualized with the VMProtect SDK and
+  protected with the official VMProtect demo (nothing protected is committed).
+- `analysis/tests/test_miasm.py` and `binja/tests/test_sync_offline.py`: tests without a dump or a debugger.
+- The components as repositories of their own: [fathom-novmp](https://github.com/EGKrb/fathom-novmp),
+  [fathom-remill](https://github.com/EGKrb/fathom-remill), [fathom-analysis](https://github.com/EGKrb/fathom-analysis),
+  [fathom-binja](https://github.com/EGKrb/fathom-binja) (1.0.0).
+
 ## [1.11.0] - 2026-11-26
 
 ### Added

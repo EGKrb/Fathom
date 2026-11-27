@@ -21,7 +21,8 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)  # miasm (vendored)
-# the minidump reader of Fathom's emulator (emulator/minidump), next to this folder in a release
+# the minidump reader of Fathom's emulator (emulator/minidump), next to this folder in a release; else the
+# minidump package installed by pip (requirements.txt)
 for candidate in (os.path.join(HERE, "..", "emulator"), os.environ.get("FATHOM_EMULATOR", "")):
     if candidate and os.path.isdir(os.path.join(candidate, "minidump")):
         sys.path.append(os.path.abspath(candidate))

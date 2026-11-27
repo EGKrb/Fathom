@@ -1,5 +1,7 @@
 # NoVmp: devirtualizing VMProtect from the debugger
 
+Also as a repository of its own, with its releases: [fathom-novmp](https://github.com/EGKrb/fathom-novmp).
+
 [NoVmp](https://github.com/can1357/NoVmp) by Can Bölük devirtualizes the virtual machines of **VMProtect 3.0 – 3.5** into optimized [VTIL](https://github.com/vtil-project/VTIL-Core) (the Virtual-machine Translation Intermediate Language). NoVmp itself only handles x64 programs; Fathom ports it to x86 as well and builds it twice, `NoVmp.exe` (x64) and `NoVmp32.exe` (x86), each with its `vtildump` (`vtildump.exe`, `vtildump32.exe`), which prints VTIL routines as text. The `novmp` command of ExtraCmds drives it on the debuggee:
 
 ```
@@ -24,7 +26,11 @@ VTIL chooses its native architecture when it is compiled (`_M_IX86`): built as a
 - the emulator, which runs the decryption blocks of the VM natively to compute the next instruction pointer: x86 assembly in the 32-bit build (`emulator/emulator.cpp`), checked by [`tests/emulator_test.cpp`](tests/emulator_test.cpp) on random blocks (registers, 8 / 16-bit parts, flags);
 - VTIL's x86 code generation in `basic_block` (`vemit` assembled with the x86 assembler).
 
-The x86 port is built and its emulator tested, but no VMProtect x86 program was available to check it end to end (VMProtect is commercial): the x86 handlers are matched as the x64 ones with 32-bit registers, which is how VMProtect generates them, and the VIP base is a setting rather than a certainty. The x64 lifter behaves as before.
+The x86 port is built, its emulator tested, and it was run against a program protected with the official **VMProtect 3.11 demo** (its own test program, [`tests/vmp_target.c`](tests/vmp_target.c), unpacked first): NoVmp32 finds the VM entries, so the x86 port's detection, image handling and VM-entry discovery work. The x64 lifter behaves as before.
+
+## VMProtect versions
+
+NoVmp devirtualizes **VMProtect 3.0 – 3.5**. The VMs of **3.6 – 3.11** are different: the context is saved at the VM entry by a mix of `push r` and `mov [rsp + off], r` (not every register is pushed), the relocation delta is no longer loaded in the push block, and the self-reference is a `lea` of an absolute address rather than a `mov r, imm`. Fathom's NoVmp **detects a 3.6 – 3.11 VM entry and reports it clearly** (instead of asserting deep in the lifter on a wrong context), and the `novmp` command surfaces that message. Lifting a 3.6 – 3.11 VM would require reworking the VM-entry parser, the context model and the handler analysis — a separate, large effort. Set `NOVMP_DEBUG_VMENTER=1` to dump a VM entry's deobfuscated stream (useful for that work). A **genuine x86 fix** came out of this: on x86 the relocation load is a bare `mov r32, imm32`, so NoVmp now requires its immediate to be an address inside the image, where before a junk `mov edi, 0` could be mistaken for it.
 
 ## Building
 
@@ -32,7 +38,7 @@ The x86 port is built and its emulator tested, but no VMProtect x86 program was 
 
 ## Test
 
-`extracmds/tests/test_tools.py` runs `novmp` in x64dbg and in x32dbg on a module (read from memory, given to NoVmp: no virtual machine in an unprotected program) and `vtildump` on [`tests/vmprotect.vtil`](tests/vmprotect.vtil), a routine lifted from VMProtect (VTIL's sample, from [`tests/vmprotect.c`](tests/vmprotect.c)). `emulator_test` checks the native emulator of each build. No VMProtect-protected program is part of the tests: VMProtect is commercial.
+`extracmds/tests/test_tools.py` runs `novmp` in x64dbg and in x32dbg on a module (read from memory, given to NoVmp: no virtual machine in an unprotected program) and `vtildump` on [`tests/vmprotect.vtil`](tests/vmprotect.vtil), a routine lifted from VMProtect (VTIL's sample, from [`tests/vmprotect.c`](tests/vmprotect.c)). `emulator_test` checks the native emulator of each build. No VMProtect-protected program is part of the tests: VMProtect is commercial, and a protected binary embeds its runtime. To test against VMProtect itself, [`tests/protect_vmp_target.ps1`](tests/protect_vmp_target.ps1) builds [`tests/vmp_target.c`](tests/vmp_target.c) (functions with known results, virtualized with the VMProtect SDK) and protects it with the VMProtect demo; NoVmp then runs on the unpacked image (NoVmp needs an unpacked module, as the `novmp` command reads it from memory).
 
 ## Licenses
 

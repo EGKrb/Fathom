@@ -1,5 +1,7 @@
 # angr and miasm on the debuggee
 
+Also as a repository of its own: [fathom-analysis](https://github.com/EGKrb/fathom-analysis) (the scripts on any minidump).
+
 The `angr.*` and `miasm.*` commands of ExtraCmds run [angr](https://github.com/angr/angr) and [miasm](https://github.com/cea-sec/miasm) on the debuggee **as it is now**: the command saves the process to a minidump (x64dbg's `minidump` command, in `%TEMP%\Fathom\analysis`, deleted afterwards) and the scripts of this folder load it, so unpacked and patched code is analyzed, and so is the state of the current thread.
 
 ## angr: path exploration

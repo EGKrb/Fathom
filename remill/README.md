@@ -1,5 +1,7 @@
 # remill: lifting the debuggee's code to LLVM IR
 
+Also as a repository of its own, with its releases: [fathom-remill](https://github.com/EGKrb/fathom-remill).
+
 [remill](https://github.com/lifting-bits/remill) (Trail of Bits) translates machine code into LLVM bitcode: each instruction becomes calls to its semantics, written in C++ and compiled to LLVM IR, over a `State` structure that holds the registers. Fathom builds it for Windows (remill targets Linux and macOS) and the `remill.lift` command of ExtraCmds lifts a function of the debuggee:
 
 ```

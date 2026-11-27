@@ -2,5 +2,7 @@
 # miasm itself is vendored in analysis/miasm: its dependencies
 future
 pyparsing==3.3.2
+# the minidump reader (in Fathom, the emulator's copy is used first)
+minidump>=0.0.21
 # angr: path exploration from the state of the debuggee (large: a few hundred MB)
 angr>=9.2

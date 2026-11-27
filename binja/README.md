@@ -1,5 +1,7 @@
 # Binary Ninja and Fathom
 
+Also as a repository of its own, with its releases: [fathom-binja](https://github.com/EGKrb/fathom-binja).
+
 Two ways to work with [Binary Ninja](https://binary.ninja) next to the debugger.
 
 ## The `binja` command (every edition, Free included)
